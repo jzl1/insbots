@@ -1,0 +1,9 @@
+SDK patch note (LEGACY clang-cl toolchain only)
+-----------------------------------------------
+The current MSVC build (compile_msvc.bat, v0.19.13) does NOT require this patch.
+
+If you rebuild with the old clang-cl toolchain instead, hl2sdk-episode1 needs
+one source edit in public/mathlib/math_base.h, lines 1083/1111/1160:
+
+  change:  movzx  eax, CtrlwdHolder
+  to:      mov    eax, CtrlwdHolder
