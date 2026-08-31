@@ -9,7 +9,7 @@ AI bot players for *Insurgency: Modern Infantry Combat* (Source 2006 / Episode 1
 **InsBots** is a standalone C++ Metamod:Source server plugin paired with a SourceMod companion plugin that brings full-featured, tactical AI bot players to *Insurgency: Modern Infantry Combat*.
 
 ### Key Features
-* **Realistic Tactical Combat:** Threat perception (vision and hearing), stance transitions (standing, crouching, prone), cyclic fire control, and tactical cover-seeking.
+* **Realistic Tactical Combat:** Threat perception (vision and hearing), stance transitions (standing, crouching), cyclic fire control, and tactical cover-seeking.
 * **Squad & Formation System:** Dynamic wedge formation escorting, velocity-oriented heading, collision avoidance (anti-boxing), and stance mimicry.
 * **Orders & Suppression:** Interactive radio orders menu (F3 / `!orders`), covering-fire suppression with real-time target occlusion pathing, and dry-magazine reloads.
 * **Objective-Driven AI:** Autonomous frontline push, territorial capture, dynamic sniper overwatch, and tactical smoke / grenade deployment.
@@ -95,3 +95,4 @@ Players can lead and direct AI squadmates using in-game chat or the SourceMod or
 | `!dismiss` | Dismiss fireteam back to autonomous objective patrol. |
 | `!mark` | Trace an eye-ray to mark a physical world surface for covering fire. |
 | `!request` / `ins_request_slot` | Request a class slot currently occupied by an AI bot. |
+
