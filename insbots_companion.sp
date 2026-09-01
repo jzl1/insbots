@@ -710,7 +710,7 @@ void SpawnCoveringFireMarker(int client, const float target[3], float duration =
     }
 
     // 2. Launch repeating 0.2s timer for duration tracking and automatic cleanup
-    g_hCoverFireMarkerTimer[client] = CreateTimer(0.2, Timer_UpdateCoveringFireMarker, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+    g_hCoverFireMarkerTimer[client] = CreateTimer(0.1, Timer_UpdateCoveringFireMarker, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public Action Hook_CoverFireMarkerSetTransmit(int entity, int client)
@@ -746,6 +746,23 @@ public Action Timer_UpdateCoveringFireMarker(Handle timer, any userid)
         g_hCoverFireMarkerTimer[client] = INVALID_HANDLE;
         RemoveCoveringFireMarker(client, true);
         return Plugin_Stop;
+    }
+
+    // Dynamic distance scaling: keep tactical chevron constant HUD-like screen height
+    int ent = g_iCoverFireMarker[client];
+    if (ent > 0 && IsValidEntity(ent))
+    {
+        float eyePos[3];
+        GetClientEyePosition(client, eyePos);
+        float dist = GetVectorDistance(eyePos, g_fCoverFireTarget[client]);
+
+        // Base scale 0.30 at <=300 units; scales up linearly with distance
+        float dynamicScale = 0.30 * (dist / 300.0);
+        if (dynamicScale < 0.30) dynamicScale = 0.30;
+        if (dynamicScale > 3.50) dynamicScale = 3.50;
+
+        SetVariantFloat(dynamicScale);
+        AcceptEntityInput(ent, "SetScale");
     }
 
     return Plugin_Continue;
