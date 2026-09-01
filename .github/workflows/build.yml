@@ -8,8 +8,13 @@ on:
         required: false
         default: false
         type: boolean
+      is_prerelease:
+        description: 'Mark as Pre-release'
+        required: false
+        default: true
+        type: boolean
       release_tag:
-        description: 'Release Tag (e.g. v0.20.0, required if creating release)'
+        description: 'Release Tag (leave blank to auto-generate v0.20.0_YYYYMMDD_HHMMSS)'
         required: false
         default: ''
         type: string
@@ -19,7 +24,28 @@ permissions:
 
 jobs:
   # ============================================================================
-  # 1. Build Windows (x86) -> .zip
+  # 1. Resolve Version Tag (Auto-generate UTC timestamp if blank)
+  # ============================================================================
+  prepare-version:
+    name: Resolve Version Tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.version_step.outputs.tag }}
+    steps:
+      - name: Generate Version Tag
+        id: version_step
+        run: |
+          TIMESTAMP=$(date -u +'%Y%m%d_%H%M%S')
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="v0.20.0_${TIMESTAMP}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Resolved release tag: ${TAG}"
+
+  # ============================================================================
+  # 2. Build Windows (x86) -> .zip
   # ============================================================================
   build-windows:
     name: Build Windows (x86)
@@ -55,7 +81,7 @@ jobs:
           Expand-Archive -Path "sourcemod.zip" -DestinationPath "sm_temp"
           & "sm_temp\addons\sourcemod\scripting\spcomp.exe" -i"sm_temp\addons\sourcemod\scripting\include" insbots_companion.sp -o"insbots_companion.smx"
 
-      - name: Package Windows Artifact (.zip)
+      - name: Prepare Windows Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "pkg_win/addons/sourcemod/plugins" -Force | Out-Null
@@ -74,7 +100,7 @@ jobs:
           path: insbots-windows-x86.zip
 
   # ============================================================================
-  # 2. Build Linux (i486) -> .tar.gz
+  # 3. Build Linux (i486) -> .tar.gz
   # ============================================================================
   build-linux:
     name: Build Linux (i486)
@@ -126,12 +152,12 @@ jobs:
           path: insbots-linux-i486.tar.gz
 
   # ============================================================================
-  # 3. Optional Release Publisher
+  # 4. Optional Release Publisher
   # ============================================================================
   publish-release:
     name: Publish Release
-    needs: [build-windows, build-linux]
-    if: ${{ inputs.create_release == true && inputs.release_tag != '' }}
+    needs: [prepare-version, build-windows, build-linux]
+    if: ${{ inputs.create_release == true }}
     runs-on: ubuntu-latest
 
     steps:
@@ -150,7 +176,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag }}
+          tag_name: ${{ needs.prepare-version.outputs.release_tag }}
+          name: ${{ needs.prepare-version.outputs.release_tag }}
+          prerelease: ${{ inputs.is_prerelease }}
           files: |
             release_assets/insbots-windows-x86.zip
             release_assets/insbots-linux-i486.tar.gz

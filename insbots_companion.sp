@@ -803,7 +803,6 @@ void ShowSquadOrdersMenu(int client)
         // No active squad: offer to recruit one
         menu.SetTitle("Squad System");
         menu.AddItem("R", "Recruit Fireteam (3 bots)");
-        menu.AddItem("X", "Close");
     }
     else
     {
@@ -833,10 +832,6 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
             ServerCommand("insbot squad %d 1", client);
             PrintToChat(client, "[Squad] Fireteam escort ACTIVATED. Squad Leader promotion granted.");
             return 0;
-        }
-        if (StrEqual(info, "X"))
-        {
-            return 0;  // just close
         }
 
         int orderId = StringToInt(info);
