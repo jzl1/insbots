@@ -902,9 +902,9 @@ public:
         const char *name = event->GetName();
         if (!name) return;
 
-        if (!strcmp(name, "round_reset") || !strcmp(name, "round_end"))
+        if (!strcmp(name, "round_end"))
             g_RoundFrozen = true;
-        else if (!strcmp(name, "round_unfrozen"))
+        else if (!strcmp(name, "round_reset") || !strcmp(name, "round_unfrozen"))
             g_RoundFrozen = false;
 
         if (insbot_debug.GetBool()
@@ -973,6 +973,7 @@ public:
         if (gpGlobals && s_bLevelActive)
         {
             float now = gpGlobals->curtime;
+
             if (now >= s_flNextRosterSweep)
             {
                 s_flNextRosterSweep = now + 0.5f;
