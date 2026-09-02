@@ -656,7 +656,7 @@ if (!_stricmp(sub, "coverocc")) { Cmd_CoverOcc(); return; }
     {
         if (argc < 4)
         {
-            Msg("[insbots] usage: insbot squad <leader_client_id> <order_id> (1=follow, 2=hold, 3=backup, 0=dismiss)\n");
+            Msg("[insbots] usage: insbot squad <leader_client_id> <order_id> (1=follow, 2=hold, 3=backup, 4=suppress, 5=moveto, 0=dismiss)\n");
             return;
         }
         int leaderIndex = atoi(engine->Cmd_Argv(2));

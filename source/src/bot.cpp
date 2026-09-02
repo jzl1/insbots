@@ -8326,6 +8326,52 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
         }
         return;
     }
+    else if (m_squadOrder == SQUAD_ORDER_MOVETO)
+    {
+        Vector wp = g_Bots.m_leaderWaypoint[m_squadLeaderIndex];
+        if (wp.LengthSqr() < 1.0f)
+        {
+            m_squadOrder = SQUAD_ORDER_FOLLOW;
+            return;
+        }
+
+        // Advance heading from leader pos to waypoint
+        Vector toWp = wp - leaderPos; toWp.z = 0.0f;
+        float baseYaw = (toWp.LengthSqr() > 1.0f)
+            ? atan2f(toWp.y, toWp.x) * (180.0f / 3.14159265f)
+            : m_squadFormationYaw;
+
+        // 3-Point Triangular Perimeter: Slot 0 = -60 deg, Slot 1 = +60 deg, Slot 2 = 180 deg (Rear)
+        float slotAng = baseYaw + (m_squadSlot == 0 ? -60.0f : (m_squadSlot == 1 ? 60.0f : 180.0f));
+        float slotRad = slotAng * (3.14159265f / 180.0f);
+        Vector slotPos = wp + Vector(cosf(slotRad) * 70.0f, sinf(slotRad) * 70.0f, 0.0f);
+        float distToSlot = xyd(pos, slotPos);
+
+        if (distToSlot > 40.0f)
+        {
+            MoveToward(slotPos, fwd, side, buttons, view);
+            if (distToSlot > 160.0f && fwd > 100.0f && !m_traversingLadder)
+                buttons |= INS_IN_SPRINT;
+        }
+        else
+        {
+            // Arrived at defensive slot: latch into sector hold
+            fwd = 0.0f; side = 0.0f;
+            if (!m_enemyIndex)
+            {
+                view.y = fmodf(slotAng + 360.0f, 360.0f);
+                view.x = 0.0f;
+                m_curAngles = view;
+            }
+
+            // Low-cover ducking check
+            if (m_chosenCoverIsLow || (insbot_cover_v2.GetBool() && distToSlot < 25.0f))
+            {
+                buttons |= IN_DUCK;
+            }
+        }
+        return;
+    }
     else if (m_squadOrder == SQUAD_ORDER_SUPPRESS)
     {
         if (now - m_squadOrderTime > 5.0f)
@@ -12021,9 +12067,9 @@ void CBotRoster::DispatchSquadOrder(int leaderIndex, int order, float wpX, float
 {
     if (leaderIndex <= 0 || leaderIndex > 64) return;
 
-    if (order == SQUAD_ORDER_SUPPRESS && (wpX != 0.0f || wpY != 0.0f || wpZ != 0.0f))
+    if ((order == SQUAD_ORDER_SUPPRESS || order == SQUAD_ORDER_MOVETO) && (wpX != 0.0f || wpY != 0.0f || wpZ != 0.0f))
         m_leaderWaypoint[leaderIndex] = Vector(wpX, wpY, wpZ);
-    else if (order != SQUAD_ORDER_SUPPRESS)
+    else if (order != SQUAD_ORDER_SUPPRESS && order != SQUAD_ORDER_MOVETO)
         m_leaderWaypoint[leaderIndex] = Vector(0, 0, 0);
 
     if (order == SQUAD_ORDER_NONE)
@@ -12099,6 +12145,10 @@ void CBotRoster::DispatchSquadOrder(int leaderIndex, int order, float wpX, float
             else if (order == SQUAD_ORDER_SUPPRESS)
             {
                 m_bots[i].Say(VOX_ENGAGE);
+            }
+            else if (order == SQUAD_ORDER_MOVETO)
+            {
+                m_bots[i].Say(VOX_COVER);
             }
         }
     }
@@ -12205,7 +12255,7 @@ void CBotRoster::RecallFollower(CInsBot *bot)
             bot->m_squadRespawnSlot = 0;
             m_leaderMemberDeathTime[L][S] = 0.0f;
 
-            bot->Say(VOX_MOVEUP);
+            bot->Say((activeOrder == SQUAD_ORDER_MOVETO) ? VOX_COVER : VOX_MOVEUP);
             if (engine)
             {
                 const char *slotNames[3] = { "Left Flank", "Right Flank", "Rear Guard" };

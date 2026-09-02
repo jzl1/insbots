@@ -35,6 +35,9 @@ int   g_iCoverFireMarker[MAXPLAYERS + 1];
 Handle g_hCoverFireMarkerTimer[MAXPLAYERS + 1];
 float  g_flCoverFireEndTime[MAXPLAYERS + 1];
 float  g_fCoverFireTarget[MAXPLAYERS + 1][3];
+int    g_iDefendMarker[MAXPLAYERS + 1];
+Handle g_hDefendMarkerTimer[MAXPLAYERS + 1];
+float  g_fDefendMarkerTarget[MAXPLAYERS + 1][3];
 
 // ============================================================================
 // 3. Slot Requester State & ConVars (Configurable)
@@ -103,6 +106,8 @@ public void OnMapStart()
         g_iCoverFireMarker[i] = 0;
         g_hCoverFireMarkerTimer[i] = INVALID_HANDLE;
         g_flCoverFireEndTime[i] = 0.0;
+        g_iDefendMarker[i] = 0;
+        g_hDefendMarkerTimer[i] = INVALID_HANDLE;
     }
     g_iBeamModel = PrecacheModel("sprites/glow01.spr");   // squad glow sprite model
     g_iBeamHalo = 0;
@@ -148,6 +153,7 @@ public Action Timer_DrawBeamRing(Handle timer, any bot)
 
             if (DispatchSpawn(ent))
             {
+                SetEdictFlags(ent, (GetEdictFlags(ent) & ~(FL_EDICT_ALWAYS | FL_EDICT_PVSCHECK)));
                 TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
 
                 SetVariantString("!activator");
@@ -459,6 +465,7 @@ public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
     if (client > 0 && client <= MaxClients && g_bSquadActive[client])
     {
         RemoveCoveringFireMarker(client);
+        RemoveDefendMarker(client);
         g_bSquadActive[client] = false;
         DemoteClientFromSquadLeader(client);
         ServerCommand("insbot squad %d 0", client);
@@ -473,6 +480,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 
     RemoveSquadSprite(victim);
     RemoveCoveringFireMarker(victim);
+    RemoveDefendMarker(victim);
 
     if (IsFakeClient(victim))
     {
@@ -557,6 +565,7 @@ public Action Command_Dismiss(int client, int args)
         return Plugin_Handled;
 
     RemoveCoveringFireMarker(client);
+    RemoveDefendMarker(client);
     g_bSquadActive[client] = false;
     DemoteClientFromSquadLeader(client);
     ServerCommand("insbot squad %d 0", client);
@@ -584,13 +593,21 @@ public Action Command_MarkTarget(int client, int args)
     Handle trace = TR_TraceRayFilterEx(eyePos, eyeAng, MASK_SOLID, RayType_Infinite, TraceFilter_DontHitSelf, client);
     if (TR_DidHit(trace))
     {
-        TR_GetEndPosition(endPos, trace);
-        g_fWaypointPos[client][0] = endPos[0];
-        g_fWaypointPos[client][1] = endPos[1];
-        g_fWaypointPos[client][2] = endPos[2];
-        g_bHasWaypoint[client] = true;
-        PrintToChat(client, "[Squad] Target marked at %.0f %.0f %.0f. Select Covering Fire to use it.",
-            endPos[0], endPos[1], endPos[2]);
+        int surfFlags = TR_GetSurfaceFlags(trace);
+        if (!(surfFlags & (SURF_SKY | SURF_SKY2D)))
+        {
+            TR_GetEndPosition(endPos, trace);
+            g_fWaypointPos[client][0] = endPos[0];
+            g_fWaypointPos[client][1] = endPos[1];
+            g_fWaypointPos[client][2] = endPos[2];
+            g_bHasWaypoint[client] = true;
+            PrintToChat(client, "[Squad] Target marked at %.0f %.0f %.0f. Select Covering Fire to use it.",
+                endPos[0], endPos[1], endPos[2]);
+        }
+        else
+        {
+            PrintToChat(client, "[Squad] No valid surface in range to mark. Aim at a wall or floor.");
+        }
     }
     else
     {
@@ -691,6 +708,7 @@ void SpawnCoveringFireMarker(int client, const float target[3], float duration =
 
         if (DispatchSpawn(ent))
         {
+            SetEdictFlags(ent, (GetEdictFlags(ent) & ~(FL_EDICT_ALWAYS | FL_EDICT_PVSCHECK)));
             float pos[3];
             pos[0] = target[0];
             pos[1] = target[1];
@@ -802,6 +820,123 @@ void RemoveCoveringFireMarker(int client, bool notifyEnded = false)
     }
 }
 
+
+// ============================================================================
+// 3D Waypoint & Strongpoint Defend Marker (Advance & Defend)
+// ============================================================================
+void SpawnDefendMarker(int client, const float target[3])
+{
+    if (client <= 0 || !IsClientInGame(client) || IsFakeClient(client))
+        return;
+
+    RemoveDefendMarker(client);
+    RemoveCoveringFireMarker(client);
+
+    g_fDefendMarkerTarget[client][0] = target[0];
+    g_fDefendMarkerTarget[client][1] = target[1];
+    g_fDefendMarkerTarget[client][2] = target[2];
+
+    int ent = CreateEntityByName("env_sprite");
+    if (ent > 0)
+    {
+        DispatchKeyValue(ent, "model", "materials/hud/indicators/defend.vmt");
+        DispatchKeyValue(ent, "rendercolor", "255 255 255");
+        DispatchKeyValue(ent, "renderamt", "255");
+        DispatchKeyValue(ent, "rendermode", "2");          // kRenderTransTexture
+        DispatchKeyValue(ent, "scale", "0.35");
+        DispatchKeyValue(ent, "spawnflags", "1");         // SF_SPRITE_STARTON
+
+        if (DispatchSpawn(ent))
+        {
+            SetEdictFlags(ent, (GetEdictFlags(ent) & ~(FL_EDICT_ALWAYS | FL_EDICT_PVSCHECK)));
+            float pos[3];
+            pos[0] = target[0];
+            pos[1] = target[1];
+            pos[2] = target[2] + 8.0; // lift +8u
+            TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+
+            g_iDefendMarker[client] = ent;
+            SDKHook(ent, SDKHook_SetTransmit, Hook_DefendMarkerSetTransmit);
+
+            // Visual beam pulse on mark placement (defensive cyan/blue)
+            if (g_iBeamModel > 0)
+            {
+                TE_SetupBeamRingPoint(pos, 10.0, 60.0, g_iBeamModel, 0, 0, 15, 0.4, 4.0, 0.0, {60, 180, 255, 220}, 10, 0);
+                TE_SendToClient(client);
+            }
+        }
+    }
+
+    g_hDefendMarkerTimer[client] = CreateTimer(0.1, Timer_UpdateDefendMarker, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Hook_DefendMarkerSetTransmit(int entity, int client)
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_iDefendMarker[i] == entity)
+        {
+            if (client == i)
+                return Plugin_Continue;   // Only squad leader sees the defend marker
+            return Plugin_Handled;        // Hidden from others
+        }
+    }
+    return Plugin_Continue;
+}
+
+public Action Timer_UpdateDefendMarker(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client <= 0 || !IsClientInGame(client) || !IsPlayerAlive(client) || !g_bSquadActive[client])
+    {
+        if (client > 0 && client <= MaxClients)
+        {
+            g_hDefendMarkerTimer[client] = INVALID_HANDLE;
+            RemoveDefendMarker(client);
+        }
+        return Plugin_Stop;
+    }
+
+    // Dynamic distance scaling: keep shield constant screen height
+    int ent = g_iDefendMarker[client];
+    if (ent > 0 && IsValidEntity(ent))
+    {
+        float eyePos[3];
+        GetClientEyePosition(client, eyePos);
+        float dist = GetVectorDistance(eyePos, g_fDefendMarkerTarget[client]);
+
+        float dynamicScale = 0.35 * (dist / 300.0);
+        if (dynamicScale < 0.35) dynamicScale = 0.35;
+        if (dynamicScale > 3.50) dynamicScale = 3.50;
+
+        SetVariantFloat(dynamicScale);
+        AcceptEntityInput(ent, "SetScale");
+    }
+
+    return Plugin_Continue;
+}
+
+void RemoveDefendMarker(int client)
+{
+    if (client <= 0 || client > MaxClients)
+        return;
+
+    if (g_hDefendMarkerTimer[client] != INVALID_HANDLE)
+    {
+        KillTimer(g_hDefendMarkerTimer[client]);
+        g_hDefendMarkerTimer[client] = INVALID_HANDLE;
+    }
+
+    if (g_iDefendMarker[client] > 0 && IsValidEntity(g_iDefendMarker[client]))
+    {
+        int ent = g_iDefendMarker[client];
+        g_iDefendMarker[client] = 0;
+        SDKUnhook(ent, SDKHook_SetTransmit, Hook_DefendMarkerSetTransmit);
+        AcceptEntityInput(ent, "Kill");
+    }
+    g_iDefendMarker[client] = 0;
+}
+
 public Action Command_SquadOrders(int client, int args)
 {
     ShowSquadOrdersMenu(client);
@@ -828,6 +963,7 @@ void ShowSquadOrdersMenu(int client)
         menu.AddItem("2", "Defend / Hold Position");
         menu.AddItem("3", "Need Backup");
         menu.AddItem("4", "Covering Fire");
+        menu.AddItem("5", "Advance & Defend");
         menu.AddItem("0", "Dismiss Squad");
     }
 
@@ -856,6 +992,7 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
         if (orderId == 0)
         {
             RemoveCoveringFireMarker(client);
+            RemoveDefendMarker(client);
             g_bSquadActive[client] = false;
             DemoteClientFromSquadLeader(client);
             ServerCommand("insbot squad %d 0", client);
@@ -872,17 +1009,22 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
             bool hasMark = false;
             if (TR_DidHit(trace))
             {
-                TR_GetEndPosition(endPos, trace);
-                g_fWaypointPos[client][0] = endPos[0];
-                g_fWaypointPos[client][1] = endPos[1];
-                g_fWaypointPos[client][2] = endPos[2];
-                g_bHasWaypoint[client] = true;
-                hasMark = true;
+                int surfFlags = TR_GetSurfaceFlags(trace);
+                if (!(surfFlags & (SURF_SKY | SURF_SKY2D)))
+                {
+                    TR_GetEndPosition(endPos, trace);
+                    g_fWaypointPos[client][0] = endPos[0];
+                    g_fWaypointPos[client][1] = endPos[1];
+                    g_fWaypointPos[client][2] = endPos[2];
+                    g_bHasWaypoint[client] = true;
+                    hasMark = true;
+                }
             }
             CloseHandle(trace);
 
             if (hasMark)
             {
+                RemoveDefendMarker(client);
                 ServerCommand("insbot squad %d %d %f %f %f", client, orderId,
                     g_fWaypointPos[client][0], g_fWaypointPos[client][1], g_fWaypointPos[client][2]);
                 PrintToChat(client, "[Squad] Covering Fire at marked position (%.0f %.0f %.0f)",
@@ -894,9 +1036,45 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
                 PrintToChat(client, "[Squad] No valid target. Aim at a surface and try again.");
             }
         }
+        else if (orderId == 5)
+        {
+            float eyePos[3], eyeAng[3], endPos[3];
+            GetClientEyePosition(client, eyePos);
+            GetClientEyeAngles(client, eyeAng);
+
+            Handle trace = TR_TraceRayFilterEx(eyePos, eyeAng, MASK_SOLID, RayType_Infinite, TraceFilter_DontHitSelf, client);
+            bool hasMark = false;
+            if (TR_DidHit(trace))
+            {
+                int surfFlags = TR_GetSurfaceFlags(trace);
+                if (!(surfFlags & (SURF_SKY | SURF_SKY2D)))
+                {
+                    TR_GetEndPosition(endPos, trace);
+                    g_fWaypointPos[client][0] = endPos[0];
+                    g_fWaypointPos[client][1] = endPos[1];
+                    g_fWaypointPos[client][2] = endPos[2];
+                    g_bHasWaypoint[client] = true;
+                    hasMark = true;
+                }
+            }
+            CloseHandle(trace);
+
+            if (hasMark)
+            {
+                RemoveCoveringFireMarker(client);
+                SpawnDefendMarker(client, endPos);
+                ServerCommand("insbot squad %d 5 %f %f %f", client, endPos[0], endPos[1], endPos[2]);
+                PrintToChat(client, "[Squad] Fireteam advancing to marked waypoint and establishing defensive perimeter.");
+            }
+            else
+            {
+                PrintToChat(client, "[Squad] No valid surface in range to mark. Aim at a wall or floor.");
+            }
+        }
         else
         {
             RemoveCoveringFireMarker(client);
+            RemoveDefendMarker(client);
             ServerCommand("insbot squad %d %d", client, orderId);
             char orderName[32];
             switch (orderId)

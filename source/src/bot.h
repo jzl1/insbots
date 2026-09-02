@@ -111,7 +111,8 @@ enum SquadOrder
     SQUAD_ORDER_FOLLOW = 1,   // Form up in wedge and follow leader
     SQUAD_ORDER_HOLD = 2,     // Hold current position / perimeter defense
     SQUAD_ORDER_BACKUP = 3,   // Break cover and sprint directly to leader
-    SQUAD_ORDER_SUPPRESS = 4  // Suppressive fire in leader's aim direction
+    SQUAD_ORDER_SUPPRESS = 4, // Suppressive fire in leader aim direction
+    SQUAD_ORDER_MOVETO = 5    // Advance to waypoint and hold defensive perimeter
 };
 class CInsBot
 {
