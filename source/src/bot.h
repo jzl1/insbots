@@ -625,6 +625,16 @@ public:
     bool  m_leaderActive[65];
     int   m_leaderSquadOrder[65];
     Vector m_leaderWaypoint[65];     // covering-fire marker position
+
+    // Squad-wide active threat sharing (Crossfire & Sector Assist)
+    int    m_leaderSquadThreatEnemy[65];     // Active enemy index shared across fireteam
+    Vector m_leaderSquadThreatPos[65];       // Position of the active shared threat
+    float  m_leaderSquadThreatTime[65];      // Timestamp of last detection/engagement
+
+    void   ReportSquadThreat(int leaderIndex, int enemyIdx, const Vector &pos, float now);
+    int    GetSquadThreat(int leaderIndex, float now, float maxAge, Vector &outPos) const;
+    bool   IsSquadContact(int leaderIndex, int enemyIdx, float now) const;
+    void   UpdateSquadLeaderThreats(float now);
     CInsBot *AddBot(const char *nameOrNull);
     CInsBot *AddBotToRole(int faction, int roleId);
     void     KickAll();

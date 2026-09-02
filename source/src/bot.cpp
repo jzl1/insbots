@@ -2731,11 +2731,67 @@ int CInsBot::FindEnemy()
         if (smokeBlocked) continue;
 
         // seen: report to team radio and remember
-        IntelReport(myTeam, i, pos, gpGlobals->curtime);
+        float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+        IntelReport(myTeam, i, pos, now);
 
         bestDist = scoreDistSq;
         best = i;
     }
+
+    // PASS 1 result: if an enemy was spotted in our assigned sector, report to squad and return
+    if (best != 0)
+    {
+        if (IsSquadFollower())
+        {
+            float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+            edict_t *be = engine->PEntityOfEntIndex(best);
+            IPlayerInfo *bpi = be ? playerinfomanager->GetPlayerInfo(be) : 0;
+            Vector bpos = bpi ? bpi->GetAbsOrigin() : myEye;
+            g_Bots.ReportSquadThreat(m_squadLeaderIndex, best, bpos, now);
+        }
+        return best;
+    }
+
+    // =========================================================================
+    // PASS 2: Squad Crossfire & Contact Assist
+    // If our sector is quiet, check if squadmates or leader are engaging an
+    // off-axis threat that we have clear line-of-sight to.
+    // =========================================================================
+    if (IsSquadFollower())
+    {
+        float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+        for (int i = 1; i <= gpGlobals->maxClients; i++)
+        {
+            if (!ValidEnemy(i)) continue;
+            if (!g_Bots.IsSquadContact(m_squadLeaderIndex, i, now)) continue;
+
+            edict_t *e = engine->PEntityOfEntIndex(i);
+            IPlayerInfo *pi = playerinfomanager ? playerinfomanager->GetPlayerInfo(e) : 0;
+            if (!pi) continue;
+
+            Vector pos = pi->GetAbsOrigin();
+            Vector chest = pos; chest.z += 45.0f;
+            Vector d = chest - myEye;
+            float distSq = d.x * d.x + d.y * d.y + d.z * d.z;
+
+            if (distSq > bestDist) continue;
+
+            Vector visiblePoint;
+            if (!FindVisibleTargetPoint(e, pos, visiblePoint)) continue;
+
+            bool smokeBlocked = false;
+            for (int k = 0; k < g_NumSmokeGrenades; k++)
+            {
+                float distToSmoke = DistanceToLineSegment(g_SmokeGrenades[k], myEye, visiblePoint);
+                if (distToSmoke < 140.0f) { smokeBlocked = true; break; }
+            }
+            if (smokeBlocked) continue;
+
+            bestDist = distSq;
+            best = i;
+        }
+    }
+
     return best;
 }
 
@@ -9419,6 +9475,10 @@ void CInsBot::ThinkAlive()
                 m_enemyLastPos = livePos;
                 // keep the team radio updated only while actually seen
                 IntelReport(m_info->GetTeamIndex(), m_enemyIndex, livePos, now);
+                if (m_squadLeaderIndex > 0)
+                {
+                    g_Bots.ReportSquadThreat(m_squadLeaderIndex, m_enemyIndex, livePos, now);
+                }
             }
         }
 
@@ -12203,6 +12263,119 @@ void CBotRoster::ResetPlayerSquads()
         }
         m_leaderActive[L] = false;
         m_leaderSquadOrder[L] = 0;
+        m_leaderWaypoint[L] = Vector(0, 0, 0);
+        m_leaderSquadThreatEnemy[L] = 0;
+        m_leaderSquadThreatPos[L] = Vector(0, 0, 0);
+        m_leaderSquadThreatTime[L] = 0.0f;
+    }
+}
+
+void CBotRoster::ReportSquadThreat(int leaderIndex, int enemyIdx, const Vector &pos, float now)
+{
+    if (leaderIndex <= 0 || leaderIndex > 64 || enemyIdx <= 0 || enemyIdx > 64) return;
+    m_leaderSquadThreatEnemy[leaderIndex] = enemyIdx;
+    m_leaderSquadThreatPos[leaderIndex] = pos;
+    m_leaderSquadThreatTime[leaderIndex] = now;
+}
+
+int CBotRoster::GetSquadThreat(int leaderIndex, float now, float maxAge, Vector &outPos) const
+{
+    if (leaderIndex <= 0 || leaderIndex > 64) return 0;
+    int enemyIdx = m_leaderSquadThreatEnemy[leaderIndex];
+    if (enemyIdx <= 0 || enemyIdx > 64) return 0;
+    if (now - m_leaderSquadThreatTime[leaderIndex] > maxAge) return 0;
+
+    edict_t *le = engine->PEntityOfEntIndex(leaderIndex);
+    IPlayerInfo *lpi = (le && !le->IsFree()) ? playerinfomanager->GetPlayerInfo(le) : 0;
+    int leaderTeam = lpi ? lpi->GetTeamIndex() : 0;
+    if (leaderTeam >= 1 && leaderTeam <= 2)
+    {
+        if (!IntelEnemyIsLive(leaderTeam, enemyIdx))
+            return 0;
+    }
+
+    outPos = m_leaderSquadThreatPos[leaderIndex];
+    return enemyIdx;
+}
+
+bool CBotRoster::IsSquadContact(int leaderIndex, int enemyIdx, float now) const
+{
+    if (leaderIndex <= 0 || leaderIndex > 64 || enemyIdx <= 0 || enemyIdx > 64) return false;
+
+    // 1. Direct active threat match within 3.5s
+    if (m_leaderSquadThreatEnemy[leaderIndex] == enemyIdx
+        && (now - m_leaderSquadThreatTime[leaderIndex] <= 3.5f))
+    {
+        edict_t *le = engine->PEntityOfEntIndex(leaderIndex);
+        IPlayerInfo *lpi = (le && !le->IsFree()) ? playerinfomanager->GetPlayerInfo(le) : 0;
+        int leaderTeam = lpi ? lpi->GetTeamIndex() : 0;
+        if (leaderTeam < 1 || leaderTeam > 2 || IntelEnemyIsLive(leaderTeam, enemyIdx))
+            return true;
+    }
+
+    // 2. Check if any fellow squadmate is actively targeting this enemy
+    for (int slot = 0; slot < 3; slot++)
+    {
+        int botIdx = m_leaderMemberBotIdx[leaderIndex][slot];
+        if (botIdx >= 0 && botIdx < Count())
+        {
+            if (m_bots[botIdx].m_state == BOT_ALIVE && m_bots[botIdx].m_enemyIndex == enemyIdx)
+                return true;
+        }
+    }
+    return false;
+}
+
+void CBotRoster::UpdateSquadLeaderThreats(float now)
+{
+    for (int L = 1; L <= gpGlobals->maxClients; L++)
+    {
+        if (L > 64 || !m_leaderActive[L]) continue;
+        edict_t *le = engine->PEntityOfEntIndex(L);
+        if (!le || le->IsFree() || !le->GetUnknown()) continue;
+        IPlayerInfo *lpi = playerinfomanager ? playerinfomanager->GetPlayerInfo(le) : 0;
+        if (!lpi || !lpi->IsConnected() || lpi->IsDead()) continue;
+
+        CBotCmd cmd = lpi->GetLastUserCommand();
+        Vector eyePos = lpi->GetAbsOrigin();
+        eyePos.z += (lpi->GetPlayerMaxs().z < 40.0f) ? 36.0f : 64.0f;
+
+        float yawRad = cmd.viewangles.y * (3.14159265f / 180.0f);
+        float pitchRad = -cmd.viewangles.x * (3.14159265f / 180.0f);
+        Vector fwd(cosf(pitchRad) * cosf(yawRad), cosf(pitchRad) * sinf(yawRad), sinf(pitchRad));
+
+        int myTeam = lpi->GetTeamIndex();
+        int bestEnemy = 0;
+        float bestDot = 0.965f; // ~15 deg cone
+        Vector bestPos(0, 0, 0);
+
+        for (int e = 1; e <= gpGlobals->maxClients; e++)
+        {
+            if (e == L) continue;
+            edict_t *ee = engine->PEntityOfEntIndex(e);
+            if (!ee || ee->IsFree() || !ee->GetUnknown()) continue;
+            IPlayerInfo *epi = playerinfomanager ? playerinfomanager->GetPlayerInfo(ee) : 0;
+            if (!epi || !epi->IsConnected() || !epi->IsPlayer() || epi->IsDead() || epi->IsObserver() || epi->IsHLTV()) continue;
+            if (epi->GetTeamIndex() == myTeam || epi->GetTeamIndex() <= 0) continue;
+
+            Vector ePos = epi->GetAbsOrigin() + Vector(0, 0, 45.0f);
+            Vector toE = ePos - eyePos;
+            float dist = sqrtf(toE.x * toE.x + toE.y * toE.y + toE.z * toE.z);
+            if (dist > 1800.0f || dist < 10.0f) continue;
+            toE.x /= dist; toE.y /= dist; toE.z /= dist;
+            float dot = fwd.x * toE.x + fwd.y * toE.y + fwd.z * toE.z;
+            if (dot > bestDot)
+            {
+                bestDot = dot;
+                bestEnemy = e;
+                bestPos = epi->GetAbsOrigin();
+            }
+        }
+
+        if (bestEnemy > 0)
+        {
+            ReportSquadThreat(L, bestEnemy, bestPos, now);
+        }
     }
 }
 
@@ -13146,6 +13319,7 @@ void CBotRoster::FrameUpdate(bool simulating)
         // every bot sees the same commitment set.
         UpdateCaptureCommitments(gpGlobals ? gpGlobals->curtime : 0.0f);
         UpdateSquadRoster(gpGlobals ? gpGlobals->curtime : 0.0f);
+        UpdateSquadLeaderThreats(gpGlobals ? gpGlobals->curtime : 0.0f);
     }
 
     for (int i = 0; i < 64; i++)
