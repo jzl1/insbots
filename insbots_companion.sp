@@ -32,10 +32,12 @@ Handle g_hGlowTimer[MAXPLAYERS + 1];
 float g_fWaypointPos[MAXPLAYERS + 1][3];
 bool  g_bHasWaypoint[MAXPLAYERS + 1];
 int   g_iCoverFireMarker[MAXPLAYERS + 1];
+int   g_iCoverFireMarkerAnchor[MAXPLAYERS + 1];
 Handle g_hCoverFireMarkerTimer[MAXPLAYERS + 1];
 float  g_flCoverFireEndTime[MAXPLAYERS + 1];
 float  g_fCoverFireTarget[MAXPLAYERS + 1][3];
 int    g_iDefendMarker[MAXPLAYERS + 1];
+int    g_iDefendMarkerAnchor[MAXPLAYERS + 1];
 Handle g_hDefendMarkerTimer[MAXPLAYERS + 1];
 float  g_fDefendMarkerTarget[MAXPLAYERS + 1][3];
 
@@ -104,9 +106,11 @@ public void OnMapStart()
         g_hGlowTimer[i] = INVALID_HANDLE;
         g_bHasWaypoint[i] = false;
         g_iCoverFireMarker[i] = 0;
+        g_iCoverFireMarkerAnchor[i] = 0;
         g_hCoverFireMarkerTimer[i] = INVALID_HANDLE;
         g_flCoverFireEndTime[i] = 0.0;
         g_iDefendMarker[i] = 0;
+        g_iDefendMarkerAnchor[i] = 0;
         g_hDefendMarkerTimer[i] = INVALID_HANDLE;
     }
     g_iBeamModel = PrecacheModel("sprites/glow01.spr");   // squad glow sprite model
@@ -695,6 +699,19 @@ void SpawnCoveringFireMarker(int client, const float target[3], float duration =
     g_fCoverFireTarget[client][2] = target[2];
     g_flCoverFireEndTime[client] = GetGameTime() + duration;
 
+    float pos[3];
+    pos[0] = target[0];
+    pos[1] = target[1];
+    pos[2] = target[2] + 8.0; // lift +8u off surface to prevent geometry clipping
+
+    int anchor = CreateEntityByName("info_target");
+    if (anchor > 0)
+    {
+        DispatchSpawn(anchor);
+        TeleportEntity(anchor, pos, NULL_VECTOR, NULL_VECTOR);
+        g_iCoverFireMarkerAnchor[client] = anchor;
+    }
+
     // 1. Spawn 3D tactical attack marker entity on physical target surface (materials/hud/indicators/attack.vmt)
     int ent = CreateEntityByName("env_sprite");
     if (ent > 0)
@@ -708,12 +725,13 @@ void SpawnCoveringFireMarker(int client, const float target[3], float duration =
 
         if (DispatchSpawn(ent))
         {
-            SetEdictFlags(ent, (GetEdictFlags(ent) & ~(FL_EDICT_ALWAYS | FL_EDICT_PVSCHECK)));
-            float pos[3];
-            pos[0] = target[0];
-            pos[1] = target[1];
-            pos[2] = target[2] + 8.0; // lift +8u off surface to prevent geometry clipping
             TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+
+            if (anchor > 0 && IsValidEntity(anchor))
+            {
+                SetVariantString("!activator");
+                AcceptEntityInput(ent, "SetParent", anchor);
+            }
 
             g_iCoverFireMarker[client] = ent;
             SDKHook(ent, SDKHook_SetTransmit, Hook_CoverFireMarkerSetTransmit);
@@ -809,6 +827,14 @@ void RemoveCoveringFireMarker(int client, bool notifyEnded = false)
     }
     g_iCoverFireMarker[client] = 0;
 
+    if (g_iCoverFireMarkerAnchor[client] > 0 && IsValidEntity(g_iCoverFireMarkerAnchor[client]))
+    {
+        int anchor = g_iCoverFireMarkerAnchor[client];
+        g_iCoverFireMarkerAnchor[client] = 0;
+        AcceptEntityInput(anchor, "Kill");
+    }
+    g_iCoverFireMarkerAnchor[client] = 0;
+
     if (IsClientInGame(client))
     {
         ClearNativeWaypoint(client);
@@ -836,6 +862,19 @@ void SpawnDefendMarker(int client, const float target[3])
     g_fDefendMarkerTarget[client][1] = target[1];
     g_fDefendMarkerTarget[client][2] = target[2];
 
+    float pos[3];
+    pos[0] = target[0];
+    pos[1] = target[1];
+    pos[2] = target[2] + 8.0; // lift +8u
+
+    int anchor = CreateEntityByName("info_target");
+    if (anchor > 0)
+    {
+        DispatchSpawn(anchor);
+        TeleportEntity(anchor, pos, NULL_VECTOR, NULL_VECTOR);
+        g_iDefendMarkerAnchor[client] = anchor;
+    }
+
     int ent = CreateEntityByName("env_sprite");
     if (ent > 0)
     {
@@ -848,12 +887,13 @@ void SpawnDefendMarker(int client, const float target[3])
 
         if (DispatchSpawn(ent))
         {
-            SetEdictFlags(ent, (GetEdictFlags(ent) & ~(FL_EDICT_ALWAYS | FL_EDICT_PVSCHECK)));
-            float pos[3];
-            pos[0] = target[0];
-            pos[1] = target[1];
-            pos[2] = target[2] + 8.0; // lift +8u
             TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
+
+            if (anchor > 0 && IsValidEntity(anchor))
+            {
+                SetVariantString("!activator");
+                AcceptEntityInput(ent, "SetParent", anchor);
+            }
 
             g_iDefendMarker[client] = ent;
             SDKHook(ent, SDKHook_SetTransmit, Hook_DefendMarkerSetTransmit);
@@ -922,7 +962,7 @@ void RemoveDefendMarker(int client)
         return;
 
     if (g_hDefendMarkerTimer[client] != INVALID_HANDLE)
-    {
+     {
         KillTimer(g_hDefendMarkerTimer[client]);
         g_hDefendMarkerTimer[client] = INVALID_HANDLE;
     }
@@ -935,6 +975,14 @@ void RemoveDefendMarker(int client)
         AcceptEntityInput(ent, "Kill");
     }
     g_iDefendMarker[client] = 0;
+
+    if (g_iDefendMarkerAnchor[client] > 0 && IsValidEntity(g_iDefendMarkerAnchor[client]))
+    {
+        int anchor = g_iDefendMarkerAnchor[client];
+        g_iDefendMarkerAnchor[client] = 0;
+        AcceptEntityInput(anchor, "Kill");
+    }
+    g_iDefendMarkerAnchor[client] = 0;
 }
 
 public Action Command_SquadOrders(int client, int args)
