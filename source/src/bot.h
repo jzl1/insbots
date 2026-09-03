@@ -545,6 +545,7 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     void  MaybeSmokeObjective(float now, const struct ObjPoint *op, float dist, int myTeam);
     void  MaybeSmokeEnemyGroup(float now, int myTeam);
     void  UpdateGrenade(float now, const Vector &target, int &buttons, QAngle &view);
+    bool  SwitchToWeapon(const char *weaponClass, bool force = true);
     void  RestoreGrenadeWeapon();
     bool  LowObstacleAhead(float yawDeg) const;   // curb/crate in front -> jump
     bool  LowCeilingAhead(float yawDeg) const;    // overhang at head height -> duck

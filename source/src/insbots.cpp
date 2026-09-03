@@ -230,7 +230,7 @@ CfgVar insbot_grenade_b("grenade_b", "weapon_rgd5", "fallback side-B grenade (us
 CfgVar insbot_grenade_usmc("grenade_usmc", "weapon_m67", "USMC grenade classname (assigned by faction, read per-map from the .imc2)");
 CfgVar insbot_grenade_iraqi("grenade_iraqi", "weapon_rgd5", "Iraqi grenade classname (assigned by faction, read per-map from the .imc2)");
 CfgVar insbot_grenade_cooldown("grenade_cooldown", "30", "min seconds between grenade throws");
-CfgVar insbot_grenade_min_range("grenade_min_range", "600", "only grenade enemies farther than this");
+CfgVar insbot_grenade_min_range("grenade_min_range", "350", "only grenade enemies farther than this");
 CfgVar insbot_grenade_chance("grenade_chance", "0.25", "chance to grenade (vs keep shooting) when the chance arises; low = prefer gunfights");
 CfgVar insbot_grenade_speed("grenade_speed", "1000", "grenade throw speed (units/s) used to compute the arc");
 CfgVar insbot_grenade_gravity("grenade_gravity", "600", "gravity used for the grenade arc (match sv_gravity)");
@@ -785,7 +785,11 @@ public:
                 }
                 
                 int offset_mywep = FindSendPropOffset(pClass->m_pTable, "m_hMyWeapons");
-                if (offset_mywep >= 0 && s_offset_m_hMyWeapons == -1) s_offset_m_hMyWeapons = offset_mywep;
+                if (offset_mywep >= 0 && s_offset_m_hMyWeapons == -1)
+                {
+                    s_offset_m_hMyWeapons = offset_mywep;
+                    Msg("[insbots] Found m_hMyWeapons at offset %d\n", offset_mywep);
+                }
                 int offset_wep = FindSendPropOffset(pClass->m_pTable, "m_hActiveWeapon");
                 if (offset_wep >= 0 && s_offset_m_hActiveWeapon == -1) s_offset_m_hActiveWeapon = offset_wep;
 
@@ -809,6 +813,9 @@ public:
             if (s_offset_m_hActiveWeapon >= 0 && s_offset_m_hActiveWeapon != INS_LINUX_M_H_ACTIVE_WEAPON)
                 Msg("[insbots] WARNING: Linux m_hActiveWeapon SendProp=%d, audited=%d\n",
                     s_offset_m_hActiveWeapon, INS_LINUX_M_H_ACTIVE_WEAPON);
+            if (s_offset_m_hMyWeapons >= 0 && s_offset_m_hMyWeapons != INS_LINUX_M_H_MY_WEAPONS)
+                Msg("[insbots] WARNING: Linux m_hMyWeapons SendProp=%d, audited=%d\n",
+                    s_offset_m_hMyWeapons, INS_LINUX_M_H_MY_WEAPONS);
             if (s_offset_m_iClip1 >= 0 && s_offset_m_iClip1 != INS_LINUX_M_I_CLIP)
                 Msg("[insbots] WARNING: Linux m_iClip SendProp=%d, audited=%d\n",
                     s_offset_m_iClip1, INS_LINUX_M_I_CLIP);
@@ -817,17 +824,24 @@ public:
             s_offset_angEyeAngles0 = INS_LINUX_M_ANG_EYE_ANGLES_0;
             s_offset_angEyeAngles1 = INS_LINUX_M_ANG_EYE_ANGLES_1;
             s_offset_m_CollisionGroup = INS_LINUX_M_COLLISION_GROUP;
+            s_offset_m_hMyWeapons = INS_LINUX_M_H_MY_WEAPONS;
             s_offset_m_hActiveWeapon = INS_LINUX_M_H_ACTIVE_WEAPON;
             s_offset_m_iClip1 = INS_LINUX_M_I_CLIP;
-            Msg("[insbots] Linux offsets: buttons=0x%X next=0x%X eye=0x%X/0x%X collision=0x%X weapon=0x%X clip=0x%X\n",
+            Msg("[insbots] Linux offsets: buttons=0x%X next=0x%X eye=0x%X/0x%X collision=0x%X weapon=0x%X mywep=0x%X clip=0x%X\n",
                 INS_LINUX_M_NBUTTONS, s_offset_flNextAttack,
                 s_offset_angEyeAngles0, s_offset_angEyeAngles1,
                 s_offset_m_CollisionGroup, s_offset_m_hActiveWeapon,
-                s_offset_m_iClip1);
+                s_offset_m_hMyWeapons, s_offset_m_iClip1);
             Msg("[insbots] Linux objective offsets: parent=0x%X order=0x%X owner=0x%X hidden=0x%X capture=0x%X\n",
                 INS_LINUX_OBJECTIVE_PARENT, INS_LINUX_OBJECTIVE_ORDER_ID,
                 INS_LINUX_OBJECTIVE_CAPTURED_TEAM, INS_LINUX_OBJECTIVE_HIDDEN,
                 INS_LINUX_OBJECTIVE_CAPTURE_TEAM);
+#else
+            if (s_offset_m_hMyWeapons < 0)
+            {
+                s_offset_m_hMyWeapons = 0x0A24; // Audited CBaseCombatCharacter::m_hMyWeapons in server.dll
+                Msg("[insbots] Fallback m_hMyWeapons bound to 0x0A24 (%d)\n", s_offset_m_hMyWeapons);
+            }
 #endif
             if (s_offset_m_CollisionGroup < 0)
                 Msg("[insbots] WARNING: m_CollisionGroup unavailable; spawn_nocollide will fail closed\n");

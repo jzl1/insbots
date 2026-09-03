@@ -14,6 +14,7 @@ enum InsBotsLinuxOffset
     INS_LINUX_M_COLLISION_GROUP       = 0x01F0,
     INS_LINUX_M_NBUTTONS              = 0x0778,
     INS_LINUX_M_FL_NEXT_ATTACK        = 0x0A30,
+    INS_LINUX_M_H_MY_WEAPONS          = 0x0A38,
     INS_LINUX_M_H_ACTIVE_WEAPON       = 0x0A54,
     INS_LINUX_M_ANG_EYE_ANGLES_0      = 0x0A6C,
     INS_LINUX_M_ANG_EYE_ANGLES_1      = 0x0A70,

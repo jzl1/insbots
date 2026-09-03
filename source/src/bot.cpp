@@ -7775,6 +7775,64 @@ static bool SolveBallisticArc(const Vector &from, const Vector &target,
 // begin a grenade throw: compute the arc to 'target', switch to the grenade,
 // aim, throw, switch back. Returns having set state; StartGrenade only runs if
 // a valid arc exists (checked by caller via CanGrenade path).
+static const char *InsBot_stristr(const char *str, const char *substr)
+{
+    if (!str || !substr) return NULL;
+    if (!*substr) return str;
+    size_t sublen = strlen(substr);
+    for (; *str; str++)
+    {
+        if (!_strnicmp(str, substr, sublen))
+            return str;
+    }
+    return NULL;
+}
+
+bool CInsBot::SwitchToWeapon(const char *weaponClass, bool force)
+{
+    if (!weaponClass || !weaponClass[0] || !m_edict || m_edict->IsFree() || !m_edict->GetUnknown())
+        return false;
+    void *pPlayer = m_edict->GetUnknown()->GetBaseEntity();
+    if (!pPlayer || s_offset_m_hMyWeapons < 0 || !engine)
+        return false;
+
+    char *base = (char *)pPlayer;
+    const char *token = weaponClass;
+    if (!_strnicmp(token, "weapon_", 7)) token += 7;
+
+    for (int i = 0; i < 48; i++)
+    {
+        int h = *(int *)(base + s_offset_m_hMyWeapons + i * 4);
+        if (h == -1 || h == 0) continue;
+        int entIndex = h & 0xFFF;
+        if (entIndex < 1 || entIndex > 2048) continue;
+        edict_t *wEnt = engine->PEntityOfEntIndex(entIndex);
+        if (!wEnt || wEnt->IsFree() || !wEnt->GetUnknown()) continue;
+        const char *cn = wEnt->GetClassName();
+        if (cn && (!_stricmp(cn, weaponClass) || (token[0] && InsBot_stristr(cn, token))))
+        {
+            void *pWeapon = wEnt->GetUnknown()->GetBaseEntity();
+            if (pWeapon)
+            {
+                if (s_offset_flNextAttack >= 0)
+                    *(float *)(base + s_offset_flNextAttack) = gpGlobals ? gpGlobals->curtime : 0.0f;
+                void **vtable = *(void ***)pPlayer;
+#ifdef _LINUX
+                typedef bool (*Weapon_Switch_Fn)(void *, void *, bool);
+                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[218]; // offset 0x368
+                return fnSwitch(pPlayer, pWeapon, force);
+#else
+                typedef bool (__thiscall *Weapon_Switch_Fn)(void *, void *, bool);
+                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[217]; // offset 0x364
+                return fnSwitch(pPlayer, pWeapon, force);
+#endif
+            }
+            break;
+        }
+    }
+    return false;
+}
+
 void CInsBot::StartGrenade(float now, const Vector &target)
 {
     extern CfgVar insbot_attack;
@@ -7787,14 +7845,14 @@ void CInsBot::StartGrenade(float now, const Vector &target)
     if (!SolveBallisticArc(from, target, V, g, yaw, pitch))
         return;   // out of range - don't waste the grenade
 
-    // Save the exact weapon to restore if the switch or final arc fails.  The
-    // old frag path only did this for smoke, leaving an aborted bot holding a
-    // live grenade until some unrelated weapon-selection path happened to run.
     const char *cur = m_info->GetWeaponName();
     _snprintf(m_preNadeWeapon, sizeof(m_preNadeWeapon), "%s", cur ? cur : "");
     m_preNadeWeapon[sizeof(m_preNadeWeapon) - 1] = 0;
 
-    m_ctrl->SetActiveWeapon(GrenadeName());
+    if (!SwitchToWeapon(GrenadeName(), true))
+    {
+        m_ctrl->SetActiveWeapon(GrenadeName());
+    }
     m_nadeState = 1;
     m_nadeKind = 0;             // frag
     Say(VOX_GRENADE);           // "frag out"
@@ -7825,12 +7883,14 @@ void CInsBot::StartSmoke(float now, const Vector &target)
     if (!SolveBallisticArc(from, target, V, g, yaw, pitch))
         return;   // can't reach the point with an arc - don't bother
 
-    // remember the current weapon so we can restore it if we don't own a smoke
     const char *cur = m_info->GetWeaponName();
     _snprintf(m_preNadeWeapon, sizeof(m_preNadeWeapon), "%s", cur ? cur : "");
     m_preNadeWeapon[sizeof(m_preNadeWeapon) - 1] = 0;
 
-    m_ctrl->SetActiveWeapon(insbot_smoke_weapon.GetString());
+    if (!SwitchToWeapon(insbot_smoke_weapon.GetString(), true))
+    {
+        m_ctrl->SetActiveWeapon(insbot_smoke_weapon.GetString());
+    }
     m_nadeState = 1;
     m_nadeKind  = 1;            // smoke
     m_nadeTimer = now + 0.50f;  // max wait for the switch to confirm possession
@@ -7847,15 +7907,22 @@ void CInsBot::StartSmoke(float now, const Vector &target)
 // point (not one we already own), within smoke_range, on a per-bot cooldown and
 // a chance roll. StartSmoke then verifies the bot actually carries a smoke.
 // Scan intel for clusters of enemies and optionally smoke them
+
+
 bool CInsBot::HasWeapon(const char *weaponClass) const
 {
     if (!weaponClass || !m_edict || m_edict->IsFree() || !m_info) return false;
-    if (s_offset_m_hMyWeapons < 0 || !engine) return false;
+    // Fail-open if inventory offset is unavailable: allow UpdateGrenade/UpdateSmoke to attempt switch
+    if (s_offset_m_hMyWeapons < 0 || !engine) return true;
 
     IServerUnknown *unk = m_edict->GetUnknown();
-    if (!unk) return false;
+    if (!unk) return true;
     char *base = (char *)unk->GetBaseEntity();
-    if (!base) return false;
+    if (!base) return true;
+
+    // Tokenize weaponClass by stripping optional "weapon_" prefix (e.g. "weapon_m67" -> "m67")
+    const char *token = weaponClass;
+    if (!_strnicmp(token, "weapon_", 7)) token += 7;
 
     for (int i = 0; i < 48; i++)
     {
@@ -7865,9 +7932,14 @@ bool CInsBot::HasWeapon(const char *weaponClass) const
         if (entIndex < 1 || entIndex > 2048) continue;
         edict_t *wEnt = engine->PEntityOfEntIndex(entIndex);
         if (!wEnt || wEnt->IsFree()) continue;
+
+        // Compare against ServerClass name (e.g. "CGrenadeM67", "CGrenadeRGD5", "CGrenadeM18")
         const char *cn = wEnt->GetClassName();
-        if (cn && !_stricmp(cn, weaponClass))
-            return true;
+        if (cn)
+        {
+            if (!_stricmp(cn, weaponClass) || (token[0] && InsBot_stristr(cn, token)))
+                return true;
+        }
     }
     return false;
 }
@@ -7990,12 +8062,11 @@ void CInsBot::MaybeSmokeObjective(float now, const ObjPoint *op, float dist, int
 
 void CInsBot::RestoreGrenadeWeapon()
 {
-    if (!m_ctrl) return;
-
-    if (m_preNadeWeapon[0])
-        m_ctrl->SetActiveWeapon(m_preNadeWeapon);
-    else
-        m_ctrl->SetActiveWeapon(SidearmName());
+    if (!m_preNadeWeapon[0]) return;
+    if (!SwitchToWeapon(m_preNadeWeapon, true))
+    {
+        if (m_ctrl) m_ctrl->SetActiveWeapon(m_preNadeWeapon);
+    }
 }
 
 bool CInsBot::IsHoldingM203() const
@@ -8885,9 +8956,13 @@ void CInsBot::UpdateGrenade(float now, const Vector &target, int &buttons, QAngl
             // Press on the first frame the grenade is active and release on
             // the next few ticks. There is no extra cook/hold phase.
             m_nadeTimer = now + 0.10f;
+            if (insbot_debug.GetBool())
+                BotDbg("[insbots] %s grenade in hand (%s) -> pulling pin and throwing\n", m_name, held);
         }
         else if (now >= m_nadeTimer)
         {
+            if (insbot_debug.GetBool())
+                BotDbg("[insbots] %s nade state 1 TIMEOUT ABORT! held='%s' wanted='%s'\n", m_name, held ? held : "null", wanted ? wanted : "null");
             // The requested grenade was not owned or the switch failed.
             RestoreGrenadeWeapon();
             m_nadeState = 3;
@@ -9598,11 +9673,15 @@ void CInsBot::ThinkAlive()
             && dist >= insbot_grenade_min_range.GetFloat() && reactionDone
             && losNow && aimed && !m_firing && m_reloadUntil <= now)
         {
-            m_nextGrenade = now + insbot_grenade_cooldown.GetFloat();  // spend the window
             if (frand(0.0f, 1.0f) < insbot_grenade_chance.GetFloat())
             {
+                m_nextGrenade = now + insbot_grenade_cooldown.GetFloat(); // Spend cooldown on throw
                 Vector gt = losNow ? liveTarget : (m_enemyLastPos + Vector(0, 0, 20));
                 StartGrenade(now, gt);
+            }
+            else
+            {
+                m_nextGrenade = now + 1.5f; // Short retry delay if chance roll failed
             }
         }
 
@@ -11599,7 +11678,7 @@ void CInsBot::RunMove(float fwd, float side, int buttons, const QAngle &view)
             {
                 *(int*)(pPlayer + s_offset_nButtons) = 0;
             }
-            if (s_offset_flNextAttack >= 0)
+            if (s_offset_flNextAttack >= 0 && m_nadeState == 0)
             {
                 m_flOldNextAttack = *(float*)(pPlayer + s_offset_flNextAttack);
                 *(float*)(pPlayer + s_offset_flNextAttack) = gpGlobals->curtime + 999.0f;
