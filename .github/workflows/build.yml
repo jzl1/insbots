@@ -11,12 +11,12 @@ on:
       is_prerelease:
         description: 'Mark as Pre-release'
         required: false
-        default: true
+        default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (leave blank to auto-generate v0.20.0_YYYYMMDD_HHMMSS)'
+        description: 'Release Tag (default: v0.20.0)'
         required: false
-        default: ''
+        default: 'v0.20.0'
         type: string
 
 permissions:
@@ -177,8 +177,23 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-version.outputs.release_tag }}
-          name: ${{ needs.prepare-version.outputs.release_tag }}
+          name: InsBots ${{ needs.prepare-version.outputs.release_tag }}
           prerelease: ${{ inputs.is_prerelease }}
+          make_latest: true
+          body: |
+            ## InsBots v0.20.0 Official Release
+
+            ### What's New in v0.20.0:
+            * **Full Squad & Formation System:** Follower management, dynamic velocity-oriented wedge formations, spacing control, stance mimicry, and anti-boxing collision avoidance.
+            * **Cover System V2:** Multi-sector directional threat blocking, low-cover (crouch) classification, and obstacle line-of-sight checks across 10,000+ map points.
+            * **Radio Orders Menu (F3 / !orders):** Dynamic command wheel including Move Out, Fall Back, Hold Position, Covering Fire, and Advance & Defend.
+            * **Cyclic Covering Fire:** Automatic marker projection, suppression target tracking, dry-magazine reloads, and occlusion re-positioning.
+            * **HUD & Waypoints:** 3D leader-only companion sprites and native `UnitOrder` HUD waypoint projections.
+            * **Engine & Combat Reliability:** Round-reset spawn freeze failsafe, dynamic distance scaling, weapon drop/swap parity, and robust grenade/smoke throwing mechanics.
+
+            ### Included Packages:
+            * **Windows (x86):** `insbots-windows-x86.zip` (`insbots.dll`, `insbots.vdf`, `insbots_companion.smx`, `README.md`)
+            * **Linux (i486):** `insbots-linux-i486.tar.gz` (`insbots_i486.so`, `insbots.vdf`, `insbots_companion.smx`, `README.md`)
           files: |
             release_assets/insbots-windows-x86.zip
             release_assets/insbots-linux-i486.tar.gz
