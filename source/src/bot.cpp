@@ -7819,11 +7819,15 @@ bool CInsBot::SwitchToWeapon(const char *weaponClass, bool force)
                 void **vtable = *(void ***)pPlayer;
 #ifdef _LINUX
                 typedef bool (*Weapon_Switch_Fn)(void *, void *, bool);
-                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[218]; // offset 0x368
+                // Audited in Linux server_i486.so _ZTV10CINSPlayer (RVA 0x7706C0):
+                // vtable[218] is Weapon_Equip, vtable[219] is Weapon_CanUse, vtable[220] is Weapon_Switch (offset 0x370).
+                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[220];
                 return fnSwitch(pPlayer, pWeapon, force);
 #else
                 typedef bool (__thiscall *Weapon_Switch_Fn)(void *, void *, bool);
-                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[217]; // offset 0x364
+                // Audited in Windows server.dll CINSPlayer primary vtable (VA 0x101F75D4):
+                // vtable[220] is CBasePlayer::Weapon_Switch (VA 0x10118360, offset 0x370).
+                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[220];
                 return fnSwitch(pPlayer, pWeapon, force);
 #endif
             }
