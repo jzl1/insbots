@@ -8007,14 +8007,16 @@ bool CInsBot::SwitchToWeapon(const char *weaponClass, bool force)
 #ifdef _LINUX
                 typedef bool (*Weapon_Switch_Fn)(void *, void *, bool);
                 // Audited in Linux server_i486.so _ZTV10CINSPlayer (RVA 0x7706C0):
-                // vtable[218] is Weapon_Equip, vtable[219] is Weapon_CanUse, vtable[220] is Weapon_Switch (offset 0x370).
-                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[220];
+                // In GCC Itanium ABI, symbol _ZTV has 2 prefix entries (offset-to-top, RTTI).
+                // Relocation slot 218 (offset 0x770A30) is _ZN11CBasePlayer13Weapon_SwitchEP17CBaseCombatWeaponb (VA 0x49D65C).
+                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[218];
                 return fnSwitch(pPlayer, pWeapon, force);
 #else
                 typedef bool (__thiscall *Weapon_Switch_Fn)(void *, void *, bool);
                 // Audited in Windows server.dll CINSPlayer primary vtable (VA 0x101F75D4):
-                // vtable[220] is CBasePlayer::Weapon_Switch (VA 0x10118360, offset 0x370).
-                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[220];
+                // slot 217 (VA 0x101054E0, offset 0x364) is CBasePlayer::Weapon_Switch(pWeapon, viewmodelindex=0), ending with ret 8.
+                // slot 220 (VA 0x10118360, offset 0x370) takes 4 parameters and ends with ret 0x10 (corrupts ESP).
+                Weapon_Switch_Fn fnSwitch = (Weapon_Switch_Fn)vtable[217];
                 return fnSwitch(pPlayer, pWeapon, force);
 #endif
             }
