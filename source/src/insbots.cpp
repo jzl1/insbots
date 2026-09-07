@@ -136,6 +136,7 @@ CfgVar insbot_unstuck_teleport("unstuck_teleport", "1", "NavBot-style last resor
 CfgVar insbot_unstuck_teleport_time("unstuck_teleport_time", "3.0", "continuous-stuck seconds before teleport-unstuck");
 CfgVar insbot_doorway_teleport("doorway_teleport", "1", "warp a stalled front bot past a detected doorway after doorway_teleport_time (0=off)");
 CfgVar insbot_doorway_teleport_time("doorway_teleport_time", "3.0", "continuous doorway no-progress seconds before a full-hull-validated teleport");
+CfgVar insbot_doorway_sprint("doorway_sprint", "1", "accurate doorway sprint alignment and kinematic modulation (0=off)");
 CfgVar insbot_stuck_nocollide("stuck_nocollide", "1", "try local player-body collision grace before stuck or doorway teleport (0=off)");
 CfgVar insbot_ladder_queue("ladder_queue", "1", "single-owner queues at both ends of typed NAV ladders (0=off)");
 CfgVar insbot_ladder_nocollide("ladder_nocollide", "1", "confirmed ladder owner/blocker collision grace before safe teleport (0=off)");

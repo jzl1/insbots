@@ -90,6 +90,15 @@ static float DistanceToLineSegment(const Vector& p, const Vector& a, const Vecto
     return sqrtf(dx*dx + dy*dy + dz*dz);
 }
 
+static float SignedAngleDiff(float a, float b)
+{
+    float d = fmodf(a - b, 360.0f);
+    if (d > 180.0f) d -= 360.0f;
+    if (d < -180.0f) d += 360.0f;
+    return d;
+}
+
+
 
 // settings (CfgVars defined in insbots.cpp) - same getter surface as ConVar
 #include "cfgvar.h"
@@ -193,6 +202,7 @@ extern CfgVar insbot_unstuck_teleport;
 extern CfgVar insbot_unstuck_teleport_time;
 extern CfgVar insbot_doorway_teleport;
 extern CfgVar insbot_doorway_teleport_time;
+extern CfgVar insbot_doorway_sprint;
 extern CfgVar insbot_stuck_nocollide;
 extern CfgVar insbot_ladder_queue;
 extern CfgVar insbot_ladder_nocollide;
@@ -2057,6 +2067,8 @@ void CInsBot::AbandonStuckObjective(const Vector &pos, float now)
     m_bestDist = 3.4e38f;
     m_navDestChanged = false;
     if (g_NavMesh.IsLoaded()) m_goalArea = g_NavMesh.RandomArea();
+    ResetDoorwayRunway();
+
     m_pathLen = 0;
     m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -3021,6 +3033,8 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
     {
         // off-mesh right now (spawn point not covered, or goal truly off the
         // mesh): fall back to the wall-aware direct walk and retry quickly.
+        ResetDoorwayRunway();
+
         m_pathLen = 0;
         m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -3762,6 +3776,8 @@ bool CInsBot::AdvanceWaypoint()
             // BuildPath returned a truncated prefix: the route continues past
             // the buffer, so repath immediately from the actual prefix
             // endpoint instead of treating the prefix end as the final goal.
+            ResetDoorwayRunway();
+
             m_pathLen = 0;
             m_pathResult = BOT_PATH_NONE;
             m_pathCursor = 0;
@@ -3798,6 +3814,8 @@ bool CInsBot::AdvanceWaypoint()
         && actualArea != m_path[m_pathCursor - 1] && !ladderEdge
         && !physicallyOnEdge)
     {
+        ResetDoorwayRunway();
+
         m_pathLen = 0;
         m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -3874,6 +3892,8 @@ bool CInsBot::AdvanceWaypoint()
         const NavAreaData *a = g_NavMesh.Area(m_path[m_pathCursor]);
         if (!a)
         {
+            ResetDoorwayRunway();
+
             m_pathLen = 0;
             m_pathResult = BOT_PATH_NONE;
             m_pathCursor = 0;
@@ -4904,6 +4924,143 @@ static bool IsDoorClosedOrClosing(void *doorBase, const char *cn)
     return true;
 }
 
+
+bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
+{
+    if (!insbot_doorway_sprint.GetBool())
+    {
+        outRunway.active = false;
+        return false;
+    }
+    if (m_pathLen <= 0 || m_pathCursor >= m_pathLen || !m_info)
+    {
+        outRunway.active = false;
+        return false;
+    }
+
+    Vector pos = m_info->GetAbsOrigin();
+    int startIdx = (m_pathCursor > 0) ? m_pathCursor - 1 : 0;
+    int maxCheck = (startIdx + 2 < m_pathLen) ? startIdx + 2 : m_pathLen - 1;
+
+    for (int i = startIdx; i < maxCheck; i++)
+    {
+        int fromIdx = m_path[i];
+        int toIdx = m_path[i + 1];
+        Vector safeCenter; float safeHalf = 0.0f;
+        if (ProbePhysicalPortal(fromIdx, toIdx, &safeCenter, &safeHalf))
+        {
+            float dx = safeCenter.x - pos.x;
+            float dy = safeCenter.y - pos.y;
+            float distSq = dx * dx + dy * dy;
+            if (distSq <= 220.0f * 220.0f)
+            {
+                const NavAreaData *fromA = g_NavMesh.Area(fromIdx);
+                const NavAreaData *toA = g_NavMesh.Area(toIdx);
+                if (!fromA || !toA) continue;
+
+                Vector normal = toA->center - fromA->center;
+                normal.z = 0.0f;
+                float nLen = normal.Length2D();
+                if (nLen > 0.001f)
+                    normal /= nLen;
+                else
+                    normal = Vector(1.0f, 0.0f, 0.0f);
+
+                Vector runwayPoint = safeCenter - normal * 120.0f;
+                runwayPoint.z = safeCenter.z;
+
+                outRunway.active = true;
+                outRunway.center = safeCenter;
+                outRunway.normal = normal;
+                outRunway.runwayPoint = runwayPoint;
+                outRunway.halfSpan = safeHalf;
+                outRunway.distToPortal = sqrtf(distSq);
+
+                float portalYaw = atan2f(normal.y, normal.x) * (180.0f / 3.14159265f);
+                outRunway.turnAngle = fabsf(SignedAngleDiff(portalYaw, m_headingYaw));
+
+                outRunway.isChained = false;
+                if (i + 2 < m_pathLen)
+                {
+                    Vector nextCenter; float nextHalf = 0.0f;
+                    if (ProbePhysicalPortal(m_path[i + 1], m_path[i + 2], &nextCenter, &nextHalf))
+                    {
+                        float cdx = nextCenter.x - safeCenter.x, cdy = nextCenter.y - safeCenter.y;
+                        if (cdx * cdx + cdy * cdy <= 130.0f * 130.0f)
+                            outRunway.isChained = true;
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    outRunway.active = false;
+    return false;
+}
+
+bool CInsBot::VerifyDoorwayHullClearance(DoorwayRunwayState &runway)
+{
+    if (!enginetrace || !runway.active) return true;
+
+    Vector start = runway.center - runway.normal * 30.0f;
+    Vector end   = runway.center + runway.normal * 48.0f;
+
+    Ray_t ray;
+    ray.Init(start, end, Vector(-16, -16, 0), Vector(16, 16, 72));
+
+    CTraceFilterSkipPlayers filter(EdictHandleEntity(m_edict));
+    trace_t tr;
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+
+    if (tr.fraction < 1.0f)
+    {
+        if (tr.m_pEnt)
+        {
+            IServerUnknown *unk = (IServerUnknown *)tr.m_pEnt;
+            if (unk && unk->GetNetworkable())
+            {
+                const char *cn = unk->GetNetworkable()->GetClassName();
+                if (cn && (!strncmp(cn, "func_door", 9) || !strncmp(cn, "prop_door", 9)))
+                {
+                    runway.isSwingDoor = true;
+                    runway.doorClear = false;
+                    return false;
+                }
+            }
+        }
+        runway.doorClear = false;
+        return false;
+    }
+
+    runway.doorClear = true;
+    return true;
+}
+
+bool CInsBot::TeammateInDoorwayCorridor(const DoorwayRunwayState &runway, int mySlot) const
+{
+    if (!runway.active) return false;
+    for (int i = 0; i < gpGlobals->maxClients; i++)
+    {
+        if (i == mySlot) continue;
+        const CInsBot *other = &g_Bots.m_bots[i];
+        if (!other || !other->m_inUse || !other->m_info || other->m_info->IsDead())
+            continue;
+        if (other->m_teamSlot != m_teamSlot) continue;
+
+        Vector otherPos = other->m_info->GetAbsOrigin();
+        Vector toOther = otherPos - runway.center;
+        float distSq = toOther.x * toOther.x + toOther.y * toOther.y;
+        if (distSq > 160.0f * 160.0f) continue;
+
+        float alongNormal = toOther.x * runway.normal.x + toOther.y * runway.normal.y;
+        if (alongNormal >= -140.0f && alongNormal <= 48.0f)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool CInsBot::DoorAhead(float yawDeg, Vector *doorOut) const
 {
     INSPROF_SCOPE(INSPROF_DOOR);
@@ -4915,7 +5072,7 @@ bool CInsBot::DoorAhead(float yawDeg, Vector *doorOut) const
 
     CTraceFilterSkipPlayers f(EdictHandleEntity(m_edict));
     Ray_t ray; trace_t tr;
-    ray.Init(start, start + dir * 100.0f);
+    ray.Init(start, start + dir * 180.0f);
     enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &f, &tr);
     if (tr.fraction >= 1.0f || !tr.m_pEnt) return false;
 
@@ -5218,9 +5375,18 @@ bool CInsBot::FindSafeTeleportSpot(int fromArea, int destArea,
 
 // NavBot-style rescue. A body-recovery session owns its cached edge so an
 // unrelated periodic repath cannot shadow the doorway it is still clearing.
+void CInsBot::ResetDoorwayRunway()
+{
+    memset(&m_doorwayRunway, 0, sizeof(m_doorwayRunway));
+    m_doorwayApexBrakingUntil = 0.0f;
+}
+
 void CInsBot::OnRelocated(const char *reason)
 {
+    ResetDoorwayRunway();
     m_bestDist = 3.4e38f;
+    ResetDoorwayRunway();
+
     m_pathLen = 0;
     m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -6273,13 +6439,7 @@ bool CBotRoster::ControlHadithaDoor(CInsBot *bot, const Vector &pos, float now,
 }
 
 // Signed shortest angular difference (a-b) in [-180, 180).
-static float SignedAngleDiff(float a, float b)
-{
-    float d = fmodf(a - b, 360.0f);
-    if (d > 180.0f) d -= 360.0f;
-    if (d < -180.0f) d += 360.0f;
-    return d;
-}
+
 
 void CInsBot::ApplyCrowdSteeringClassic(float moveYaw, float viewYaw, float &fwd,
                                  float &side, int &buttons)
@@ -7380,6 +7540,8 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             // Do not let the normal repath throttle keep an exhausted path to
             // the previous destination alive after the caller selects a new one.
             m_moveArrivalLatched = false;
+            ResetDoorwayRunway();
+
             m_pathLen = 0;
             m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -7406,6 +7568,8 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         m_moveArrivalTarget = dest;
         // Mark the point route complete.  If the caller changes targets next
         // frame, the target-change branch above forces an immediate fresh path.
+        ResetDoorwayRunway();
+
         m_pathLen = 0;
         m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -7439,6 +7603,11 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         else if (haveWaypoint)
         {
             immTarget = m_moveTarget;   // the current portal/waypoint
+            ProbeUpcomingDoorwayRunway(m_doorwayRunway);
+            if (m_doorwayRunway.active)
+            {
+                VerifyDoorwayHullClearance(m_doorwayRunway);
+            }
             bool ladderMove = m_pathCursor > 0
                 && TraverseLadder(m_path[m_pathCursor - 1], m_path[m_pathCursor],
                                   fwd, side, buttons, view, immTarget);
@@ -7520,6 +7689,24 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             {
                 SmoothNavTurn(mvYaw, navSpeed, view,
                               fwd, side, m_navTurnAngle, sourceTurn);
+
+                // --- Doorway runway alignment override (post-SmoothNavTurn) ---
+                if (m_doorwayRunway.active && m_doorwayRunway.distToPortal < 140.0f)
+                {
+                    float doorYaw = atan2f(m_doorwayRunway.normal.y, m_doorwayRunway.normal.x) * (180.0f / 3.14159265f);
+                    view.y = doorYaw;
+                    view.x = 0.0f;
+
+                    Vector toBot = pos - m_doorwayRunway.center;
+                    float crossTrackError = toBot.x * (-m_doorwayRunway.normal.y) + toBot.y * (m_doorwayRunway.normal.x);
+
+                    float strafe = -crossTrackError * 4.0f;
+                    if (strafe > 60.0f) strafe = 60.0f;
+                    if (strafe < -60.0f) strafe = -60.0f;
+
+                    fwd = navSpeed;
+                    side = strafe;
+                }
             }
 
             const NavAreaData *cur = g_NavMesh.Area(m_path[m_pathCursor]);
@@ -8447,7 +8634,7 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
         if (distToLeader > 80.0f)
         {
             MoveToward(leaderPos, fwd, side, buttons, view);
-            if (fwd > 100.0f && !m_traversingLadder)
+            if (fwd > 100.0f && !m_traversingLadder && (!m_doorwayRunway.active || m_doorwayRunway.doorClear))
                 buttons |= INS_IN_SPRINT;
         }
         else
@@ -8481,7 +8668,7 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
         if (distToSlot > 40.0f)
         {
             MoveToward(slotPos, fwd, side, buttons, view);
-            if (distToSlot > 160.0f && fwd > 100.0f && !m_traversingLadder)
+            if (distToSlot > 160.0f && fwd > 100.0f && !m_traversingLadder && (!m_doorwayRunway.active || m_doorwayRunway.doorClear))
                 buttons |= INS_IN_SPRINT;
         }
         else
@@ -8729,7 +8916,7 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
             }
         }
 
-        if (distToSlot > (slotDist * 1.3f) && (fabsf(fwd) > 50.0f || fabsf(side) > 50.0f) && !m_traversingLadder && !(buttons & IN_DUCK))
+        if (distToSlot > (slotDist * 1.3f) && (fabsf(fwd) > 50.0f || fabsf(side) > 50.0f) && !m_traversingLadder && !(buttons & IN_DUCK) && (!m_doorwayRunway.active || m_doorwayRunway.doorClear))
             buttons |= INS_IN_SPRINT;
         else if (distToSlot < 120.0f && (fabsf(fwd) > 0.0f || fabsf(side) > 0.0f))
         {
@@ -9060,6 +9247,8 @@ void CInsBot::ThinkAlive()
         EndSpawnNoCollide(true);
         m_state = BOT_DEAD;
         m_enemyIndex = 0;
+        ResetDoorwayRunway();
+
         m_pathLen = 0;
         m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -10840,6 +11029,38 @@ overwatch_done:
     bool hadithaNoSprint = hadithaGate || (!m_traversingLadder
         && IsHadithaDoorNoSprintZone(m_path, m_pathLen, m_pathCursor, pos));
 
+    // Doorway apex braking timer
+    if (m_doorwayRunway.active && m_doorwayRunway.turnAngle > 35.0f
+        && m_doorwayRunway.distToPortal > 80.0f && m_doorwayRunway.distToPortal < 180.0f)
+    {
+        if (now >= m_doorwayApexBrakingUntil)
+            m_doorwayApexBrakingUntil = now + 0.28f;
+    }
+
+    // CQB Threat detection at doorway
+    bool cqbThreatAhead = false;
+    if (m_doorwayRunway.active && m_doorwayRunway.distToPortal < 160.0f)
+    {
+        if (m_enemyIndex != 0) cqbThreatAhead = true;
+        if (now - m_enemyLastSeen < 3.0f) cqbThreatAhead = true;
+        if (m_hearUntil > now) cqbThreatAhead = true;
+    }
+
+    bool doorwaySprintAllowed = true;
+    if (m_doorwayRunway.active)
+    {
+        if (!m_doorwayRunway.doorClear)
+            doorwaySprintAllowed = false;
+        if (now < m_doorwayApexBrakingUntil)
+            doorwaySprintAllowed = false;
+        if (cqbThreatAhead)
+            doorwaySprintAllowed = false;
+        if (m_doorwayRunway.isChained)
+            doorwaySprintAllowed = false;
+        if (TeammateInDoorwayCorridor(m_doorwayRunway, engine ? engine->IndexOfEdict(m_edict) - 1 : -1))
+            doorwaySprintAllowed = false;
+    }
+
     bool inWater = false;
     if (enginetrace)
     {
@@ -10857,7 +11078,7 @@ overwatch_done:
         buttons &= ~INS_IN_SPRINT;
         if (fwd > 220.0f) fwd = 220.0f;
     }
-    else if (!hadithaNoSprint
+    else if (!hadithaNoSprint && doorwaySprintAllowed
         && !m_traversingLadder && insbot_sprint.GetBool() && !engaging && m_nadeState == 0
         && m_reloadUntil <= now && fwd > 100.0f && fabsf(side) < 60.0f
         && !(buttons & IN_DUCK))
@@ -11152,6 +11373,8 @@ overwatch_done:
                 }
                 if (!m_traversingLadder)
                 {
+                    ResetDoorwayRunway();
+
                     m_pathLen = 0;
                     m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
@@ -11810,6 +12033,8 @@ void CInsBot::Think(bool simulating)
             }
             m_customizationPending = false;
             m_curAngles = m_info->GetAbsAngles();
+            ResetDoorwayRunway();
+
             m_pathLen = 0;
             m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false; m_goalArea = -1; m_enemyIndex = 0;
@@ -11908,6 +12133,26 @@ void CInsBot::DebugDraw()
             debugoverlay->AddEntityTextOverlay(idx, 4, dur, 0, 255, 200, 255,
                 "SQUAD [Slot %d | %s | Lead %d]", m_squadSlot, orderName, m_squadLeaderIndex);
         }
+    }
+
+    // Doorway Runway & Clearance Overlay
+    if (m_doorwayRunway.active && debugoverlay)
+    {
+        debugoverlay->AddLineOverlay(m_doorwayRunway.runwayPoint + Vector(0, 0, 16),
+                                     m_doorwayRunway.center + Vector(0, 0, 16),
+                                     255, 255, 255, false, dur);
+
+        Vector pAxis(-m_doorwayRunway.normal.y, m_doorwayRunway.normal.x, 0.0f);
+        Vector p1 = m_doorwayRunway.center + pAxis * m_doorwayRunway.halfSpan + Vector(0, 0, 16);
+        Vector p2 = m_doorwayRunway.center - pAxis * m_doorwayRunway.halfSpan + Vector(0, 0, 16);
+        debugoverlay->AddLineOverlay(p1, p2, 64, 255, 64, false, dur);
+
+        int br = m_doorwayRunway.doorClear ? 32 : 255;
+        int bg = m_doorwayRunway.doorClear ? 128 : 32;
+        int bb = m_doorwayRunway.doorClear ? 255 : 32;
+        debugoverlay->AddBoxOverlay(m_doorwayRunway.center,
+                                    Vector(-16, -16, 0), Vector(16, 16, 72),
+                                    QAngle(0, 0, 0), br, bg, bb, 40, dur);
     }
 
     // aim line
@@ -13522,6 +13767,7 @@ void CBotRoster::InvalidateNavMeshState()
     {
         if (m_bots[i].m_inUse)
         {
+            m_bots[i].ResetDoorwayRunway();
             m_bots[i].m_pathLen = 0;
             m_bots[i].m_pathResult = BOT_PATH_NONE;
             m_bots[i].m_pathContinues = false;

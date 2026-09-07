@@ -73,6 +73,23 @@ struct CoverPoint {
     short         areaIdx;       // owning nav area
 };
 
+// ============================================================================
+// Doorway Runway & Sprint State
+// ============================================================================
+struct DoorwayRunwayState
+{
+    bool   active;
+    Vector center;
+    Vector normal;
+    Vector runwayPoint;
+    float  halfSpan;
+    float  distToPortal;
+    float  turnAngle;
+    bool   isSwingDoor;
+    bool   doorClear;
+    bool   isChained;
+};
+
 enum BotState
 {
     BOT_JOINING = 0,     // sending team/class commands until alive
@@ -363,6 +380,8 @@ private:
     bool   m_doorCached;
     bool   m_chokeCached;
     bool   m_lowObstacleCached;
+    DoorwayRunwayState m_doorwayRunway;
+    float  m_doorwayApexBrakingUntil;
     // corridor-approach prediction: the path ahead is about to enter a tight
     // corridor (a contiguous run of narrow portals/areas), so the column
     // merges to single-file and stops passing before the mouth
@@ -553,6 +572,10 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     bool  DoorAhead(float yawDeg, Vector *doorOut = 0) const; // closed door in front -> press +use
     bool  ChokeAhead(float yawDeg, Vector *chokeOut = 0) const;   // robust doorway/archway/chokepoint detection
     bool  SourceTurnForEdge(int fromArea, int toArea, const Vector &pos) const; // automatic only at physical chokes
+    void  ResetDoorwayRunway();
+    bool  ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway);
+    bool  VerifyDoorwayHullClearance(DoorwayRunwayState &runway);
+    bool  TeammateInDoorwayCorridor(const DoorwayRunwayState &runway, int mySlot) const;
     bool  SafeStandSpot(const Vector &dest, float minPlayerSep = 56.0f) const; // room to stand at dest (teleport safety)
     bool  FindSafeTeleportSpot(int fromArea, int destArea, const Vector &pos,
                                Vector &dest) const;
