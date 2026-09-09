@@ -193,6 +193,8 @@ private:
     int    m_joinCycles;
     float  m_lastAliveCheck;
     bool   m_joinWarned;
+    bool   m_classSetupSent;       // true once pfullsetup has been transmitted for this life
+    float  m_nextReinforcePulse;   // throttles creinforce heartbeat while waiting in wave queue
 
     // Model and loadout customization selected for the next life.
     bool   m_customizationPending;
@@ -488,6 +490,7 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
 
     // internals
     void  ThinkJoin();
+    void  PruneDuplicateWeapons();
     void  ThinkAlive();
     void  RollCustomizationForLife();
     void  UpdateCustomizationWeapon(int roleId);

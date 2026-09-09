@@ -962,6 +962,7 @@ bool CInsBot::SendCustomizationBeforeSpawn()
     cmd[sizeof(cmd) - 1] = 0;
     helpers->ClientCommand(m_edict, cmd);
     BotDbg("[insbots] %s -> %s\n", m_name, cmd);
+    m_customizationPending = false;
     return true;
 }
 
@@ -2340,6 +2341,8 @@ bool CInsBot::Create(const char *nameOrNull, int teamSlot, int requestedTeamArg,
     m_nextJoinCmdTime = (requestedTeamArg >= 0)
                       ? Now() : Now() + insbot_join_interval.GetFloat();
     m_joinCmdIndex = 0;
+    m_classSetupSent = false;
+    m_nextReinforcePulse = 0.0f;
     m_enemyIndex = 0;
     m_goalArea = -1;
     m_headingYaw = frand(-180.0f, 180.0f);
@@ -2381,6 +2384,8 @@ void CInsBot::Adopt(edict_t *e, int teamSlot)
     m_state = BOT_JOINING;
     m_ordinal = (int)(this - g_Bots.m_bots);
     m_nextJoinCmdTime = Now() + insbot_join_interval.GetFloat();
+    m_classSetupSent = false;
+    m_nextReinforcePulse = 0.0f;
     m_headingYaw = frand(-180.0f, 180.0f);
     m_goalArea = -1;
     m_spawnTime = Now();
@@ -2809,38 +2814,59 @@ int CInsBot::FindEnemy()
 
 void CInsBot::SendJoinCommands()
 {
+    if (!helpers || !m_edict) return;
+    float now = Now();
+
+    // If class setup has already been sent, do NOT repeat pteamsetup or pfullsetup!
+    // Simply pulse creinforce once every 2 seconds as a heartbeat while waiting for the wave.
+    if (m_classSetupSent)
+    {
+        if (now >= m_nextReinforcePulse)
+        {
+            m_nextReinforcePulse = now + 2.0f;
+            helpers->ClientCommand(m_edict, "creinforce");
+            BotDbg("[insbots] %s -> wave wait heartbeat 'creinforce'\n", m_name);
+        }
+        return;
+    }
+
     // Newly created bots use pfullsetup directly. Sending pteamsetup first can
     // finalize a fresh client with an engine-selected class before our later
-    // class request is processed. pfullsetup is the game's one-shot team +
-    // squad-slot command, so repeat it once and only then request reinforcement.
-    // Automatic adds rotate valid role IDs on each retry cycle; exact-slot adds
-    // retain their requested role.
+    // class request is processed. Once pfullsetup has been transmitted, pulse
+    // creinforce and wait for the wave.
     if (m_requestedTeamArg >= 0)
     {
         char cmd[64];
         int roleId = (m_requestedRoleId > 0)
                    ? m_requestedRoleId : JoinRoleId(m_ordinal, m_joinCycles);
         UpdateCustomizationWeapon(roleId);
-        if (m_joinCmdIndex == 0 || m_joinCmdIndex == 1)
+        if (m_joinCmdIndex == 0)
+        {
             _snprintf(cmd, sizeof(cmd), "pfullsetup %d %d",
                       m_requestedTeamArg, roleId);
-        else if (m_joinCmdIndex == 2)
-            _snprintf(cmd, sizeof(cmd), "creinforce");
-        else
-        {
-            m_joinCmdIndex = 0;
-            m_joinCycles++;
+            cmd[sizeof(cmd) - 1] = 0;
+            SendCustomizationBeforeSpawn();
+            helpers->ClientCommand(m_edict, cmd);
+            BotDbg("[insbots] %s -> targeted setup '%s'\n", m_name, cmd);
+            m_joinCmdIndex++;
             return;
         }
-
-        cmd[sizeof(cmd) - 1] = 0;
-        if (CommandContainsToken(cmd, "pfullsetup")
-            || CommandContainsToken(cmd, "creinforce"))
-            SendCustomizationBeforeSpawn();
-        helpers->ClientCommand(m_edict, cmd);
-        BotDbg("[insbots] %s -> targeted join cmd '%s'\n", m_name, cmd);
-        m_joinCmdIndex++;
-        return;
+        else if (m_joinCmdIndex == 1)
+        {
+            helpers->ClientCommand(m_edict, "creinforce");
+            BotDbg("[insbots] %s -> targeted 'creinforce'\n", m_name);
+            m_classSetupSent = true;
+            m_nextReinforcePulse = now + 2.0f;
+            m_joinCmdIndex = 0;
+            return;
+        }
+        else
+        {
+            m_classSetupSent = true;
+            m_nextReinforcePulse = now + 2.0f;
+            m_joinCmdIndex = 0;
+            return;
+        }
     }
 
     const char *list = (m_teamSlot == 0) ? insbot_join_cmds_a.GetString()
@@ -2858,8 +2884,10 @@ void CInsBot::SendJoinCommands()
 
     if (!tok)
     {
-        m_joinCmdIndex = 0;      // wrap: start sequence over (menus may re-prompt)
-        m_joinCycles++;
+        // Entire sequence was sent once: mark class setup complete and enter wave wait
+        m_classSetupSent = true;
+        m_nextReinforcePulse = now + 2.0f;
+        m_joinCmdIndex = 0;
         return;
     }
 
@@ -2931,6 +2959,58 @@ void CInsBot::SendJoinCommands()
     m_joinCmdIndex++;
 }
 
+void CInsBot::PruneDuplicateWeapons()
+{
+    if (!m_edict || m_edict->IsFree() || s_offset_m_hMyWeapons < 0 || !engine) return;
+    IServerUnknown *un = m_edict->GetUnknown();
+    if (!un) return;
+    CBaseEntity *playerEnt = un->GetBaseEntity();
+    if (!playerEnt) return;
+
+    char *base = (char *)playerEnt;
+    const int MAX_WEAPONS = 7;
+
+    char seenClasses[8][32];
+    int seenCount = 0;
+
+    for (int i = 0; i < MAX_WEAPONS; i++)
+    {
+        int h = *(int *)(base + s_offset_m_hMyWeapons + i * 4);
+        if (h == -1 || h == 0) continue;
+        int entIdx = h & 0xFFF;
+        if (entIdx <= gpGlobals->maxClients || entIdx >= 2048) continue;
+
+        edict_t *wEdict = engine->PEntityOfEntIndex(entIdx);
+        if (!wEdict || wEdict->IsFree()) continue;
+        const char *cls = wEdict->GetClassName();
+        if (!cls || !cls[0]) continue;
+
+        bool duplicate = false;
+        for (int s = 0; s < seenCount; s++)
+        {
+            if (!_stricmp(seenClasses[s], cls))
+            {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if (duplicate)
+        {
+            BotDbg("[insbots] %s pruning duplicate weapon %s (entindex %d)\n",
+                   m_name, cls, entIdx);
+            *(int *)(base + s_offset_m_hMyWeapons + i * 4) = -1;
+            engine->RemoveEdict(wEdict);
+        }
+        else if (seenCount < 8)
+        {
+            strncpy(seenClasses[seenCount], cls, sizeof(seenClasses[0]) - 1);
+            seenClasses[seenCount][sizeof(seenClasses[0]) - 1] = 0;
+            seenCount++;
+        }
+    }
+}
+
 void CInsBot::ThinkJoin()
 {
     float now = Now();
@@ -2940,6 +3020,10 @@ void CInsBot::ThinkJoin()
     if (m_info->GetTeamIndex() > 0 && !m_info->IsDead())
     {
         m_state = BOT_ALIVE;
+        m_classSetupSent = false;
+        m_nextReinforcePulse = 0.0f;
+        m_customizationPending = false;
+        PruneDuplicateWeapons();
         m_haveLastCustomization = true;
         m_lastCustomizationFaction = m_customizationFaction;
         m_lastCustomizationSkin = m_customizationSkin;
@@ -9248,6 +9332,8 @@ void CInsBot::ThinkAlive()
         ResetBodyNoCollideRecovery();
         EndSpawnNoCollide(true);
         m_state = BOT_DEAD;
+        m_classSetupSent = false;
+        m_nextReinforcePulse = 0.0f;
         m_enemyIndex = 0;
         ResetDoorwayRunway();
 
@@ -12022,6 +12108,10 @@ void CInsBot::Think(bool simulating)
         {
             g_Bots.RecallFollower(this); // restore fireteam membership if pending
             m_state = BOT_ALIVE;
+            m_classSetupSent = false;
+            m_nextReinforcePulse = 0.0f;
+            m_customizationPending = false;
+            PruneDuplicateWeapons();
             m_haveLastCustomization = true;
             m_lastCustomizationFaction = m_customizationFaction;
             m_lastCustomizationSkin = m_customizationSkin;
