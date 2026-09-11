@@ -14,9 +14,9 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (default: v0.20.1)'
+        description: 'Release Tag (default: v0.20.2)'
         required: false
-        default: 'v0.20.1'
+        default: 'v0.20.2'
         type: string
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then
             TAG="${{ inputs.release_tag }}"
           else
-            TAG="v0.20.1_${TIMESTAMP}"
+            TAG="v0.20.2_${TIMESTAMP}"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
@@ -181,15 +181,12 @@ jobs:
           prerelease: ${{ inputs.is_prerelease }}
           make_latest: true
           body: |
-            ### What's New in v0.20.1:
-            * **Linux Weapon Switch Crash Fix:** Corrected `CBasePlayer::Weapon_Switch` virtual table index (offset `0x370` / slot 220) across both Linux and Windows, eliminating fatal weapon table corruption during smoke and grenade throws.
-            * **Smoke & Grenade State Machine:** Bounded possession validation and safe firearm restoration prevent bots from stalling or entering invalid weapon states.
-            * **Round Transition & Spawn Failsafe:** Immediate unfreezing upon `round_reset` with anti-box grace recovery.
-            * **Full Squad & Cover System V2:** Retains all core v0.20 features (dynamic velocity-oriented wedge formations, F3 radio orders menu, cyclic covering fire, Advance & Defend, and 10,000+ offline cover spots).
+            ### What's New in v0.20.2:
+            * **Accurate Doorway Sprinting & Trajectory Alignment:** Smooth aperture entry queuing, dynamic trajectory alignment, and heading anticipation through narrow doorways and portals without wall-clipping or abrupt deceleration.
+            * **Corner Navigation & Anti-Sticking:** Refined corner rounding geometry and velocity dampening preventing bots from getting caught on sharp building edges and geometry corners.
+            * **Reinforcement Wave Inventory Cleanup:** Robust weapon entity cleanup during player reinforcement respawns, preventing duplicate weapon spawning and server edict exhaustion (`ED_Alloc: no free edicts`).
+            * **Linux Weapon Switch VTable Parity:** Verified `CBasePlayer::Weapon_Switch` virtual table index (offset `0x370` / slot 220) across 32-bit Linux and Windows toolchains for crash-free grenade and smoke handling.
 
-            ### Included Packages:
-            * **Windows (x86):** `insbots-windows-x86.zip` (`insbots.dll`, `insbots.vdf`, `insbots_companion.smx`, `README.md`)
-            * **Linux (i486):** `insbots-linux-i486.tar.gz` (`insbots_i486.so`, `insbots.vdf`, `insbots_companion.smx`, `README.md`)
           files: |
             release_assets/insbots-windows-x86.zip
             release_assets/insbots-linux-i486.tar.gz
