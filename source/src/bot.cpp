@@ -11,6 +11,8 @@
 #include "interface.h"
 #include "eiface.h"
 #include "edict.h"
+#include "server_class.h"
+#include "iservernetworkable.h"
 #include "dlls/iplayerinfo.h"
 #include "engine/iserverplugin.h"
 #include "engine/IEngineTrace.h"
@@ -2957,6 +2959,72 @@ void CInsBot::SendJoinCommands()
         BotDbg("[insbots] %s -> join cmd '%s'\n", m_name, cmd);
     }
     m_joinCmdIndex++;
+}
+
+
+// ---------------------------------------------------------------------------
+// Weapon-inventory validation ("grenade switch" crash guard)
+//
+// CInsBot::SwitchToWeapon() hands an entity pointer to
+// CBasePlayer::Weapon_Switch(), which calls CBaseCombatWeapon virtuals on it
+// (vtable slot 193 == CanDeploy). Only a genuine carried item may be passed.
+//
+// INS:MIC registers the carried ordnance item and its thrown projectile as
+// SEPARATE server classes with SEPARATE classnames:
+//
+//   carried : "weapon_m18"   -> CGrenadeM18         (275 vtable slots)
+//   thrown  : "grenade_m18"  -> CGrenadeThrownBase  (190 vtable slots)
+//
+// The old lookup accepted any inventory classname that merely CONTAINED the
+// weapon token, so the thrown "grenade_m18" aliased the carried "weapon_m18".
+// Handing the 190-slot projectile to Weapon_Switch() made slot 193 read past
+// the end of its vtable and jump into .rodata (observed: CSmokeGrenade).
+//
+// The fix is two-part:
+//   * only "weapon_*" entities are considered (InsBotIsCarriedWeapon), and
+//   * the classname must match the requested weapon EXACTLY.
+//
+// See docs/superpowers/plans/2026-09-11-fix-smoke-weapon-switch-crash.md.
+// ---------------------------------------------------------------------------
+
+// INS:MIC carries at most MAX_WEAPONS weapon handles (SDK shareddefs.h == 48).
+#define INS_MAX_WEAPONS 48
+
+// True only for an entity the game exposes as a carried inventory item, i.e. an
+// entity whose classname is a "weapon_*" name.
+//
+// INS:MIC registers the carried item and the thrown projectile as SEPARATE
+// server classes with SEPARATE classnames:
+//
+//   carried : classname "weapon_m18"   server class CGrenadeM18         (275 vtable slots)
+//   thrown  : classname "grenade_m18"  server class CGrenadeThrownBase  (190 vtable slots)
+//
+// Only the carried form derives from CBaseCombatWeapon, so only it provides
+// CBaseCombatWeapon::CanDeploy at vtable slot 193. The 190-slot projectile form
+// reads past the end of its own vtable at that slot, which is what produced the
+// jump into .rodata. Filtering on the "weapon_" classname prefix - together with
+// the exact classname match required at the call sites - keeps it out.
+static bool InsBotIsCarriedWeapon(const char *entityClassName)
+{
+    return entityClassName && _strnicmp(entityClassName, "weapon_", 7) == 0;
+}
+
+// Resolve one m_hMyWeapons slot to a validated, carried weapon edict, or NULL.
+// pOutIndex (optional) receives the resolved entity index for diagnostics.
+static edict_t *InsBotResolveWeaponSlot(char *playerBase, int slot, int *pOutIndex)
+{
+    if (pOutIndex) *pOutIndex = 0;
+    if (!playerBase || !engine || s_offset_m_hMyWeapons < 0) return 0;
+    if (slot < 0 || slot >= INS_MAX_WEAPONS) return 0;
+    int h = *(int *)(playerBase + s_offset_m_hMyWeapons + slot * 4);
+    if (h == -1 || h == 0) return 0;
+    int entIndex = h & 0xFFF;
+    if (entIndex < 1 || entIndex >= 2048) return 0;
+    edict_t *e = engine->PEntityOfEntIndex(entIndex);
+    if (!e || e->IsFree()) return 0;
+    if (!InsBotIsCarriedWeapon(e->GetClassName())) return 0;
+    if (pOutIndex) *pOutIndex = entIndex;
+    return e;
 }
 
 void CInsBot::PruneDuplicateWeapons()
@@ -8136,23 +8204,31 @@ bool CInsBot::SwitchToWeapon(const char *weaponClass, bool force)
         return false;
 
     char *base = (char *)pPlayer;
-    const char *token = weaponClass;
-    if (!_strnicmp(token, "weapon_", 7)) token += 7;
 
-    for (int i = 0; i < 48; i++)
+    for (int i = 0; i < INS_MAX_WEAPONS; i++)
     {
-        int h = *(int *)(base + s_offset_m_hMyWeapons + i * 4);
-        if (h == -1 || h == 0) continue;
-        int entIndex = h & 0xFFF;
-        if (entIndex < 1 || entIndex > 2048) continue;
-        edict_t *wEnt = engine->PEntityOfEntIndex(entIndex);
-        if (!wEnt || wEnt->IsFree() || !wEnt->GetUnknown()) continue;
+        // Validated resolver: rejects empty slots, recycled edict indices and
+        // anything that is not a carried CBaseCombatWeapon. Handing a thrown
+        // grenade (or any other non-weapon) to Weapon_Switch() is what crashed
+        // the server - see InsBotIsCarriedWeapon() above.
+        edict_t *wEnt = InsBotResolveWeaponSlot(base, i, 0);
+        if (!wEnt) continue;
         const char *cn = wEnt->GetClassName();
-        if (cn && (!_stricmp(cn, weaponClass) || (token[0] && InsBot_stristr(cn, token))))
+        // EXACT match only. The old code also accepted any classname merely
+        // CONTAINING the token ("m18"), which is how the thrown "grenade_m18"
+        // projectile aliased the carried "weapon_m18".
+        if (cn && !_stricmp(cn, weaponClass))
         {
             void *pWeapon = wEnt->GetUnknown()->GetBaseEntity();
             if (pWeapon)
             {
+                if (insbot_debug.GetBool())
+                {
+                    IServerNetworkable *dbgNet = wEnt->GetUnknown()->GetNetworkable();
+                    ServerClass *dbgSc = dbgNet ? dbgNet->GetServerClass() : 0;
+                    BotDbg("[insbots] %s weapon switch -> %s [%s]\n", m_name, cn,
+                           (dbgSc && dbgSc->GetName()) ? dbgSc->GetName() : "?");
+                }
                 if (s_offset_flNextAttack >= 0)
                     *(float *)(base + s_offset_flNextAttack) = gpGlobals ? gpGlobals->curtime : 0.0f;
                 void **vtable = *(void ***)pPlayer;
@@ -8265,26 +8341,15 @@ bool CInsBot::HasWeapon(const char *weaponClass) const
     char *base = (char *)unk->GetBaseEntity();
     if (!base) return true;
 
-    // Tokenize weaponClass by stripping optional "weapon_" prefix (e.g. "weapon_m67" -> "m67")
-    const char *token = weaponClass;
-    if (!_strnicmp(token, "weapon_", 7)) token += 7;
-
-    for (int i = 0; i < 48; i++)
+    for (int i = 0; i < INS_MAX_WEAPONS; i++)
     {
-        int h = *(int *)(base + s_offset_m_hMyWeapons + i * 4);
-        if (h == -1 || h == 0) continue;
-        int entIndex = h & 0xFFF;
-        if (entIndex < 1 || entIndex > 2048) continue;
-        edict_t *wEnt = engine->PEntityOfEntIndex(entIndex);
-        if (!wEnt || wEnt->IsFree()) continue;
-
-        // Compare against ServerClass name (e.g. "CGrenadeM67", "CGrenadeRGD5", "CGrenadeM18")
+        // Validated resolver: only a carried "weapon_*" item can satisfy
+        // HasWeapon, so thrown ordnance ("grenade_m18") no longer aliases it.
+        edict_t *wEnt = InsBotResolveWeaponSlot(base, i, 0);
+        if (!wEnt) continue;
         const char *cn = wEnt->GetClassName();
-        if (cn)
-        {
-            if (!_stricmp(cn, weaponClass) || (token[0] && InsBot_stristr(cn, token)))
-                return true;
-        }
+        if (cn && !_stricmp(cn, weaponClass))   // exact: see SwitchToWeapon()
+            return true;
     }
     return false;
 }
