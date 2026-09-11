@@ -5009,6 +5009,17 @@ static bool IsDoorClosedOrClosing(void *doorBase, const char *cn)
 }
 
 
+static bool HasDoorwayLineOfSight(const Vector &from, const Vector &to)
+{
+    if (!enginetrace) return true;
+    Ray_t ray;
+    ray.Init(from + Vector(0, 0, 36.0f), to + Vector(0, 0, 36.0f));
+    CTraceFilterWorldOnly filter;
+    trace_t tr;
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &filter, &tr);
+    return !tr.startsolid && !tr.allsolid && tr.fraction >= 0.95f;
+}
+
 bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
 {
     if (!insbot_doorway_sprint.GetBool())
@@ -5024,9 +5035,9 @@ bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
 
     Vector pos = m_info->GetAbsOrigin();
     int startIdx = (m_pathCursor > 0) ? m_pathCursor - 1 : 0;
-    int maxCheck = (startIdx + 2 < m_pathLen) ? startIdx + 2 : m_pathLen - 1;
+    int maxCheck = (m_pathCursor + 2 < m_pathLen) ? m_pathCursor + 2 : m_pathLen - 1;
 
-    for (int i = startIdx; i < maxCheck; i++)
+    for (int i = startIdx; i <= maxCheck && i + 1 < m_pathLen; i++)
     {
         int fromIdx = m_path[i];
         int toIdx = m_path[i + 1];
@@ -5042,16 +5053,34 @@ bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
                 const NavAreaData *toA = g_NavMesh.Area(toIdx);
                 if (!fromA || !toA) continue;
 
-                Vector normal = toA->center - fromA->center;
-                normal.z = 0.0f;
-                float nLen = normal.Length2D();
-                if (nLen > 0.001f)
-                    normal /= nLen;
-                else
-                    normal = Vector(1.0f, 0.0f, 0.0f);
+                float lx = fromA->lo.x > toA->lo.x ? fromA->lo.x : toA->lo.x;
+                float hx = fromA->hi.x < toA->hi.x ? fromA->hi.x : toA->hi.x;
+                float ly = fromA->lo.y > toA->lo.y ? fromA->lo.y : toA->lo.y;
+                float hy = fromA->hi.y < toA->hi.y ? fromA->hi.y : toA->hi.y;
+
+                Vector seamAxis = ((hx - lx) <= (hy - ly))
+                                ? Vector(0.0f, 1.0f, 0.0f)
+                                : Vector(1.0f, 0.0f, 0.0f);
+                Vector normal(seamAxis.y, -seamAxis.x, 0.0f);
+                Vector toTravel = toA->center - fromA->center;
+                if (toTravel.x * normal.x + toTravel.y * normal.y < 0.0f)
+                {
+                    normal.x = -normal.x;
+                    normal.y = -normal.y;
+                }
+
+                // Check half-space approach: if bot is already past portal threshold, skip to next edge
+                float dotNormal = (pos.x - safeCenter.x) * normal.x + (pos.y - safeCenter.y) * normal.y;
+                if (dotNormal > 16.0f)
+                    continue;
 
                 Vector runwayPoint = safeCenter - normal * 120.0f;
                 runwayPoint.z = safeCenter.z;
+
+                bool prevBraked = m_doorwayRunway.active
+                    && (fabsf(m_doorwayRunway.center.x - safeCenter.x) < 4.0f)
+                    && (fabsf(m_doorwayRunway.center.y - safeCenter.y) < 4.0f)
+                    && m_doorwayRunway.apexBraked;
 
                 outRunway.active = true;
                 outRunway.center = safeCenter;
@@ -5059,9 +5088,13 @@ bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
                 outRunway.runwayPoint = runwayPoint;
                 outRunway.halfSpan = safeHalf;
                 outRunway.distToPortal = sqrtf(distSq);
+                outRunway.apexBraked = prevBraked;
+                int currentEdgeIdx = (m_pathCursor > 0) ? (m_pathCursor - 1) : 0;
+                outRunway.isImmediateEdge = (i == currentEdgeIdx);
 
                 float portalYaw = atan2f(normal.y, normal.x) * (180.0f / 3.14159265f);
-                outRunway.turnAngle = fabsf(SignedAngleDiff(portalYaw, m_headingYaw));
+                float travelYaw = m_haveLastNavMoveYaw ? m_lastNavMoveYaw : m_curAngles.y;
+                outRunway.turnAngle = fabsf(SignedAngleDiff(portalYaw, travelYaw));
 
                 outRunway.isChained = false;
                 if (i + 2 < m_pathLen)
@@ -5088,9 +5121,12 @@ bool CInsBot::VerifyDoorwayHullClearance(DoorwayRunwayState &runway)
 
     Vector start = runway.center - runway.normal * 30.0f;
     Vector end   = runway.center + runway.normal * 48.0f;
+    start.z += 16.0f;
+    end.z   += 16.0f;
 
     Ray_t ray;
-    ray.Init(start, end, Vector(-16, -16, 0), Vector(16, 16, 72));
+    // Elevated sweep: 16u off floor up to 72u eye height (56u ray height)
+    ray.Init(start, end, Vector(-16, -16, 0), Vector(16, 16, 56));
 
     CTraceFilterSkipPlayers filter(EdictHandleEntity(m_edict));
     trace_t tr;
@@ -5122,7 +5158,11 @@ bool CInsBot::VerifyDoorwayHullClearance(DoorwayRunwayState &runway)
 
 bool CInsBot::TeammateInDoorwayCorridor(const DoorwayRunwayState &runway, int mySlot) const
 {
-    if (!runway.active) return false;
+    if (!runway.active || !m_info) return false;
+    Vector pos = m_info->GetAbsOrigin();
+    Vector toMe = pos - runway.center;
+    float myAlongNormal = toMe.x * runway.normal.x + toMe.y * runway.normal.y;
+
     for (int i = 0; i < gpGlobals->maxClients; i++)
     {
         if (i == mySlot) continue;
@@ -5137,7 +5177,8 @@ bool CInsBot::TeammateInDoorwayCorridor(const DoorwayRunwayState &runway, int my
         if (distSq > 160.0f * 160.0f) continue;
 
         float alongNormal = toOther.x * runway.normal.x + toOther.y * runway.normal.y;
-        if (alongNormal >= -140.0f && alongNormal <= 48.0f)
+        // Only count teammates who are ahead of me along the approach corridor
+        if (alongNormal > (myAlongNormal + 16.0f) && alongNormal <= 48.0f)
         {
             return true;
         }
@@ -7688,6 +7729,15 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         {
             immTarget = m_moveTarget;   // the current portal/waypoint
             ProbeUpcomingDoorwayRunway(m_doorwayRunway);
+            if (m_doorwayRunway.active && m_doorwayRunway.isImmediateEdge
+                && m_doorwayRunway.distToPortal > 60.0f
+                && m_doorwayRunway.turnAngle > 30.0f)
+            {
+                if (HasDoorwayLineOfSight(pos, m_doorwayRunway.runwayPoint))
+                {
+                    immTarget = m_doorwayRunway.runwayPoint;
+                }
+            }
             if (m_doorwayRunway.active)
             {
                 VerifyDoorwayHullClearance(m_doorwayRunway);
@@ -7775,18 +7825,35 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                               fwd, side, m_navTurnAngle, sourceTurn);
 
                 // --- Doorway runway alignment override (post-SmoothNavTurn) ---
-                if (m_doorwayRunway.active && m_doorwayRunway.distToPortal < 140.0f)
+                if (m_doorwayRunway.active)
+                {
+                    Vector toPortal = pos - m_doorwayRunway.center;
+                    float alongNormal = toPortal.x * m_doorwayRunway.normal.x + toPortal.y * m_doorwayRunway.normal.y;
+                    if (alongNormal > 16.0f)
+                    {
+                        // Bot has passed through portal; release camera and trajectory override
+                        m_doorwayRunway.active = false;
+                    }
+                }
+
+                if (m_doorwayRunway.active && m_doorwayRunway.isImmediateEdge
+                    && m_doorwayRunway.distToPortal < 140.0f
+                    && HasDoorwayLineOfSight(pos, m_doorwayRunway.center))
                 {
                     float doorYaw = atan2f(m_doorwayRunway.normal.y, m_doorwayRunway.normal.x) * (180.0f / 3.14159265f);
-                    view.y = doorYaw;
+                    float turnDiff = SignedAngleDiff(doorYaw, view.y);
+                    float maxStep = 360.0f * (gpGlobals ? gpGlobals->interval_per_tick : 0.015f);
+                    if (turnDiff > maxStep) turnDiff = maxStep;
+                    else if (turnDiff < -maxStep) turnDiff = -maxStep;
+                    view.y = fmodf(view.y + turnDiff + 360.0f, 360.0f);
                     view.x = 0.0f;
 
                     Vector toBot = pos - m_doorwayRunway.center;
                     float crossTrackError = toBot.x * (-m_doorwayRunway.normal.y) + toBot.y * (m_doorwayRunway.normal.x);
 
                     float strafe = -crossTrackError * 4.0f;
-                    if (strafe > 60.0f) strafe = 60.0f;
-                    if (strafe < -60.0f) strafe = -60.0f;
+                    if (strafe > 55.0f) strafe = 55.0f;
+                    if (strafe < -55.0f) strafe = -55.0f;
 
                     fwd = navSpeed;
                     side = strafe;
@@ -7829,6 +7896,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         }
         else
         {
+            ResetDoorwayRunway();
             // no path found (or already in dest area): walk straight at it,
             // but only when the endpoint itself is off-mesh or NAV state is
             // neutral. A valid start+goal with no directed route is
@@ -11117,12 +11185,13 @@ overwatch_done:
     bool hadithaNoSprint = hadithaGate || (!m_traversingLadder
         && IsHadithaDoorNoSprintZone(m_path, m_pathLen, m_pathCursor, pos));
 
-    // Doorway apex braking timer
-    if (m_doorwayRunway.active && m_doorwayRunway.turnAngle > 35.0f
-        && m_doorwayRunway.distToPortal > 80.0f && m_doorwayRunway.distToPortal < 180.0f)
+    // Doorway apex braking timer (single-shot per approach)
+    if (m_doorwayRunway.active && !m_doorwayRunway.apexBraked
+        && m_doorwayRunway.turnAngle > 35.0f
+        && m_doorwayRunway.distToPortal > 80.0f && m_doorwayRunway.distToPortal < 160.0f)
     {
-        if (now >= m_doorwayApexBrakingUntil)
-            m_doorwayApexBrakingUntil = now + 0.28f;
+        m_doorwayApexBrakingUntil = now + 0.28f;
+        m_doorwayRunway.apexBraked = true;
     }
 
     // CQB Threat detection at doorway

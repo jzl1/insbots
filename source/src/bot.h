@@ -88,6 +88,8 @@ struct DoorwayRunwayState
     bool   isSwingDoor;
     bool   doorClear;
     bool   isChained;
+    bool   apexBraked;
+    bool   isImmediateEdge;
 };
 
 enum BotState
