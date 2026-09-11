@@ -2987,8 +2987,18 @@ void CInsBot::SendJoinCommands()
 // See docs/superpowers/plans/2026-09-11-fix-smoke-weapon-switch-crash.md.
 // ---------------------------------------------------------------------------
 
-// INS:MIC carries at most MAX_WEAPONS weapon handles (SDK shareddefs.h == 48).
-#define INS_MAX_WEAPONS 48
+// INS:MIC's m_hMyWeapons is a SEVEN-element array, NOT the SDK's MAX_WEAPONS (48).
+//
+// Verified against the shipped binaries rather than the SDK header:
+//   Linux   CBasePlayer::RemoveAllWeapons @0x6CB440 does `add eax, 0xa38` and
+//           iterates `cmp [ebp-0xc], 6 / jg`  -> 7 slots.
+//   Windows 0x10103DDC and 0x1011CED2 both do `mov eax,[ebx+esi*4+0xa24]` with
+//           a `cmp esi, 7 / jl` guard -> 7 slots, and 0x1011E60C places the next
+//           member at +0xa40, i.e. 0xa40-0xa24 = 0x1C = 7 * sizeof(CHandle).
+//
+// Reading past the 7th slot walks into adjacent player members and can resolve a
+// garbage handle to a live weapon_* entity, so this bound must stay 7.
+#define INS_MAX_WEAPONS 7
 
 // True only for an entity the game exposes as a carried inventory item, i.e. an
 // entity whose classname is a "weapon_*" name.
@@ -2999,11 +3009,11 @@ void CInsBot::SendJoinCommands()
 //   carried : classname "weapon_m18"   server class CGrenadeM18         (275 vtable slots)
 //   thrown  : classname "grenade_m18"  server class CGrenadeThrownBase  (190 vtable slots)
 //
-// Only the carried form derives from CBaseCombatWeapon, so only it provides
-// CBaseCombatWeapon::CanDeploy at vtable slot 193. The 190-slot projectile form
-// reads past the end of its own vtable at that slot, which is what produced the
-// jump into .rodata. Filtering on the "weapon_" classname prefix - together with
-// the exact classname match required at the call sites - keeps it out.
+// The 275-slot carried vtable extends past slot 193; the 190-slot projectile
+// vtable does NOT, so the CanDeploy call reads past the end of the projectile's
+// vtable and jumps into .rodata. The two are distinguished by their classname,
+// so filtering on the "weapon_" prefix - plus the exact classname match required
+// at the call sites - keeps the projectile out.
 static bool InsBotIsCarriedWeapon(const char *entityClassName)
 {
     return entityClassName && _strnicmp(entityClassName, "weapon_", 7) == 0;
