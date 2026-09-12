@@ -31,11 +31,11 @@
 #include "igameevents.h"
 #include "linux_offsets.h"
 
-#define INSBOTS_VERSION_NUM "0.20.2"
+#define INSBOTS_VERSION_NUM "0.20.3"
 #ifdef BUILD_TIMESTAMP
-#define INSBOTS_VERSION "0.20.2 (" BUILD_TIMESTAMP ")"
+#define INSBOTS_VERSION "0.20.3 (" BUILD_TIMESTAMP ")"
 #else
-#define INSBOTS_VERSION "0.20.2 (" __DATE__ " " __TIME__ ")"
+#define INSBOTS_VERSION "0.20.3 (" __DATE__ " " __TIME__ ")"
 #endif
 
 // ---- engine/game interface pointers ----------------------------------------

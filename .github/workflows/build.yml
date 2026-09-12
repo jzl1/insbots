@@ -14,9 +14,9 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (default: v0.20.2)'
+        description: 'Release Tag (default: v0.20.3)'
         required: false
-        default: 'v0.20.2'
+        default: 'v0.20.3'
         type: string
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then
             TAG="${{ inputs.release_tag }}"
           else
-            TAG="v0.20.2_${TIMESTAMP}"
+            TAG="v0.20.3_${TIMESTAMP}"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
@@ -181,11 +181,9 @@ jobs:
           prerelease: ${{ inputs.is_prerelease }}
           make_latest: true
           body: |
-            ### What's New in v0.20.2:
-            * **Accurate Doorway Sprinting & Trajectory Alignment:** Smooth aperture entry queuing, dynamic trajectory alignment, and heading anticipation through narrow doorways and portals without wall-clipping or abrupt deceleration.
-            * **Corner Navigation & Anti-Sticking:** Refined corner rounding geometry and velocity dampening preventing bots from getting caught on sharp building edges and geometry corners.
-            * **Reinforcement Wave Inventory Cleanup:** Robust weapon entity cleanup during player reinforcement respawns, preventing duplicate weapon spawning and server edict exhaustion (`ED_Alloc: no free edicts`).
-            * **Linux Weapon Switch VTable Parity:** Verified `CBasePlayer::Weapon_Switch` virtual table index (offset `0x370` / slot 220) across 32-bit Linux and Windows toolchains for crash-free grenade and smoke handling.
+            ### What's New in v0.20.3:
+            * **Grenade & Smoke Weapon-Switch Crash Fixed:** Bots switching to thrown ordnance could crash the server. INS:MIC registers the carried item (`weapon_m18`) and its thrown projectile (`grenade_m18`) as separate server classes with different vtable sizes, and the old lookup accepted the projectile; handing it to the game's weapon-switch call read past the end of its vtable. The lookup now only accepts genuine carried items, so bots switch grenades and smoke safely.
+            * **Bot Weapon Inventory Bound Corrected:** The carried-weapon scan was using the engine SDK's 48-slot constant, but INS:MIC players actually hold 7. The overscan read past the end of the inventory array into adjacent player fields and could resolve a garbage handle to a live weapon. The bound is now 7, verified against both the Linux and Windows game binaries.
 
           files: |
             release_assets/insbots-windows-x86.zip
