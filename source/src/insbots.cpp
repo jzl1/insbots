@@ -140,6 +140,7 @@ CfgVar insbot_doorway_sprint("doorway_sprint", "1", "accurate doorway sprint ali
 CfgVar insbot_stuck_nocollide("stuck_nocollide", "1", "try local player-body collision grace before stuck or doorway teleport (0=off)");
 CfgVar insbot_ladder_queue("ladder_queue", "1", "single-owner queues at both ends of typed NAV ladders (0=off)");
 CfgVar insbot_ladder_nocollide("ladder_nocollide", "1", "confirmed ladder owner/blocker collision grace before safe teleport (0=off)");
+CfgVar insbot_ladder_lip_tol("ladder_lip_tol", "4.0", "vertical tolerance (units) for latching the ladder dismount near the recorded lip; clamped to 0..6, above 6 the bot latches mid-shaft and thrashes on the 18u lost-height guard");
 CfgVar insbot_spawn_nocollide("spawn_nocollide", "1", "temporarily make newly spawned bots nonblocking to other grace bots (0=off)");
 CfgVar insbot_spawn_nocollide_time("spawn_nocollide_time", "5.0", "unfrozen simulation seconds before spawn collision is restored once the hull is clear");
 CfgVar insbot_goal_classnames("goal_classnames", "ins_objective,obj_t1,obj_t2", "objective entity classnames");

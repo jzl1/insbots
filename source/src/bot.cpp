@@ -239,6 +239,7 @@ extern CfgVar insbot_hear;
 extern CfgVar insbot_hear_range;
 extern CfgVar insbot_hear_speed;
 extern CfgVar insbot_hear_timeout;
+extern CfgVar insbot_ladder_lip_tol;
 extern CfgVar insbot_hear_cooldown;
 extern CfgVar insbot_detect;
 
@@ -1274,6 +1275,46 @@ float CInsBot::Now() const
     return gpGlobals->curtime;
 }
 
+// Vertical tolerance used to decide the bot has reached a ladder's recorded
+// lip.  The raw lip is a brush-AABB value that the player hull frequently
+// cannot occupy: the landing floor can sit ABOVE it (haditha ladder idx 4:
+// lip 75.0, floor 77.0), and even when the two align there is a residual
+// settle gap.  Measured shortfalls at the top of a completed climb were
+// 2.4u-3.1u, so a zero-tolerance test never fires on ascent and the bot
+// thrashes in RECOVERY forever.
+//
+// The ceiling below is empirical, not a margin calculation.  A larger
+// tolerance latches the dismount LOWER on the shaft (up: pos.z >= end - tol),
+// so the bot starts walking toward the landing while it is still hanging
+// below the lip.  The dismount controls stop the climb, the bot sags, and
+// once it drops past endHeight - 18 the lost-height guard in TraverseLadder
+// flips the phase back to ATTACHED: latch / sag / re-attach, forever.
+//
+// That guard is measured from endHeight, NOT from the latch point, so the
+// tolerance spends the guard's budget directly.  Measured on haditha ladder 4
+// (lip 75.0, landing floor 77.0), lost-height events per segment:
+//   tol 0/2/4/6 -> 0 events      tol 8 -> 8 events      tol 16 -> 33 events
+// and an independent 240s run at tol 12 produced 43 latches with 38 of them
+// reverting (observed sagging from a z=63.5 latch down to z=56.0, i.e. just
+// past the 57.0 guard).  The safe band therefore ends between 6 and 8.
+//
+// The ceiling is 6u: every measured shortfall (2.4u-3.1u) is still covered
+// and is closed by a single climb tick (~0.05-0.1s), while the guard keeps
+// 12u of headroom.  Raising it requires re-running the sweep - the earlier
+// uncapped/16u ceiling let an admin re-create the loop.
+//
+// Not every ladder is fixed by this: on haditha, ladders 0 and 1 fail an
+// earlier XY gate in PositionOnLadderLanding() (the ladder top sits outside
+// the landing NAV area's XY rect) and never reach this test at all.  Their
+// residual lost-height retries are a navmesh problem, not a tolerance one.
+static float LadderLipTol()
+{
+    float tol = insbot_ladder_lip_tol.GetFloat();
+    if (tol < 0.0f) tol = 0.0f;
+    if (tol > 6.0f) tol = 6.0f;
+    return tol;
+}
+
 static Vector LadderAreaInterior(int areaIdx, const Vector &lip);
 
 static int PlayerCollisionGroup(edict_t *edict)
@@ -2187,8 +2228,9 @@ bool CInsBot::UpdateBodyNoCollide(const Vector &pos, float now)
                     m_ladderClimbUp ? ladder->top : ladder->bottom) : pos;
             float endHeight = m_ladderClimbUp && ladder
                             ? ladder->top.z : landing.z;
+            float lipTol = LadderLipTol();
             bool atLip = ladder && (m_ladderClimbUp
-                ? pos.z >= endHeight : pos.z <= endHeight);
+                ? pos.z >= endHeight - lipTol : pos.z <= endHeight + lipTol);
             m_ladderPhase = atLip ? LADDER_PHASE_DISMOUNT
                                   : LADDER_PHASE_ATTACHED;
         }
@@ -4858,7 +4900,9 @@ bool CInsBot::TraverseLadder(int fromArea, int toArea, float &fwd, float &side,
         return true;
     }
 
-    bool reachedLip = up ? pos.z >= endHeight : pos.z <= endHeight;
+    float lipTol = LadderLipTol();
+    bool reachedLip = up ? (pos.z >= endHeight - lipTol)
+                         : (pos.z <= endHeight + lipTol);
     if (m_ladderPhase == LADDER_PHASE_RECOVERY
         && !m_bodyNoCollideActive && !m_bodyNoCollideEscalating
         && !m_bodyNoCollideAttempted)
@@ -4872,15 +4916,15 @@ bool CInsBot::TraverseLadder(int fromArea, int toArea, float &fwd, float &side,
         if (lostHeight && verticallyOnLadder)
         {
             m_ladderPhase = LADDER_PHASE_ATTACHED;
-            BotDbg("[insbots] %s ladder %d dismount lost height; climb resumed\n",
-                   m_name, ladderIdx);
+            BotDbg("[insbots] %s ladder %d dismount lost height; climb resumed (z=%.2f endH=%.2f)\n",
+                   m_name, ladderIdx, pos.z, endHeight);
         }
     }
 
     if (m_ladderPhase == LADDER_PHASE_ATTACHED && reachedLip)
     {
         m_ladderPhase = LADDER_PHASE_DISMOUNT;
-        BotDbg("[insbots] %s ladder %d dismount latched\n", m_name, ladderIdx);
+        BotDbg("[insbots] %s ladder %d dismount latched (z=%.2f top=%.2f floor=%.2f tol=%.1f)\n", m_name, ladderIdx, pos.z, ladder->top.z, landingPoint.z, lipTol);
     }
 
     bool dismountControl = m_ladderPhase == LADDER_PHASE_DISMOUNT
@@ -11382,8 +11426,9 @@ overwatch_done:
                     Vector rawLip = m_ladderClimbUp ? ladder->top : ladder->bottom;
                     Vector landing = LadderAreaInterior(m_ladderToArea, rawLip);
                     float endHeight = m_ladderClimbUp ? ladder->top.z : landing.z;
-                    bool atLip = m_ladderClimbUp ? pos.z >= endHeight
-                                                 : pos.z <= endHeight;
+                    float lipTol = LadderLipTol();
+                    bool atLip = m_ladderClimbUp ? pos.z >= endHeight - lipTol
+                                                 : pos.z <= endHeight + lipTol;
                     if (m_ladderPhase == LADDER_PHASE_DISMOUNT
                         || (m_ladderPhase == LADDER_PHASE_RECOVERY && atLip))
                     {
