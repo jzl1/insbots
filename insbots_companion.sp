@@ -76,7 +76,8 @@ public void OnPluginStart()
     g_cvRadioAutoPromote = CreateConVar("insbots_radio_auto_promote", "0", "Auto-promote any radio user to squad leader (legacy behavior)", FCVAR_NOTIFY);
     g_cvCustomSquadSprite = CreateConVar("insbots_custom_squad_sprite", "1", "Attach custom env_sprite squadmate indicator (set 0 if duplicating native commander indicator)", FCVAR_NOTIFY);
     g_cvSlotRequestEnabled = CreateConVar("ins_slot_request_enabled", "1", "Enable or disable the slot requester feature (1 = enabled, 0 = disabled)", FCVAR_NOTIFY);
-    RegConsoleCmd("ins_request_slot", Command_RequestSlot, "Request a class slot occupied by a bot.");
+    RegConsoleCmd("sm_slotrequest", Command_SlotRequestMenu, "Open menu to take a bot-occupied slot (F2)");
+    RegConsoleCmd("sm_request", Command_SlotRequestMenu, "Alias for sm_slotrequest");
 }
 
 public void OnClientPutInServer(int client)
@@ -91,6 +92,7 @@ public Action Timer_AutoBindComms(Handle timer, any client)
 {
     if (client > 0 && IsClientInGame(client) && !IsFakeClient(client))
     {
+        ClientCommand(client, "bind F2 sm_slotrequest");
         ClientCommand(client, "bind F3 sm_squadorders");
         PrintToChat(client, "[Squad] F3 bound to squad orders. Type !orders anytime.");
     }
@@ -187,6 +189,7 @@ public void OnClientDisconnect(int client)
     if (client > 0 && client <= MaxClients)
     {
         RemoveCoveringFireMarker(client);
+        RemoveDefendMarker(client);
         if (g_bSquadActive[client])
         {
             g_bSquadActive[client] = false;
@@ -211,46 +214,27 @@ public Action OnClientSayCommand(int client, const char[] command, const char[] 
 
     // 1. Squad Commands (!squad, !lead, !dismiss) are handled automatically by RegConsoleCmd (sm_squad, sm_lead, sm_dismiss)
 
-    // 2. Slot Request Commands (!request, !r)
+    // 2. Slot Request Commands (!request, !r, !slot) -> Open F2 Menu
     int idx = 0;
     while (text[idx] == ' ') idx++;
 
     bool isRequest = false;
-    int cmdLen = 0;
-
-    if (strncmp(text[idx], "!request ", 9, false) == 0) { isRequest = true; cmdLen = 9; }
-    else if (strcmp(text[idx], "!request", false) == 0)  { isRequest = true; cmdLen = 8; }
-    else if (strncmp(text[idx], "!r ", 3, false) == 0)   { isRequest = true; cmdLen = 3; }
-    else if (strcmp(text[idx], "!r", false) == 0)        { isRequest = true; cmdLen = 2; }
+    if (strncmp(text[idx], "!request", 8, false) == 0 || strncmp(text[idx], "/request", 8, false) == 0)
+    {
+        if (text[idx + 8] == '\0' || text[idx + 8] == ' ') isRequest = true;
+    }
+    else if (strncmp(text[idx], "!r", 2, false) == 0 || strncmp(text[idx], "/r", 2, false) == 0)
+    {
+        if (text[idx + 2] == '\0' || text[idx + 2] == ' ') isRequest = true;
+    }
+    else if (strncmp(text[idx], "!slot", 5, false) == 0 || strncmp(text[idx], "/slot", 5, false) == 0)
+    {
+        if (text[idx + 5] == '\0' || text[idx + 5] == ' ') isRequest = true;
+    }
 
     if (isRequest)
     {
-        if (!g_cvSlotRequestEnabled.BoolValue)
-        {
-            PrintToChat(client, "[SlotRequester] Slot request has been disabled by admin.");
-            return Plugin_Handled;
-        }
-
-        char classArg[64];
-        if (text[idx + cmdLen] != '\0')
-        {
-            strcopy(classArg, sizeof(classArg), text[idx + cmdLen]);
-            TrimString(classArg);
-        }
-        else
-        {
-            classArg[0] = '\0';
-        }
-
-        if (classArg[0] != '\0')
-        {
-            ProcessSlotRequest(client, classArg);
-        }
-        else
-        {
-            PrintToChat(client, "[SlotRequester] Usage: !request <class|slot> (or !r <class|slot>)");
-        }
-
+        OpenSlotRequestMenu(client);
         return Plugin_Handled;
     }
 
@@ -306,7 +290,7 @@ void SetGlowOutline(int bot)
 
     // Timer creates the sprite on first tick (bot may not be alive yet), then
     // just monitors validity. Sprite visibility is controlled by SetTransmit hook.
-    g_hGlowTimer[bot] = CreateTimer(0.4, Timer_DrawBeamRing, bot, TIMER_REPEAT);
+    g_hGlowTimer[bot] = CreateTimer(0.4, Timer_DrawBeamRing, bot, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 void KillGlowTimer(int bot)
@@ -1145,110 +1129,91 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
 // ============================================================================
 // Slot Requester Logic
 // ============================================================================
-public Action Command_RequestSlot(int client, int args)
+void GetClassNameFromId(int team, int classId, char[] name, int maxlen)
 {
-    if (client <= 0 || !IsClientInGame(client)) return Plugin_Handled;
-
-    if (!g_cvSlotRequestEnabled.BoolValue)
+    if (team == 1) // USMC
     {
-        PrintToChat(client, "[SlotRequester] Slot request has been disabled by admin.");
-        return Plugin_Handled;
+        switch (classId)
+        {
+            case 0: strcopy(name, maxlen, "Sergeant");
+            case 1: strcopy(name, maxlen, "Rifleman");
+            case 2: strcopy(name, maxlen, "Engineer");
+            case 3: strcopy(name, maxlen, "Support");
+            case 10: strcopy(name, maxlen, "Grenadier");
+            case 15: strcopy(name, maxlen, "Marksman");
+            default: Format(name, maxlen, "Class %d", classId);
+        }
     }
-
-    if (args < 1)
+    else if (team == 2) // Iraqi
     {
-        PrintToChat(client, "[SlotRequester] Usage: ins_request_slot <class>");
-        return Plugin_Handled;
+        switch (classId)
+        {
+            case 0: strcopy(name, maxlen, "Militant");
+            case 1: strcopy(name, maxlen, "Rifleman");
+            case 2: strcopy(name, maxlen, "Sapper");
+            case 3: strcopy(name, maxlen, "Support");
+            case 10: strcopy(name, maxlen, "RPG-7");
+            case 15: strcopy(name, maxlen, "Sniper");
+            default: Format(name, maxlen, "Class %d", classId);
+        }
     }
+    else
+    {
+        switch (classId)
+        {
+            case 0: strcopy(name, maxlen, "Squad Leader");
+            case 1: strcopy(name, maxlen, "Rifleman");
+            case 2: strcopy(name, maxlen, "Engineer / Sapper");
+            case 3: strcopy(name, maxlen, "Support");
+            case 10: strcopy(name, maxlen, "RPG / Grenadier");
+            case 15: strcopy(name, maxlen, "Marksman / Sniper");
+            default: Format(name, maxlen, "Class %d", classId);
+        }
+    }
+}
 
-    char classArg[64];
-    GetCmdArg(1, classArg, sizeof(classArg));
-    ProcessSlotRequest(client, classArg);
+void GetSquadDisplayName(int squadIndex, char[] name, int maxlen)
+{
+    Format(name, maxlen, "Squad %d", squadIndex + 1);
+}
 
+public Action Command_SlotRequestMenu(int client, int args)
+{
+    if (client <= 0 || !IsClientInGame(client) || IsFakeClient(client))
+        return Plugin_Handled;
+
+    OpenSlotRequestMenu(client);
     return Plugin_Handled;
 }
 
-int GetClassIdFromString(const char[] req)
+void OpenSlotRequestMenu(int client)
 {
-    char lower[64];
-    strcopy(lower, sizeof(lower), req);
-    for (int i = 0; lower[i] != '\0'; i++)
+    if (!g_cvSlotRequestEnabled.BoolValue)
     {
-        lower[i] = CharToLower(lower[i]);
+        PrintToChat(client, "[SlotRequester] Slot request has been disabled by admin.");
+        return;
     }
 
-    if (StrContains(lower, "sergeant") != -1 || StrContains(lower, "militant") != -1 || StrContains(lower, "leader") != -1 || StrContains(lower, "0") != -1) return 0;
-    if (StrContains(lower, "rifleman") != -1 || StrContains(lower, "1") != -1) return 1;
-    if (StrContains(lower, "engineer") != -1 || StrContains(lower, "sapper") != -1 || StrContains(lower, "2") != -1) return 2;
-    if (StrContains(lower, "support") != -1 || StrContains(lower, "mg") != -1 || StrContains(lower, "3") != -1) return 3;
-    if (StrContains(lower, "grenadier") != -1 || StrContains(lower, "rpg") != -1 || StrContains(lower, "10") != -1) return 10;
-    if (StrContains(lower, "marksman") != -1 || StrContains(lower, "sniper") != -1 || StrContains(lower, "15") != -1) return 15;
-
-    return -1;
-}
-
-int GetExactSlotFromString(const char[] req)
-{
-    char lower[64];
-    strcopy(lower, sizeof(lower), req);
-    for (int i = 0; lower[i] != '\0'; i++)
-    {
-        lower[i] = CharToLower(lower[i]);
-    }
-
-    if (StrEqual(lower, "a1")) return 0;
-    if (StrEqual(lower, "a2")) return 1;
-    if (StrEqual(lower, "a3")) return 2;
-    if (StrEqual(lower, "a4")) return 3;
-    if (StrEqual(lower, "b1")) return 4;
-    if (StrEqual(lower, "b2")) return 5;
-    if (StrEqual(lower, "b3")) return 6;
-    if (StrEqual(lower, "b4")) return 7;
-
-    return -1;
-}
-
-void ProcessSlotRequest(int client, const char[] classString)
-{
     int reqTeam = GetClientTeam(client);
-    if (reqTeam < 1) 
+    if (reqTeam < 1)
     {
         PrintToChat(client, "[SlotRequester] You must be on a team to request a slot!");
         return;
     }
 
-    int requestedSquad = -1;
-    char slotStr[64];
+    Menu menu = new Menu(SlotRequestMenuHandler);
+    menu.SetTitle("Select Class (Press #):");
 
-    char parts[2][32];
-    int numParts = ExplodeString(classString, " ", parts, 2, sizeof(parts[]));
-
-    if (numParts == 2)
+    int availableRoleCount = 0;
+    int squadIndex = 0;
+    bool roleAdded[8][32];
+    for (int sq = 0; sq < 8; sq++)
     {
-        requestedSquad = StringToInt(parts[0]) - 1;
-        strcopy(slotStr, sizeof(slotStr), parts[1]);
-    }
-    else
-    {
-        strcopy(slotStr, sizeof(slotStr), parts[0]);
-        if (strlen(slotStr) == 3 && (slotStr[0] == '1' || slotStr[0] == '2') && (slotStr[1] == 'a' || slotStr[1] == 'A' || slotStr[1] == 'b' || slotStr[1] == 'B'))
+        for (int cl = 0; cl < 32; cl++)
         {
-            requestedSquad = (slotStr[0] - '0') - 1;
-            strcopy(slotStr, sizeof(slotStr), slotStr[1]);
+            roleAdded[sq][cl] = false;
         }
     }
-
-    int exactSlot = GetExactSlotFromString(slotStr);
-    int targetClassId = exactSlot != -1 ? -1 : GetClassIdFromString(slotStr);
-
-    if (exactSlot == -1 && targetClassId == -1)
-    {
-        PrintToChat(client, "[SlotRequester] Invalid class or slot! (e.g. sniper, a1, 2a3)");
-        return;
-    }
-
-    bool foundSlot = false;
-    int squadIndex = 0;
 
     for (int i = 1; i <= GetMaxEntities(); i++)
     {
@@ -1262,43 +1227,46 @@ void ProcessSlotRequest(int client, const char[] classString)
             int team = GetEntData(i, 860, 4);
             if (team != reqTeam) continue;
 
-            if (requestedSquad != -1 && squadIndex != requestedSquad)
-            {
-                squadIndex++;
-                continue;
-            }
+            char squadName[32];
+            GetSquadDisplayName(squadIndex, squadName, sizeof(squadName));
 
             for (int s = 0; s < 8; s++)
             {
-                if (exactSlot != -1 && s != exactSlot) continue;
+                int playerId = GetEntData(i, 1024 + (s * 4), 4);
+                bool isAvailable = false;
 
-                int slotClassId = GetEntData(i, 992 + (s * 4), 4);
-
-                if (exactSlot != -1 || slotClassId == targetClassId)
+                if (playerId != 0 && playerId != -1)
                 {
-                    foundSlot = true;
-                    int playerId = GetEntData(i, 1024 + (s * 4), 4);
-
-                    if (playerId != 0 && playerId != -1)
+                    int botEnt = playerId & 0xFFF;
+                    if (botEnt > 0 && botEnt <= MaxClients && IsClientInGame(botEnt) && IsFakeClient(botEnt))
                     {
-                        int botEnt = playerId & 0xFFF;
-                        if (botEnt > 0 && botEnt <= MaxClients && IsClientInGame(botEnt) && IsFakeClient(botEnt))
-                        {
-                            char botName[64];
-                            GetClientName(botEnt, botName, sizeof(botName));
+                        isAvailable = true;
+                    }
+                }
+                else
+                {
+                    // Empty slot is open for taking
+                    isAvailable = true;
+                }
 
-                            KickClient(botEnt, "Slot requested by player");
+                if (isAvailable)
+                {
+                    int slotClassId = GetEntData(i, 992 + (s * 4), 4);
+                    if (slotClassId >= 0 && slotClassId < 32 && !roleAdded[squadIndex][slotClassId])
+                    {
+                        roleAdded[squadIndex][slotClassId] = true;
 
-                            int uiTeamIdx = reqTeam - 1;
-                            int magicNumber = 5 + squadIndex + (s * 4);
+                        char className[32];
+                        GetClassNameFromId(reqTeam, slotClassId, className, sizeof(className));
 
-                            char joinCmd[128];
-                            Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
-                            ClientCommand(client, joinCmd);
+                        char info[64];
+                        Format(info, sizeof(info), "%d;%d;%s", squadIndex, slotClassId, className);
 
-                            PrintToChat(client, "[SlotRequester] Kicked bot '%s' so you can take the %s slot!", botName, classString);
-                            return;
-                        }
+                        char display[64];
+                        Format(display, sizeof(display), "%s - %s", className, squadName);
+
+                        menu.AddItem(info, display);
+                        availableRoleCount++;
                     }
                 }
             }
@@ -1306,14 +1274,155 @@ void ProcessSlotRequest(int client, const char[] classString)
         }
     }
 
-    if (!foundSlot)
+    if (availableRoleCount == 0)
     {
-        PrintToChat(client, "[SlotRequester] Your team does not have that class/slot available.");
+        menu.AddItem("", "No slots available on your team", ITEMDRAW_DISABLED);
     }
-    else
+
+    menu.ExitButton = true;
+    menu.Display(client, 20);
+}
+
+public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int item)
+{
+    if (action == MenuAction_Select)
     {
-        PrintToChat(client, "[SlotRequester] All slots of that type are currently empty or occupied by humans.");
+        char info[64];
+        menu.GetItem(item, info, sizeof(info));
+
+        if (!info[0])
+            return 0;
+
+        char parts[3][32];
+        if (ExplodeString(info, ";", parts, 3, sizeof(parts[])) >= 3)
+        {
+            int targetSquadIndex = StringToInt(parts[0]);
+            int targetClassId = StringToInt(parts[1]);
+            char className[32];
+            strcopy(className, sizeof(className), parts[2]);
+
+            int reqTeam = GetClientTeam(client);
+            if (reqTeam < 1)
+            {
+                PrintToChat(client, "[SlotRequester] You must be on a team to take a slot!");
+                return 0;
+            }
+
+            // Find matching squad entity
+            int squadIndex = 0;
+            int squadEnt = -1;
+            for (int i = 1; i <= GetMaxEntities(); i++)
+            {
+                if (!IsValidEntity(i)) continue;
+                char classname[64];
+                if (!GetEntityNetClass(i, classname, sizeof(classname))) continue;
+
+                if (StrEqual(classname, "CINSSquad"))
+                {
+                    int team = GetEntData(i, 860, 4);
+                    if (team == reqTeam)
+                    {
+                        if (squadIndex == targetSquadIndex)
+                        {
+                            squadEnt = i;
+                            break;
+                        }
+                        squadIndex++;
+                    }
+                }
+            }
+
+            if (squadEnt == -1)
+            {
+                PrintToChat(client, "[SlotRequester] That squad is no longer available.");
+                return 0;
+            }
+
+            // Collect empty and bot-occupied slots for this role in the target squad
+            int emptySlots[8];
+            int emptyCount = 0;
+            int botSlots[8];
+            int botEnts[8];
+            int botCount = 0;
+
+            for (int s = 0; s < 8; s++)
+            {
+                int slotClassId = GetEntData(squadEnt, 992 + (s * 4), 4);
+                if (slotClassId == targetClassId)
+                {
+                    int playerId = GetEntData(squadEnt, 1024 + (s * 4), 4);
+                    if (playerId == 0 || playerId == -1)
+                    {
+                        emptySlots[emptyCount++] = s;
+                    }
+                    else
+                    {
+                        int botEnt = playerId & 0xFFF;
+                        if (botEnt > 0 && botEnt <= MaxClients && IsClientInGame(botEnt) && IsFakeClient(botEnt))
+                        {
+                            botSlots[botCount] = s;
+                            botEnts[botCount] = botEnt;
+                            botCount++;
+                        }
+                    }
+                }
+            }
+
+            int chosenSlot = -1;
+            int targetBot = 0;
+
+            // Prioritize empty slots first, then randomize among bot slots
+            if (emptyCount > 0)
+            {
+                int pick = (emptyCount == 1) ? 0 : GetRandomInt(0, emptyCount - 1);
+                chosenSlot = emptySlots[pick];
+            }
+            else if (botCount > 0)
+            {
+                int pick = (botCount == 1) ? 0 : GetRandomInt(0, botCount - 1);
+                chosenSlot = botSlots[pick];
+                targetBot = botEnts[pick];
+            }
+
+            if (chosenSlot != -1)
+            {
+                char botName[64];
+                if (targetBot > 0)
+                {
+                    GetClientName(targetBot, botName, sizeof(botName));
+                    KickClient(targetBot, "Slot requested by player");
+                }
+
+                int uiTeamIdx = reqTeam - 1;
+                int magicNumber = 5 + targetSquadIndex + (chosenSlot * 4);
+
+                char joinCmd[128];
+                Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
+                ClientCommand(client, joinCmd);
+
+                char squadName[32];
+                GetSquadDisplayName(targetSquadIndex, squadName, sizeof(squadName));
+
+                if (targetBot > 0)
+                {
+                    PrintToChat(client, "[SlotRequester] Took over %s slot from '%s' in %s!", className, botName, squadName);
+                }
+                else
+                {
+                    PrintToChat(client, "[SlotRequester] Joined %s slot in %s!", className, squadName);
+                }
+            }
+            else
+            {
+                PrintToChat(client, "[SlotRequester] All slots for that role are currently occupied by players.");
+            }
+        }
     }
+    else if (action == MenuAction_End)
+    {
+        delete menu;
+    }
+    return 0;
 }
 
 // ============================================================================

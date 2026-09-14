@@ -1,5 +1,5 @@
 ================================================================================
-  INSBOTS v0.20.3 - CVAR LIST
+  INSBOTS - CVAR LIST
 ================================================================================
 You can execute these commands in your server console or config file.
 Plugin cvars use:   insbot set <name> <value>
