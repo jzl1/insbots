@@ -16,6 +16,10 @@ enum InsBotsLinuxOffset
     INS_LINUX_M_FL_NEXT_ATTACK        = 0x0A30,
     INS_LINUX_M_H_MY_WEAPONS          = 0x0A38,
     INS_LINUX_M_H_ACTIVE_WEAPON       = 0x0A54,
+    // CINSPlayer::SetIronsightsState() drives AddPlayerFlag(1)/
+    // RemovePlayerFlag(1), and IsMoveFrozen() is (flags >> 1) & 1. Bit 0
+    // of this int therefore tracks the shouldered (ironsights) state.
+    INS_LINUX_M_PLAYER_FLAGS          = 0x0AE0,
     INS_LINUX_M_ANG_EYE_ANGLES_0      = 0x0A6C,
     INS_LINUX_M_ANG_EYE_ANGLES_1      = 0x0A70,
     INS_LINUX_M_I_CLIP                = 0x04CC,

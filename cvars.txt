@@ -1,0 +1,336 @@
+================================================================================
+  INSBOTS v0.20.3 - CVAR LIST
+================================================================================
+You can execute these commands in your server console or config file.
+Plugin cvars use:   insbot set <name> <value>
+================================================================================
+
+// =================== CORE & DEBUGGING ===================
+
+insbot set debug                     "0" // print bot debug info to console
+insbot set draw                      "0" // through-wall bot debug overlays
+insbot set draw_path                 "0" // also draw nav paths (green)
+insbot set draw_team                 "1" // reference team for objective colors: green=friendly, grey=neutral, red=hostile
+insbot set freeze                    "0" // freeze all bot movement and actions (1=frozen, overridden by force pathfinding)
+insbot set profile                   "0" // built-in per-frame profiler: measures BuildPath/GetPathCost/FindArea, traces, hearing, teamsight and prints a summary every 5 s (0=off)
+insbot set quota                     "0" // auto-maintain this many bots (0=manual)
+insbot set reserve                   "2" // keep this many free slots open for human players
+
+// =================== SPAWNING & SETUP ===================
+
+insbot set dead_cmds                 "creinforce;declinepromo" // commands sent every 5s while dead
+insbot set join_cmds_a               "pteamsetup 1;pfullsetup {f} {r};creinforce" // side-A join/spawn commands
+insbot set join_cmds_b               "pteamsetup 2;pfullsetup {f} {r};creinforce" // side-B join/spawn commands
+insbot set join_delay                "5" // seconds after server activation before quota bots begin joining (0=immediate)
+insbot set join_interval             "1.0" // seconds between join commands (minimum 0.05)
+insbot set join_timeout              "40" // kick+retry a bot that can't get into a squad after this many seconds (0=never)
+insbot set quota_add_interval        "0.25" // seconds between quota replacement bot creations after startup
+insbot set quota_start_interval      "0.20" // seconds between initial quota client creations; joins release together after the roster is complete (minimum 0.05)
+insbot set slot_sweep                "20" // how many squad slots {s} cycles through when joining
+insbot set spawn_nocollide           "1" // temporarily make newly spawned bots nonblocking to other grace bots (0=off)
+insbot set spawn_nocollide_time      "5.0" // unfrozen simulation seconds before spawn collision is restored once the hull is clear
+insbot set randomize_customization    "1" // randomize faction-valid player skins/accessories on each spawn (0=off)
+insbot set randomize_loadout          "1" // randomize faction- and role-valid primary weapon loadouts on each spawn (0=off; sends -1)
+
+// =================== MOVEMENT & NAVIGATION ===================
+
+insbot set avoid_crouch              "2500" // A* penalty for nav areas flagged CROUCH - bots route around crouch passages when possible (0=don't avoid)
+insbot set avoid_jump                "4000" // A* penalty for nav areas flagged JUMP - bots route around jumps when a flat path exists (0=don't avoid)
+insbot set avoid_ladder              "3000" // A* penalty for ladder edges - bots route around ladders when a flat path exists (0=don't avoid)
+insbot set avoid_marked              "3000" // A* penalty for nav areas flagged AVOID (jump/crouch areas are marked AVOID by the generator) - 0=don't avoid
+insbot set doorway_sprint           "1" // accurate doorway sprint alignment and kinematic modulation (0=off)
+insbot set doorway_teleport          "1" // warp a stalled front bot past a detected doorway after doorway_teleport_time (0=off)
+insbot set doorway_teleport_time     "3.0" // continuous doorway no-progress seconds before a full-hull-validated teleport
+insbot set ladder_lip_tol           "4.0" // vertical tolerance (units) for latching the ladder dismount near the recorded lip; clamped to 0..6, above 6 the bot latches mid-shaft and thrashes on the 18u lost-height guard
+insbot set ladder_nocollide          "1" // confirmed ladder owner/blocker collision grace before safe teleport (0=off)
+insbot set ladder_queue              "1" // single-owner queues at both ends of typed NAV ladders (0=off)
+insbot set ladder_up_penalty         "500" // extra A* cost for climbing UP a ladder; descending is the easy direction
+insbot set move_speed                "400" // movement input magnitude
+insbot set nav                       "1" // enable/disable nav mesh pathfinding system (0=turn off nav system, overridden by force pathfinding)
+insbot set sprint                    "1" // hold sprint (IN_ALT2) while moving with no enemy contact; game stamina rules apply
+insbot set streaming                 "2" // corridor queues (0=off; 1=all narrow NAV runs; 2=automatic at full-hull-verified physical doorways/corridors)
+insbot set stuck_dist                "16" // inches of progress toward the next waypoint that counts as moving
+insbot set stuck_nocollide           "1" // try local player-body collision grace before stuck or doorway teleport (0=off)
+insbot set stuck_time                "1.0" // no-progress seconds before body-grace or broken-link recovery starts
+insbot set unstuck_teleport          "1" // NavBot-style last resort: warp a hopelessly-stuck bot onto its next path node (0=off)
+insbot set unstuck_teleport_time     "3.0" // continuous-stuck seconds before teleport-unstuck
+
+// =================== SENSES & INVESTIGATION ===================
+
+insbot set detect                    "1" // master enemy detection toggle (vision + hearing); 0 = bots cannot detect enemies
+insbot set hear                      "1" // bots hear enemy movement (footsteps) and investigate when not engaging
+insbot set hear_cooldown             "4" // min seconds between hearing investigations
+insbot set hear_range                "1000" // max units a moving enemy's footsteps are audible
+insbot set hear_speed                "120" // min horizontal speed (units/s) for movement to count as footsteps
+insbot set hear_timeout              "6" // seconds a bot keeps investigating a heard footstep origin
+
+// =================== COMBAT & AIMING ===================
+
+insbot set aim_error                 "4.0" // aim error in degrees (0=perfect)
+insbot set aim_speed                 "260" // max aim turn speed (deg/s)
+insbot set attack                    "1" // enable/disable bot shooting and attacks (0=hold fire)
+insbot set burst_pause               "0.45" // pause between bursts (s)
+insbot set burst_time                "0.30" // firing burst length (s)
+insbot set crouch_chance             "0.20" // chance to crouch when opening fire
+insbot set crouch_eye_height         "32.0" // predicted crouched firing eye height above origin (units); lower values are conservative
+insbot set firemode                  "auto" // fire-mode policy: 'auto' (fullest mode), 'range', 'burst', or 'semi'
+insbot set firemode_range            "700" // enemy distance under which range-policy uses full-auto/burst; beyond it, semi
+insbot set fov                       "120" // bot field of view (degrees)
+insbot set ironsights                "1" // raise ironsights while engaging beyond 300u (see ads_mode for the input mechanism)
+insbot set ads_mode                  "1" // ironsights input: 1=edge pulse (engine raises on the button-18 release edge), 0=legacy continuous hold
+insbot set lose_time                 "1.2" // seconds tracking an enemy after losing sight
+insbot set reaction                  "0.6" // reaction delay before firing (s)
+insbot set recoil_control            "realistic" // recoil compensation: 'realistic' (imperfect - high-recoil guns spray), 'perfect' (laser), or 'aimerror' (scale off aim_error)
+insbot set stop_dist                 "1000" // stop advancing when enemy closer than this
+insbot set capture_focus             "1" // capture-committed bots keep pushing the objective while engaging distant enemies (0=normal combat)
+insbot set capture_defend_range      "1000" // enemy distance at/below which a capture-committed bot stops pushing and fights (u)
+insbot set capture_percent           "15" // percent of the alive team reserved as objective capturers (set to the map's reqpercent)
+insbot set danger_avoid              "0" // A* penalty per nav area inside an active firefight for capture-committed bots (0=off)
+insbot set danger_radius             "450" // radius around an actively-engaging bot treated as a danger zone for capture-committed routing (u)
+insbot set vis_range                 "2500" // max enemy spotting distance
+
+// =================== SNIPER OVERWATCH ===================
+
+insbot set sniper_overwatch             "1" // allow sniper-class bots to discover and occupy objective overwatch perches
+insbot set sniper_relocate_kills        "10" // confirmed kills from one perch before a sniper relocates (0=disable kill trigger)
+insbot set sniper_perch_time_min        "45" // minimum seconds a sniper holds a validated perch
+insbot set sniper_perch_time_max        "75" // maximum seconds a sniper holds a validated perch
+
+// =================== WEAPON-CLASS COMBAT PROFILES ===================
+// Negative values inherit the corresponding global setting above.
+// detect_range = awareness/target-acquisition range
+// engage_range = maximum distance at which the class will actually fire
+// stop_dist    = distance at which it stops advancing toward a visible enemy
+// recoil_control = inherit, realistic, perfect, aimerror, or percent
+// recoil_percent = exact recoil compensation (0-100); -1 follows recoil_control
+
+// Rifles (weapon_m16a4, weapon_m16m203, weapon_m4, weapon_m4med,
+// weapon_ak47, weapon_aks74u, weapon_fnfal).
+insbot set rifle_detect_range        "-1" // maximum enemy detection range; -1 inherits vis_range
+insbot set rifle_engage_range        "-1" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set rifle_stop_dist           "-1" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set rifle_reaction            "-1" // reaction delay before firing; -1 inherits reaction
+insbot set rifle_aim_error           "-1" // aim error in degrees; -1 inherits aim_error
+insbot set rifle_aim_speed           "-1" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set rifle_reserve_mags        "7" // number of reserve magazines this weapon class may reload per life
+insbot set rifle_recoil_control      "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set rifle_recoil_percent      "-1" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// LMGs (weapon_m249, weapon_rpk).
+insbot set lmg_detect_range          "-1" // maximum enemy detection range; -1 inherits vis_range
+insbot set lmg_engage_range          "-1" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set lmg_stop_dist             "-1" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set lmg_reaction              "-1" // reaction delay before firing; -1 inherits reaction
+insbot set lmg_aim_error             "-1" // aim error in degrees; -1 inherits aim_error
+insbot set lmg_aim_speed             "-1" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set lmg_reserve_mags          "7" // number of reserve magazines this weapon class may reload per life
+insbot set lmg_recoil_control        "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set lmg_recoil_percent        "-1" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// Snipers (weapon_sks, weapon_svd, weapon_l42a1).
+insbot set sniper_detect_range       "4000" // maximum enemy detection range; -1 inherits vis_range
+insbot set sniper_engage_range       "4000" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set sniper_stop_dist          "1600" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set sniper_reaction            "0.5" // reaction delay before firing; -1 inherits reaction
+insbot set sniper_aim_error             "1" // aim error in degrees; -1 inherits aim_error
+insbot set sniper_aim_speed          "210" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set sniper_reserve_mags        "25" // number of reserve magazines this weapon class may reload per life
+insbot set sniper_recoil_control      "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set sniper_recoil_percent      "-1" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// Shotguns (weapon_m1014, weapon_toz).
+insbot set shotgun_detect_range      "1400" // maximum enemy detection range; -1 inherits vis_range
+insbot set shotgun_engage_range       "850" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set shotgun_stop_dist           "300" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set shotgun_reaction            "0.5" // reaction delay before firing; -1 inherits reaction
+insbot set shotgun_aim_error            "6.0" // aim error in degrees; -1 inherits aim_error
+insbot set shotgun_aim_speed          "320" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set shotgun_reserve_mags        "50" // number of reserve magazines this weapon class may reload per life
+insbot set shotgun_recoil_control      "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set shotgun_recoil_percent      "-1" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// Pistols (weapon_m9, weapon_makarov, weapon_1911).
+insbot set pistol_detect_range        "2000" // maximum enemy detection range; -1 inherits vis_range
+insbot set pistol_engage_range         "1300" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set pistol_stop_dist             "450" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set pistol_reaction              "0.3" // reaction delay before firing; -1 inherits reaction
+insbot set pistol_aim_error             "4.5" // aim error in degrees; -1 inherits aim_error
+insbot set pistol_aim_speed             "300" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set pistol_reserve_mags            "5" // number of reserve magazines this weapon class may reload per life
+insbot set pistol_recoil_control       "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set pistol_recoil_percent         "-1" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// RPGs (weapon_rpg7).
+insbot set rpg_detect_range            "3000" // maximum enemy detection range; -1 inherits vis_range
+insbot set rpg_engage_range            "2400" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set rpg_stop_dist                "900" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set rpg_reaction                 "0.2" // reaction delay before firing; -1 inherits reaction
+insbot set rpg_aim_error                  "0" // aim error in degrees; -1 inherits aim_error
+insbot set rpg_aim_speed                "360" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set rpg_reserve_mags              "10" // number of reserve magazines this weapon class may reload per life
+insbot set rpg_recoil_control          "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set rpg_recoil_percent           "100" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// Grenade Launchers (weapon_m16m203 in M203 mode).
+insbot set grenadelauncher_detect_range "3500" // maximum enemy detection range; -1 inherits vis_range
+insbot set grenadelauncher_engage_range "3500" // maximum range at which this weapon class may fire; -1 inherits vis_range
+insbot set grenadelauncher_stop_dist    "1000" // distance at which this weapon class stops advancing; -1 inherits stop_dist
+insbot set grenadelauncher_reaction     "0.2" // reaction delay before firing; -1 inherits reaction
+insbot set grenadelauncher_aim_error    "1.0" // aim error in degrees; -1 inherits aim_error
+insbot set grenadelauncher_aim_speed    "300" // maximum aim turn speed in degrees/sec; -1 inherits aim_speed
+insbot set grenadelauncher_reserve_mags "10" // number of reserve 40mm grenade rounds this weapon class may fire per life
+insbot set grenadelauncher_recoil_control "inherit" // recoil mode: inherit, realistic, perfect, aimerror, or percent
+insbot set grenadelauncher_recoil_percent "100" // direct recoil compensation percent (0-100); -1 follows recoil_control
+
+// =================== WEAPONS & AMMUNITION ===================
+
+insbot set close_range                "600" // enemy distance considered 'close' - dry primary here means switch to sidearm, not reload
+insbot set mag_fire_time             "3.0" // reload-timing scale: 3.0 = reload after a real magazine (per-weapon mag size x fire rate); lower = reload sooner
+// primary_mags is retained only for older configs; weapon-class reserve_mags
+// above is the active reload budget.
+insbot set primary_mags              "7" // legacy setting; use rifle_reserve_mags, sniper_reserve_mags, shotgun_reserve_mags, pistol_reserve_mags, or rpg_reserve_mags
+insbot set reload                     "1" // auto-reload after fire / during lulls
+insbot set safe_reload                "1" // only reload when safe: dry mag reloads when the enemy isn't close, and tops off in a lull
+insbot set sidearm_a                 "weapon_m9" // fallback side-A pistol (used only if the map's .imc2 faction is unknown)
+insbot set sidearm_b            "weapon_makarov" // fallback side-B pistol (used only if the map's .imc2 faction is unknown)
+insbot set sidearm_iraqi        "weapon_makarov" // Iraqi pistol classname (assigned by faction, read per-map from the .imc2)
+insbot set sidearm_usmc              "weapon_m9" // USMC pistol classname (assigned by faction, read per-map from the .imc2)
+
+// =================== SAFE RELOAD THRESHOLDS ===================
+// When safe_reload is 1, a bot reloads when its remaining ammo is below the
+// configured percentage and the tactical conditions allow a safe reload.
+
+insbot set reload_safe_pct_default     "0.60" // Default safe reload threshold (pct ammo remaining)
+insbot set reload_safe_pct_1911        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_ak47        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_ak74        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_aks74u      "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_fnfal       "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_l42a1       "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m1014       "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m14         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m16a4       "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m16m203     "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m203        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m249        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m4          "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m4med       "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_m9          "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_makarov     "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_rpg7        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_rpk         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_sks         "1" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_svd         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_toz         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
+
+// =================== GRENADES & SMOKE ===================
+
+insbot set grenade_a                  "weapon_m67" // side-A grenade classname
+insbot set grenade_b                 "weapon_rgd5" // fallback side-B grenade (used only if the map's .imc2 faction is unknown)
+insbot set grenade_chance              "0.25" // chance to grenade (vs keep shooting) when the chance arises; low = prefer gunfights
+insbot set grenade_cooldown               "30" // min seconds between grenade throws
+insbot set grenade_gravity               "600" // gravity used for the grenade arc (match sv_gravity)
+insbot set grenade_iraqi             "weapon_rgd5" // Iraqi grenade classname (assigned by faction, read per-map from the .imc2)
+insbot set grenade_min_range         "350" // only grenade enemies farther than this
+insbot set grenade_speed                 "1000" // grenade throw speed (units/s) used to compute the arc
+insbot set grenade_usmc               "weapon_m67" // USMC grenade classname (assigned by faction, read per-map from the .imc2)
+insbot set grenades                       "0" // OPT-IN: throw grenades at range
+insbot set smoke                          "1" // bots throw a smoke onto a contested objective to cover the push (only if they carry one)
+insbot set smoke_chance                  "0.6" // chance to smoke a contested objective when the chance arises (0..1)
+insbot set smoke_cooldown                 "35" // min seconds between a bot's smoke throws
+insbot set smoke_group                     "1" // throw a smoke at a group of enemies
+insbot set smoke_group_chance             "0.4" // chance to throw a smoke when a group is spotted (0..1)
+insbot set smoke_group_min                  "3" // minimum number of clustered enemies to qualify as a group
+insbot set smoke_group_radius             "400" // max radius between enemies to be considered the same group
+insbot set smoke_range                   "1300" // only smoke the objective when within this distance of it
+insbot set smoke_weapon              "weapon_m18" // smoke grenade classname (INS:MIC M18, shared by both factions)
+insbot set smoke_scatter             "0.50" // fraction of objective radius to scatter smoke grenade throws (0=exact center)
+insbot set m203                      "1" // allow M16A4/M203 grenadier bots to use 40mm grenade launcher in combat (0=off)
+insbot set m203_speed                "1570" // 40mm grenade launch speed (units/s) used to compute the M203 ballistic arc
+insbot set m203_chance               "0.5" // chance for a grenadier bot to fire an M203 grenade on a valid target (0..1)
+insbot set m203_min_range            "500" // minimum safe distance (Source units) to fire an M203 40mm grenade
+insbot set m203_max_range            "3500" // maximum distance (Source units) to fire an M203 40mm grenade
+insbot set m203_cooldown             "15" // min seconds between a bot's M203 grenade shots
+insbot set rpg_cooldown              "3.0" // min seconds between a bot's RPG-7 rocket shots
+insbot set m203_obj                  "1" // allow grenadier bots to pre-clear contested objectives with M203 grenades (0=off)
+insbot set m203_obj_chance           "0.4" // chance to shell a contested objective when in range (0..1)
+
+// =================== OBJECTIVES & TACTICS ===================
+// When a hostile or neutral objective exists, 15% of each bot faction (at
+// least one bot) remains committed to capturing it. This is automatic.
+
+insbot set aggression                  "0.5" // 0=defend own objectives .. 1=attack enemy
+insbot set cover_health                  "40" // health at/below which a threatened bot breaks contact and seeks cover
+insbot set goal_classnames "ins_objective,obj_t1,obj_t2" // objective entity classnames
+insbot set intel_time                     "8" // seconds a shared sighting stays actionable
+insbot set intel_range                  "3000" // max units from a shared sighting a bot will investigate (0=unlimited)
+insbot set objectives                     "1" // push toward + hold objectives (0=just roam)
+insbot set patrol                        "1" // a held objective's defenders may wander inside it instead of standing still
+insbot set patrol_chance                 "0.5" // chance a holding bot patrols (vs holds one spot), rolled per arrival (0..1)
+insbot set patrol_interval                 "7" // base seconds a patrolling bot waits before wandering to a new spot in the point
+insbot set patrol_radius                "0.85" // patrol spot max distance from the point centre, as a fraction of its radius (stays inside)
+insbot set takecover                     "1" // retreat to a spot that breaks line-of-sight while reloading or hurt
+
+// ---- Take-Cover Overhaul v2 (multi-threat scoring, precomputed cover DB) ----
+insbot set cover_v2                      "1" // use precomputed cover database + multi-threat scoring (0=legacy FindCover path)
+insbot set suppress_time                 "4" // seconds of reactive cover-seeking after being hit
+insbot set cover_tier_weight            "30" // scoring weight per full tier step
+insbot set cover_dist_weight           "0.25" // scoring penalty per unit distance from bot
+insbot set cover_advance_penalty        "80" // penalty if candidate moves bot toward threat
+insbot set cover_min_score             "-20" // minimum aggregated score before falling back to legacy logic
+insbot set cover_search_radius         "400" // candidate query radius around bot position
+insbot set cover_max_reach             "500" // max acceptable travel distance toward chosen cover spot
+insbot set cover_ray_len               "100" // load-time raycast length for directional occlusion tests
+insbot set cover_ray_cutoff             "90" // load-time block-distance cutoff per direction
+insbot set cover_health                  "40" // health at/below which a threatened bot breaks contact and seeks cover
+insbot set cover_formation_bonus        "25" // scoring bonus for cover points closer to squad leader
+
+insbot set teamsight                     "1" // bots share enemy sightings (radio)
+insbot set teamwork                      "1" // spread across objectives + support teammates
+
+// =================== SQUADS (human leader + bot fireteam) ===================
+
+// Usage:
+//   !squad / F3 menu   -> recruit a 3-bot fireteam (Left Flank / Right Flank / Rear Guard)
+//   !orders / F3 menu  -> Move Out (1) / Defend-Hold (2) / Need Backup (3) / Covering Fire (4) / Advance & Defend (5) / Dismiss (0)
+//   Covering Fire      -> auto-marks your eye-ray hit position; bots aim and suppress for 5 s
+//                         (RPG bots are excluded from fireteam recruitment)
+//   Advance & Defend   -> advances fireteam to eye-ray marked waypoint and establishes defensive perimeter
+//   Bots mimic leader stance when parked, seek cover when the leader is in cover,
+//   and sidestep out of the leader's path (anti-boxing) at top priority.
+// Companion plugin (insbots_companion.smx) provides the menu, F3 bind, !mark,
+// squad glow sprites (leader-only), and slot requester.
+
+// =================== AUTOMATIC CLASS FILL ===================
+// Quotas are per faction and only affect newly created automatic bots. Set a
+// quota before setting insbot quota / using insbot add. 0 retains normal class
+// rotation. class_priority decides which still-unfilled class is picked first.
+
+insbot set class_priority "rifleman,rpg,support,sniper,marksman,engineer,sapper,sergeant,militant,grenadier" // comma-separated automatic class fill order
+insbot set class_quota_rpg           "0" // Iraqi RPG-7 bots to fill per faction (0=normal rotation)
+insbot set class_quota_grenadier     "0" // USMC grenadier bots to fill per faction (0=normal rotation)
+insbot set class_quota_sniper        "0" // Iraqi sniper bots to fill per faction (0=normal rotation)
+insbot set class_quota_marksman      "0" // USMC marksman bots to fill per faction (0=normal rotation)
+insbot set class_quota_support       "0" // support bots to fill per faction (0=normal rotation)
+insbot set class_quota_engineer      "0" // USMC engineer bots to fill per faction (0=normal rotation)
+insbot set class_quota_sapper        "0" // Iraqi sapper bots to fill per faction (0=normal rotation)
+insbot set class_quota_rifleman      "0" // rifleman bots to fill per faction (0=normal rotation)
+insbot set class_quota_sergeant      "0" // USMC sergeant bots to fill per faction (0=normal rotation)
+insbot set class_quota_militant      "0" // Iraqi militant bots to fill per faction (0=normal rotation)
+
+// =================== VOICE & CHATTER ===================
+
+insbot set voice                     "1" // bots call out on the radio (engage/reload/grenade/cover/capture/...); 0 = silent
+insbot set voice_combat              "1" // combat callouts: engaging, reloading, out of ammo, frag out, hit, take cover, clear
+insbot set voice_interval             "4.0" // minimum seconds between one bot's callouts (anti-spam)
+insbot set voice_objective            "1" // objective/support callouts: securing, moving up, need backup
+
+// =================== ENGINE OFFSETS (ADVANCED) ===================
+
+insbot set active_offset              "0" // legacy raw active offset (unused on Linux; validity uses verified parent/order/hidden fields)
+insbot set capture_offset             "960" // offset of m_iCaptureTeam (0x3c0)
+insbot set hidden_offset              "884" // legacy
+insbot set learn_persist                "1" // save learned bad nav links to addons/insbots_learn_<map>.txt and restore them on map load
+insbot set owner_offset               "864" // offset of m_iCapturedTeam (0x360); permanent capture (Push)
+insbot set team_flip                    "0" // 1 = objective owner field stores the ENEMY team (flip it). Default 0: the raw field already IS the owner (confirmed on ins_baghdad).
+insbot set team_offset                "844" // offset of the objective ownership field (0x34c)

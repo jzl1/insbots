@@ -240,6 +240,8 @@ extern CfgVar insbot_hear_range;
 extern CfgVar insbot_hear_speed;
 extern CfgVar insbot_hear_timeout;
 extern CfgVar insbot_ladder_lip_tol;
+extern CfgVar insbot_ads_mode;
+extern int s_offset_m_IronsightsState;
 extern CfgVar insbot_hear_cooldown;
 extern CfgVar insbot_detect;
 
@@ -9513,6 +9515,12 @@ void CInsBot::ThinkAlive()
     INSPROF_SCOPE(INSPROF_THINKALIVE);
     float now = Now();
 
+    // ADS intent is re-derived every frame (the combat block only runs for the
+    // standard-firearms branch). Clearing it here stops a bot that stops
+    // engaging, switches to a launcher or loses its enemy from holding a stale
+    // request, which would latch the sights up and re-pulse forever.
+    m_wantAds = false;
+
     if (m_info->IsDead())
     {
         ResetLadderTraversal(true);
@@ -9543,6 +9551,7 @@ void CInsBot::ThinkAlive()
         m_coverFollowSet = false;
         m_nextSuppressShot = 0.0f; m_suppressLosClear = false; m_nextSuppressLosCheck = 0.0f; m_haveSuppressRepos = false; m_nextSuppressRepos = 0.0f;
         m_ironsights = false; m_ironsightTime = 0.0f;
+        m_wantAds = false;
         m_crouchFireUntil = 0; m_haveCover = false;
         m_recoilRise = 0; m_burstShots = 0; m_wp = 0; m_wpToggledMode = false; m_wpName[0] = 0;
         m_haveHoldSpot = false; m_patrolling = false;
@@ -10237,8 +10246,11 @@ void CInsBot::ThinkAlive()
                 bool isM203 = IsHoldingM203();
                 bool useIronsights = insbot_ironsights.GetBool() && engaging && (dist > 300.0f) && !isM203;
 
+                // ADS INTENT ONLY. The ATTACK3 press/release pulse is generated in
+                // RunMove: CWeaponINSBase::ItemPostFrame() drives ToggleIronsights()
+                // off the button-18 RELEASED edge, so a continuously held bit can
+                // never raise the sights while the bot is engaging.
                 if (useIronsights) {
-                    buttons |= INS_IN_ATTACK3; // Maintain ADS input continuously every frame
                     if (!m_ironsights) {
                         m_ironsights = true;
                         m_ironsightTime = now;
@@ -10246,6 +10258,7 @@ void CInsBot::ThinkAlive()
                 } else {
                     m_ironsights = false;
                 }
+                m_wantAds = useIronsights;
 
                 bool ironsightsReady = !useIronsights || (now >= m_ironsightTime + 0.4f);
 
@@ -12015,6 +12028,99 @@ void CInsBot::RunMove(float fwd, float side, int buttons, const QAngle &view)
     if (directLauncherAttack)
         buttons &= ~IN_ATTACK;
 
+    // ===== IRONSIGHTS INPUT DRIVER =====
+    // Engine facts (verified by disassembly of the shipped server binaries):
+    //   * CWeaponINSBase::ItemPostFrame() calls ToggleIronsights() only when the
+    //     button-18 RELEASED edge is set (player+0x780 bit 18). Holding the bit
+    //     forever produces no edge, which is why the old continuous hold left
+    //     ADS at ~6% and sometimes latched it ON after the bot stopped aiming.
+    //   * CWeaponINSBase::CanTertiaryAttack() additionally requires the PRESSED
+    //     edge (player+0x77C bit 18).
+    //   * CINSPlayer::SetIronsightsState() sets bit 0 of GetPlayerFlags()
+    //     (AddPlayerFlag(1) / RemovePlayerFlag(1)), and IsMoveFrozen() is
+    //     (flags >> 1) & 1 -- so flag bit 0 is the shouldered (ADS) state.
+    // Emit a genuine press frame followed by a release frame on every intent
+    // transition, then re-pulse if the measured state still disagrees.
+    if (insbot_ads_mode.GetBool())
+    {
+        static unsigned char s_adsPhase[64];      // 0=idle, 1=press queued, 2=release queued
+        static unsigned char s_adsLastWant[64];
+        static unsigned char s_adsInit[64];
+        static float         s_adsNextRetry[64];
+        static float         s_adsLastStep[64];
+
+        int slot = (int)(this - g_Bots.m_bots);
+        if (slot >= 0 && slot < 64)
+        {
+            bool wantAds = m_wantAds;
+
+            IServerUnknown *u = m_edict ? m_edict->GetUnknown() : 0;
+            char *pPlayer = u ? (char*)u->GetBaseEntity() : 0;
+            // The engine-state check needs the audited offset; when it is
+            // unavailable the change-driven pulse still drives the toggle.
+            bool haveState = (pPlayer != 0 && s_offset_m_IronsightsState >= 0);
+            bool isUp = haveState ? ((*(int*)(pPlayer + s_offset_m_IronsightsState) & 1) != 0) : false;
+
+            if (!s_adsInit[slot])
+            {
+                s_adsInit[slot] = 1;
+                s_adsLastWant[slot] = wantAds ? 1 : 0;
+            }
+
+            // An intent change only needs a toggle when the measured state
+            // actually disagrees. Pulsing unconditionally would toggle the
+            // sights ON when the raise had never succeeded and the bot then
+            // stopped aiming -- a spurious raise that only the retry undid.
+            bool stateDisagrees = !haveState || (wantAds != isUp);
+
+            if (wantAds != (s_adsLastWant[slot] != 0))
+            {
+                s_adsLastWant[slot] = wantAds ? 1 : 0;
+                if (stateDisagrees)
+                {
+                    s_adsPhase[slot] = 1;
+                    s_adsNextRetry[slot] = gpGlobals->curtime + 0.30f;
+                }
+            }
+            // The retry exists only to recover a raise the weapon refused while
+            // it was mid-transition. It must stay gated on a READABLE state:
+            // without the offset (e.g. the Windows build) it cannot tell whether
+            // the toggle worked, and retrying blindly would flip the sights
+            // on/off every interval.
+            else if (haveState && wantAds != isUp && gpGlobals->curtime >= s_adsNextRetry[slot])
+            {
+                // The raise can be refused while the weapon is mid-transition
+                // (m_iIdleState != 0); retry, but not so fast that the retry
+                // toggles an already-correct state back off.
+                s_adsPhase[slot] = 1;
+                s_adsNextRetry[slot] = gpGlobals->curtime + (wantAds ? 0.30f : 0.15f);
+            }
+
+            // Advance the pulse at most once per simulation frame. RunMove is
+            // reachable from several branches in ThinkAlive (all but one return
+            // early), so this guard keeps a press and its release on separate
+            // engine ticks -- they must not collapse into the same command.
+            if (s_adsLastStep[slot] != gpGlobals->curtime)
+            {
+                s_adsLastStep[slot] = gpGlobals->curtime;
+                switch (s_adsPhase[slot])
+                {
+                    case 1:
+                        buttons |= INS_IN_ATTACK3;     // press frame
+                        s_adsPhase[slot] = 2;
+                        break;
+                    case 2:
+                        buttons &= ~INS_IN_ATTACK3;    // release frame -> engine toggles
+                        s_adsPhase[slot] = 0;
+                        break;
+                    default:
+                        buttons &= ~INS_IN_ATTACK3;
+                        break;
+                }
+            }
+        }
+    }
+
     CBotCmd cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.command_number = s_cmdSeq++;
@@ -12275,6 +12381,11 @@ void CInsBot::Think(bool simulating)
     {
         ResetBodyNoCollideRecovery();
         EndSpawnNoCollide(true);
+        // ThinkAlive() only runs while BOT_ALIVE, so m_wantAds would otherwise
+        // keep the value it held on the frame the bot died and the ironsights
+        // driver would never lower the sights. Drop the request here; the
+        // RunMove below carries the release edge that lowers them.
+        m_wantAds = false;
         // optional commands while dead (e.g. re-pick class for wave respawn)
         if (now >= m_nextJoinCmdTime)
         {

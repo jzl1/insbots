@@ -274,6 +274,7 @@ private:
     bool   m_firing;
     bool   m_ironsights;
     float  m_ironsightTime;
+    bool   m_wantAds;          // ADS intent; the engine raises ironsights on a button-18 RELEASED edge
     float  m_aimErrX, m_aimErrY;
     float  m_nextAimErrTime;
 
@@ -760,6 +761,7 @@ extern void UpdateSmokeGrenades();
 
 extern CBotRoster g_Bots;
 extern int s_offset_flNextAttack;
+extern int s_offset_m_IronsightsState;
 extern int s_offset_angEyeAngles0;
 extern int s_offset_angEyeAngles1;
 

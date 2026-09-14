@@ -55,6 +55,11 @@ int s_offset_m_hActiveWeapon = -1;
 int s_offset_m_iClip1 = -1;
 int s_offset_m_CollisionGroup = -1;
 int s_offset_m_hMyWeapons = -1;
+// ADS ground truth (int). Bit 0 of CINSPlayer::GetPlayerFlags() is driven by
+// SetIronsightsState(), so it tells us whether the sights are really up.
+// -1 means "unknown" (all non-Linux builds): the change-driven pulse still
+// toggles the sights, but the state-verifying retry is skipped.
+int s_offset_m_IronsightsState = -1;
 
 int FindSendPropOffset(SendTable *pTable, const char *pPropName)
 {
@@ -140,6 +145,7 @@ CfgVar insbot_doorway_sprint("doorway_sprint", "1", "accurate doorway sprint ali
 CfgVar insbot_stuck_nocollide("stuck_nocollide", "1", "try local player-body collision grace before stuck or doorway teleport (0=off)");
 CfgVar insbot_ladder_queue("ladder_queue", "1", "single-owner queues at both ends of typed NAV ladders (0=off)");
 CfgVar insbot_ladder_nocollide("ladder_nocollide", "1", "confirmed ladder owner/blocker collision grace before safe teleport (0=off)");
+CfgVar insbot_ads_mode("ads_mode", "1", "ironsights input: 1=edge pulse (engine raises on the button-18 release edge), 0=legacy continuous hold");
 CfgVar insbot_ladder_lip_tol("ladder_lip_tol", "4.0", "vertical tolerance (units) for latching the ladder dismount near the recorded lip; clamped to 0..6, above 6 the bot latches mid-shaft and thrashes on the 18u lost-height guard");
 CfgVar insbot_spawn_nocollide("spawn_nocollide", "1", "temporarily make newly spawned bots nonblocking to other grace bots (0=off)");
 CfgVar insbot_spawn_nocollide_time("spawn_nocollide_time", "5.0", "unfrozen simulation seconds before spawn collision is restored once the hull is clear");
@@ -168,7 +174,7 @@ CfgVar insbot_sniper_overwatch("sniper_overwatch", "1", "allow sniper-class bots
 CfgVar insbot_sniper_relocate_kills("sniper_relocate_kills", "10", "confirmed kills from one perch before a sniper relocates (0=disable kill trigger)");
 CfgVar insbot_sniper_perch_time_min("sniper_perch_time_min", "45", "minimum seconds a sniper holds a validated perch");
 CfgVar insbot_sniper_perch_time_max("sniper_perch_time_max", "75", "maximum seconds a sniper holds a validated perch");
-CfgVar insbot_ironsights("ironsights", "1", "hold ATTACK2 (ironsights) while engaging");
+CfgVar insbot_ironsights("ironsights", "1", "raise ironsights while engaging beyond 300u (see ads_mode for the input mechanism)");
 CfgVar insbot_quota("quota", "0", "auto-maintain this many bots (0=manual)");
 CfgVar insbot_reserve("reserve", "2", "keep this many free slots open for human players");
 CfgVar insbot_debug("debug", "0", "print bot debug info to console");
@@ -829,11 +835,13 @@ public:
             s_offset_m_hMyWeapons = INS_LINUX_M_H_MY_WEAPONS;
             s_offset_m_hActiveWeapon = INS_LINUX_M_H_ACTIVE_WEAPON;
             s_offset_m_iClip1 = INS_LINUX_M_I_CLIP;
+            s_offset_m_IronsightsState = INS_LINUX_M_PLAYER_FLAGS;
             Msg("[insbots] Linux offsets: buttons=0x%X next=0x%X eye=0x%X/0x%X collision=0x%X weapon=0x%X mywep=0x%X clip=0x%X\n",
                 INS_LINUX_M_NBUTTONS, s_offset_flNextAttack,
                 s_offset_angEyeAngles0, s_offset_angEyeAngles1,
                 s_offset_m_CollisionGroup, s_offset_m_hActiveWeapon,
                 s_offset_m_hMyWeapons, s_offset_m_iClip1);
+            Msg("[insbots] Linux ADS state offset: playerflags=0x%X (bit0 = shouldered)\n", s_offset_m_IronsightsState);
             Msg("[insbots] Linux objective offsets: parent=0x%X order=0x%X owner=0x%X hidden=0x%X capture=0x%X\n",
                 INS_LINUX_OBJECTIVE_PARENT, INS_LINUX_OBJECTIVE_ORDER_ID,
                 INS_LINUX_OBJECTIVE_CAPTURED_TEAM, INS_LINUX_OBJECTIVE_HIDDEN,
@@ -844,6 +852,14 @@ public:
                 s_offset_m_hMyWeapons = 0x0A24; // Audited CBaseCombatCharacter::m_hMyWeapons in server.dll
                 Msg("[insbots] Fallback m_hMyWeapons bound to 0x0A24 (%d)\n", s_offset_m_hMyWeapons);
             }
+
+            // ADS ground truth on Windows: CINSPlayer::GetPlayerFlags() is
+            // `mov eax,[ecx+0xACC]; ret` in the shipped server.dll, and
+            // SetIronsightsState drives bit 0 via AddPlayerFlag(1)/
+            // RemovePlayerFlag(1). Verified live on the Windows test server.
+            s_offset_m_IronsightsState = 0x0ACC;
+            Msg("[insbots] Windows ADS state offset: playerflags=0x%X (bit0 = shouldered)\n",
+                s_offset_m_IronsightsState);
 #endif
             if (s_offset_m_CollisionGroup < 0)
                 Msg("[insbots] WARNING: m_CollisionGroup unavailable; spawn_nocollide will fail closed\n");
