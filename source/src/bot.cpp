@@ -2449,6 +2449,7 @@ void CInsBot::OnRemoved()
     ResetLadderTraversal(true);
     ResetBodyNoCollideRecovery();
     EndSpawnNoCollide(true);
+    g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
     m_inUse = false;
     m_edict = 0; m_ctrl = 0; m_info = 0;
     m_captureCommit = false;
@@ -6193,6 +6194,7 @@ bool CInsBot::ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int 
     for (int i = 1; i <= gpGlobals->maxClients && threatCount < 5; i++)
     {
         if (!g_Intel[myTeam].enemy[i].valid) continue;
+        if (!IntelEnemyIsLive(myTeam, i)) continue;
         Vector ip = g_Intel[myTeam].enemy[i].pos;
         if (now - g_Intel[myTeam].enemy[i].time > insbot_intel_time.GetFloat()) continue;
         bool isPrimary = (ip.x == primaryThreat.x && ip.y == primaryThreat.y);
@@ -6242,8 +6244,13 @@ bool CInsBot::ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int 
         }
         if (threatCount == 0) worst = 0.0f;
 
-        float dT = sqrtf((candPos - primaryThreat).LengthSqr());
-        if (dT < myT - 48.0f) worst -= advP;
+        // Guard: if primaryThreat is unset (zero-vector), skip the advance penalty
+        // to avoid penalizing based on distance to world origin.
+        if (primaryThreat.x != 0.0f || primaryThreat.y != 0.0f || primaryThreat.z != 0.0f)
+        {
+            float dT = sqrtf((candPos - primaryThreat).LengthSqr());
+            if (dT < myT - 48.0f) worst -= advP;
+        }
         worst -= distW * dMeCand;
         worst += tierW * cp->tier;
         if (cp->isLowOnly) worst -= 15.0f;
@@ -6273,6 +6280,7 @@ bool CInsBot::ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int 
 
     int myRosterIdx = (int)(this - g_Bots.m_bots);
     if (!g_Bots.m_coverOwnerSlot || !g_Bots.m_coverOwnedSince) return false;
+    g_Bots.ReleaseCoverOwnership(myRosterIdx);   // release any previously held spot
     g_Bots.m_coverOwnerSlot[bestIdx] = (short)myRosterIdx;
     g_Bots.m_coverOwnedSince[bestIdx] = now;
 
@@ -8812,7 +8820,35 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
     // leader is not in cover; when they are in cover, fall through here.
     if (m_leaderInCover && m_squadOrder == SQUAD_ORDER_FOLLOW)
     {
-        Vector threat = (m_enemyIndex) ? m_enemyLastPos : pos;
+        // Use personal enemy, shared team intel, or leader's reverse bearing.
+        // Never pass the bot's own position as a threat — it produces
+        // geometrically meaningless cover scores.
+        Vector threat;
+        if (m_enemyIndex)
+        {
+            threat = m_enemyLastPos;
+        }
+        else
+        {
+            // No personal enemy: query team intel for freshest known threat
+            int myTeam = m_info ? m_info->GetTeamIndex() : 0;
+            float now = gpGlobals->curtime;
+            Vector intelPos;
+            int intelIdx = IntelFreshest(myTeam, now, insbot_intel_time.GetFloat(),
+                                         pos, 2000.0f, intelPos);
+            if (intelIdx > 0)
+            {
+                threat = intelPos;
+            }
+            else
+            {
+                // No intel at all: synthesize threat behind the formation
+                // (reverse of formation heading) so cover is chosen facing outward.
+                float revYaw = fmodf(m_squadFormationYaw + 180.0f, 360.0f);
+                float rad = revYaw * (3.14159265f / 180.0f);
+                threat = pos + Vector(cosf(rad) * 500.0f, sinf(rad) * 500.0f, 0.0f);
+            }
+        }
         Vector coverSpot;
         int coverTier;
         if (ChooseCoverSpot(threat, coverSpot, coverTier))
@@ -8830,6 +8866,9 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
                     view.x = 0.0f;
                     m_curAngles = view;
                 }
+                // Duck behind low cover; tall cover protects while standing
+                if (m_chosenCoverIsLow)
+                    buttons |= IN_DUCK;
             }
             m_coverFollowSet = true;   // Fix 4 handoff (vulnerable branch may run later)
             return;   // cover-follow replaces normal formation movement
@@ -9553,6 +9592,8 @@ void CInsBot::ThinkAlive()
         m_ironsights = false; m_ironsightTime = 0.0f;
         m_wantAds = false;
         m_crouchFireUntil = 0; m_haveCover = false;
+        m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
+        g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
         m_recoilRise = 0; m_burstShots = 0; m_wp = 0; m_wpToggledMode = false; m_wpName[0] = 0;
         m_haveHoldSpot = false; m_patrolling = false;
         m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
@@ -10610,7 +10651,7 @@ void CInsBot::ThinkAlive()
                         m_chosenCoverTier = chosenTier; m_chosenCoverIsLow = chosenLow;
                         if (!hadCover) Say(VOX_COVER);   // announce only on taking cover, not each refresh
                     }
-                    else m_haveCover = false;
+                    else { m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false; }
                 }
                 if (m_haveCover)
                 {
@@ -10625,27 +10666,32 @@ void CInsBot::ThinkAlive()
                         fwd = 0.0f;
                         side = 0.0f;
                     }
-                    // run upright TO cover (fast), only duck once we're behind it
-                    if (coverDist < 56.0f || (insbot_cover_v2.GetBool() && m_chosenCoverIsLow))
-                        buttons |= IN_DUCK;
+                    // Run upright TO cover, duck only once near it.
+                    // Low cover gets the full 56u duck radius; all other cover
+                    // ducks at the 40u arrival threshold only.
+                    {
+                        float duckRadius = (insbot_cover_v2.GetBool() && m_chosenCoverIsLow) ? 56.0f : 40.0f;
+                        if (coverDist < duckRadius)
+                            buttons |= IN_DUCK;
+                    }
                 }
             }
             else if (objectiveFocus)
             {
-                m_haveCover = false;
+                m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 m_haveHoldSpot = false; m_haveSniperSpot = false;
                 MoveToward(capOp->center, fwd, side, buttons, view);
             }
             else if (captureCornerTransit)
             {
-                m_haveCover = false;
+                m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 MoveToward(m_holdSpot, fwd, side, buttons, view);
             }
             else if (inObjZone)
             {
                 // Already on the point: hold and defend it. Never chase an
                 // enemy away from a capture zone we are committed to.
-                m_haveCover = false; m_haveHoldSpot = false; m_haveSniperSpot = false;
+                m_haveCover = false; m_haveHoldSpot = false; m_haveSniperSpot = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 fwd = 0; side = 0;
             }
             else if (IsSquadFollower())
@@ -10669,7 +10715,7 @@ void CInsBot::ThinkAlive()
                 // the leader's cover-follow command instead.
                 if (m_coverFollowSet)
                 {
-                    m_haveCover = false;
+                    m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                     // cover-follow already produced movement; do not scale it
                     // to zero here when the follower is near its leader.
                 }
@@ -10695,7 +10741,7 @@ void CInsBot::ThinkAlive()
                      || (!losNow && IsSniper() && !m_haveSniperSpot
                          && now - m_enemyLastSeen > 4.5f))
             {
-                m_haveCover = false;
+                m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 Vector chase = losNow ? pi->GetAbsOrigin() : m_enemyLastPos;
                 // Use the same movement path as objectives and cover.  The old
                 // inline chase duplicated navigation but skipped personal space
@@ -10704,7 +10750,7 @@ void CInsBot::ThinkAlive()
             }
             else
             {
-                m_haveCover = false;
+                m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 if (IsSniper() && losNow && m_haveSniperSpot
                     && m_sniperStance == SNIPER_STANCE_CROUCH)
                 {
@@ -14236,6 +14282,7 @@ void CBotRoster::LevelInit(const char *mapname)
 
 void CBotRoster::BuildCoverDatabase()
 {
+    FreeCoverDatabase();   // release prior buffers on rebuild (prevents leak on repeated ServerActivate)
     m_coverCount = 0;
     m_coverCapacity = 0;
 
@@ -14306,8 +14353,10 @@ void CBotRoster::BuildCoverDatabase()
                 if (C.x >= op2->minX && C.x <= op2->maxX && C.y >= op2->minY && C.y <= op2->maxY)
                 {
                     if (g_Objectives.IsSpawnZone(j, 1) || g_Objectives.IsSpawnZone(j, 2))
+                    {
                         insideSpawnZone = true;
-                    break;
+                        break;
+                    }
                 }
             }
             if (insideSpawnZone) { spawnSkipped++; continue; }
@@ -14317,6 +14366,7 @@ unsigned char blockMask[8] = {0};
             int popcount = 0;
             bool anyTallBlock = false;
 
+            bool sampleInSolid = false;
             for (int d = 0; d < 8; ++d)
             {
                 float yr = DIR_YAW[d] * (3.14159265358979f / 180.0f);
@@ -14325,6 +14375,7 @@ unsigned char blockMask[8] = {0};
                 Vector eyeS = C + Vector(0, 0, 58);
                 ray.Init(eyeS, eyeS + dir * rayLen);
                 enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &wf, &tr);
+                if (tr.startsolid || tr.allsolid) { sampleInSolid = true; break; }
                 float distS = tr.fraction * rayLen;
                 blockMask[d] = (distS < cutoff) ? 1 : 0;
                 if (blockMask[d]) anyTallBlock = true;
@@ -14332,9 +14383,11 @@ unsigned char blockMask[8] = {0};
                 Vector eyeC = C + Vector(0, 0, 34);
                 ray.Init(eyeC, eyeC + dir * rayLen);
                 enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &wf, &tr);
+                if (tr.startsolid || tr.allsolid) { sampleInSolid = true; break; }
                 float distC = tr.fraction * rayLen;
                 crouchMask[d] = (distC < cutoff) ? 1 : 0;
             }
+            if (sampleInSolid) continue;   // skip to next sample point
 
             for (int d = 0; d < 8; ++d) if (blockMask[d]) popcount++;
             int crouchPopcount = 0;
@@ -14397,6 +14450,19 @@ bool CBotRoster::IsCoverOccupiedByOther(int coverIdx, int myRosterIdx) const
     if (slot < 0 || slot == myRosterIdx) return false;
     const CInsBot *o = (slot < 64) ? &m_bots[slot] : 0;
     return o && o->m_inUse && o->m_info && !o->m_info->IsDead();
+}
+
+void CBotRoster::ReleaseCoverOwnership(int rosterIdx)
+{
+    if (!m_coverOwnerSlot || rosterIdx < 0 || rosterIdx >= 64) return;
+    for (int i = 0; i < m_coverCapacity; i++)
+    {
+        if (m_coverOwnerSlot[i] == (short)rosterIdx)
+        {
+            m_coverOwnerSlot[i] = -1;
+            m_coverOwnedSince[i] = 0.0f;
+        }
+    }
 }
 void CBotRoster::LevelShutdown()
 {

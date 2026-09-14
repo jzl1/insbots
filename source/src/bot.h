@@ -725,6 +725,7 @@ void     FreeCoverDatabase();
 int      CoverCount() const { return m_coverCount; }
 const CoverPoint *CoverAt(int i) const { return (i >= 0 && i < m_coverCount) ? &m_coverPoints[i] : 0; }
 bool     IsCoverOccupiedByOther(int coverIdx, int myRosterIdx) const;
+    void     ReleaseCoverOwnership(int rosterIdx);
 int      CoverOwnerSlot(int coverIdx) const { return (coverIdx >= 0 && coverIdx < m_coverCapacity) ? m_coverOwnerSlot[coverIdx] : -1; }
 struct CoverPoint *m_coverPoints;
 int      m_coverCount;
