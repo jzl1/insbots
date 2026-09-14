@@ -10558,9 +10558,11 @@ void CInsBot::ThinkAlive()
 
         // Proactive cover: if engaging in the open beyond 250u, seek cover even if healthy.
         // If already holding cover from proactive cover, stay committed until the 3.0s LOS exit.
+        // Stationed snipers (at assigned perch <= 80u) are excluded: they hold their overwatch vantage point.
+        bool sniperAtPerch = IsSniper() && m_haveSniperSpot && (xyd(pos, m_sniperSpot) <= 80.0f);
         bool proactiveCover = false;
         if (insbot_takecover.GetBool() && insbot_cover_on_engage.GetBool()
-            && engaging && !leaderCoverActive)
+            && engaging && !leaderCoverActive && !sniperAtPerch)
         {
             // If this is a squad follower whose leader has moved far ahead (> 400u),
             // do not anchor in cover: prioritize keeping up with the leader.
@@ -10675,7 +10677,7 @@ void CInsBot::ThinkAlive()
                     m_sniperRelocateTime = now + 45.0f; // Threat relocation: abandon current overlook if taking heavy fire
                 }
                 Vector threat = losNow ? pi->GetAbsOrigin() : m_enemyLastPos;
-                if (!m_haveCover || now > m_coverUntil)
+                if (now > m_coverUntil)
                 {
                     bool hadCover = m_haveCover;
                     bool found = false;
