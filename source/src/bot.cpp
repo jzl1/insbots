@@ -216,6 +216,7 @@ extern CfgVar insbot_close_range;
 extern CfgVar insbot_takecover;
 extern CfgVar insbot_cover_health;
 extern CfgVar insbot_cover_v2;
+extern CfgVar insbot_cover_on_engage;
 extern CfgVar insbot_suppress_time;
 extern CfgVar insbot_cover_tier_weight;
 extern CfgVar insbot_cover_dist_weight;
@@ -6161,6 +6162,29 @@ bool CInsBot::FindCover(const Vector &threat, Vector &out) const
 // ============================================================================
 // Take-Cover Overhaul v2 (see take-cover-overhaul-design.md in release folder)
 // ============================================================================
+bool CInsBot::IsPositionExposed(const Vector &myPos, const Vector &threatPos) const
+{
+    if (!g_Bots.m_coverPoints || g_Bots.CoverCount() <= 0) return true;
+
+    float searchR = 75.0f;
+    for (int ci = 0; ci < g_Bots.CoverCount(); ci++)
+    {
+        const CoverPoint *cp = g_Bots.CoverAt(ci);
+        if (!cp) continue;
+        if (xyd(cp->pos, myPos) > searchR) continue;
+
+        float yawDeg = atan2f(threatPos.y - cp->pos.y, threatPos.x - cp->pos.x) * (180.0f / 3.14159265358979f);
+        yawDeg = fmodf(yawDeg + 360.0f, 360.0f);
+        int sec = ((int)(fmodf(yawDeg + 22.5f, 360.0f) / 45.0f)) & 7;
+
+        // If a nearby point blocks this bearing while standing, or if it is low
+        // cover and the bot is already ducked, the bot is not exposed in the open.
+        if (cp->blockMask[sec] || (cp->crouchMask[sec] && (m_lastButtons & IN_DUCK)))
+            return false;
+    }
+    return true; // no protective cover point within 75u
+}
+
 float CInsBot::EvaluateCover(const CoverPoint &cp, const Vector &threatPos) const
 {
     float yawDeg = atan2f(threatPos.y - cp.pos.y,
@@ -10531,9 +10555,42 @@ void CInsBot::ThinkAlive()
         // off its reposition path by a generic reloadActive cover-seek.
         bool  suppressHold = IsSquadFollower() && m_squadOrder == SQUAD_ORDER_SUPPRESS
                         && !hurt;
-        bool  vulnerable = insbot_takecover.GetBool()
+
+        // Proactive cover: if engaging in the open beyond 250u, seek cover even if healthy.
+        // If already holding cover from proactive cover, stay committed until the 3.0s LOS exit.
+        bool proactiveCover = false;
+        if (insbot_takecover.GetBool() && insbot_cover_on_engage.GetBool()
+            && engaging && !leaderCoverActive)
+        {
+            // If this is a squad follower whose leader has moved far ahead (> 400u),
+            // do not anchor in cover: prioritize keeping up with the leader.
+            bool squadTetherBroken = false;
+            if (IsSquadFollower())
+            {
+                edict_t *le = engine->PEntityOfEntIndex(m_squadLeaderIndex);
+                IPlayerInfo *lpi = (le && !le->IsFree()) ? playerinfomanager->GetPlayerInfo(le) : 0;
+                if (lpi && xyd(pos, lpi->GetAbsOrigin()) > 400.0f)
+                    squadTetherBroken = true;
+            }
+
+            if (!squadTetherBroken)
+            {
+                if (m_haveCover)
+                {
+                    proactiveCover = true;
+                }
+                else if (losNow && dist > 250.0f)
+                {
+                    Vector threat = pi ? pi->GetAbsOrigin() : m_enemyLastPos;
+                    if (IsPositionExposed(pos, threat))
+                        proactiveCover = true;
+                }
+            }
+        }
+
+        bool  vulnerable = (insbot_takecover.GetBool()
                         && (hurt || suppressed || (reloadActive && !suppressHold))
-                        && !leaderCoverActive;
+                        && !leaderCoverActive) || proactiveCover;
 
             // Capture-committed objective focus: keep pushing the objective
             // while engaging distant enemies. The bot still aims and fires on
@@ -10630,14 +10687,29 @@ void CInsBot::ThinkAlive()
                         Vector spotTmp;
                         if (ChooseCoverSpot(threat, spotTmp, t))
                         {
-                            m_coverSpot = spotTmp;
-                            for (int ci = 0; ci < g_Bots.CoverCount(); ++ci)
+                            // If this is proactive cover (not critically hurt), cap the dash to 350u.
+                            // Running farther than 350u across open ground leaves the bot exposed too long.
+                            float candDist = xyd(pos, spotTmp);
+                            if (proactiveCover && candDist > 350.0f)
                             {
-                                const CoverPoint *cpv = g_Bots.CoverAt(ci);
-                                if (cpv && cpv->pos.x == m_coverSpot.x && cpv->pos.y == m_coverSpot.y)
-                                { t = cpv->tier; chosenLow = cpv->isLowOnly != 0; break; }
+                                // Cover is too far; release ownership and stay in place
+                                g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
+                                found = false;
+                                if (insbot_debug.GetBool())
+                                    BotDbg("[insbots] %s COVER rejected candDist=%.0f > 350u (open field fallback to crouch)\n",
+                                           m_name, candDist);
                             }
-                            found = true;
+                            else
+                            {
+                                m_coverSpot = spotTmp;
+                                for (int ci = 0; ci < g_Bots.CoverCount(); ++ci)
+                                {
+                                    const CoverPoint *cpv = g_Bots.CoverAt(ci);
+                                    if (cpv && cpv->pos.x == m_coverSpot.x && cpv->pos.y == m_coverSpot.y)
+                                    { t = cpv->tier; chosenLow = cpv->isLowOnly != 0; break; }
+                                }
+                                found = true;
+                            }
                         }
                         chosenTier = t;
                     }
@@ -10647,17 +10719,36 @@ void CInsBot::ThinkAlive()
                     }
                     if (found)
                     {
-                        m_haveCover = true; m_coverUntil = now + 2.5f;
+                        m_haveCover = true; m_coverUntil = now + 3.0f;
                         m_chosenCoverTier = chosenTier; m_chosenCoverIsLow = chosenLow;
                         if (!hadCover) Say(VOX_COVER);   // announce only on taking cover, not each refresh
                     }
-                    else { m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false; }
+                    else
+                    {
+                        m_haveCover = false;
+                        m_chosenCoverTier = 0;
+                        m_chosenCoverIsLow = false;
+                        m_coverUntil = now + 1.0f; // Throttle re-queries for 1.0s
+                        // Open-field fallback: if proactive cover failed (no cover within 350u),
+                        // drop to crouch in place to minimize silhouette while firing.
+                        if (proactiveCover)
+                        {
+                            buttons |= IN_DUCK;
+                            if (insbot_debug.GetBool())
+                                BotDbg("[insbots] %s COVER fallback: crouched in place (no cover within 350u)\n", m_name);
+                        }
+                    }
                 }
                 if (m_haveCover)
                 {
                     float coverDist = xyd(pos, m_coverSpot);
                     if (coverDist > 40.0f)
+                    {
                         MoveToward(m_coverSpot, fwd, side, buttons, view);
+                        // Sights down while in transit: allows 100% walk speed instead of
+                        // the engine's 35% ADS penalty, while weapon fire continues.
+                        m_wantAds = false;
+                    }
                     else
                     {
                         // FindCover returns exact NAV-area centres.  Stop once
@@ -10665,6 +10756,9 @@ void CInsBot::ThinkAlive()
                         // running through its centre and turning back toward it.
                         fwd = 0.0f;
                         side = 0.0f;
+                        // Arrived at cover: shoulder weapon for full ADS accuracy
+                        if (insbot_ironsights.GetBool() && (dist > 300.0f) && !IsHoldingM203())
+                            m_wantAds = true;
                     }
                     // Run upright TO cover, duck only once near it.
                     // Low cover gets the full 56u duck radius; all other cover
@@ -10674,16 +10768,57 @@ void CInsBot::ThinkAlive()
                         if (coverDist < duckRadius)
                             buttons |= IN_DUCK;
                     }
+
+                    static float s_lastCoverDbg[64];
+                    static unsigned char s_coverArrived[64];
+                    int mySlot = (int)(this - g_Bots.m_bots);
+                    if (insbot_debug.GetBool() && mySlot >= 0 && mySlot < 64)
+                    {
+                        if (coverDist > 40.0f)
+                        {
+                            s_coverArrived[mySlot] = 0;
+                            if (now - s_lastCoverDbg[mySlot] > 0.4f)
+                            {
+                                s_lastCoverDbg[mySlot] = now;
+                                BotDbg("[insbots] %s COVER move: dist=%.0f pos=(%.0f,%.0f) target=(%.0f,%.0f) low=%d ads=%d\n",
+                                       m_name, coverDist, pos.x, pos.y, m_coverSpot.x, m_coverSpot.y,
+                                       m_chosenCoverIsLow ? 1 : 0, m_wantAds ? 1 : 0);
+                            }
+                        }
+                        else if (!s_coverArrived[mySlot])
+                        {
+                            s_coverArrived[mySlot] = 1;
+                            BotDbg("[insbots] %s COVER arrived: dist=%.0f pos=(%.0f,%.0f) low=%d ads=%d duck=%d\n",
+                                   m_name, coverDist, pos.x, pos.y,
+                                   m_chosenCoverIsLow ? 1 : 0, m_wantAds ? 1 : 0,
+                                   (buttons & IN_DUCK) ? 1 : 0);
+                        }
+                    }
+
+                    // Exit condition: if arrived at cover and line of sight to enemy is
+                    // lost for >= lose_time, break cover and resume advancing.
+                    if (!losNow && (now - m_enemyLastSeen >= insbot_lose_time.GetFloat()) && !hurt)
+                    {
+                        if (insbot_debug.GetBool())
+                            BotDbg("[insbots] %s COVER exit: LOS lost >= %.1fs, breaking cover to advance\n",
+                                   m_name, insbot_lose_time.GetFloat());
+                        m_haveCover = false;
+                        m_chosenCoverTier = 0;
+                        m_chosenCoverIsLow = false;
+                        g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
+                    }
                 }
             }
             else if (objectiveFocus)
             {
+                if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 m_haveHoldSpot = false; m_haveSniperSpot = false;
                 MoveToward(capOp->center, fwd, side, buttons, view);
             }
             else if (captureCornerTransit)
             {
+                if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 MoveToward(m_holdSpot, fwd, side, buttons, view);
             }
@@ -10691,6 +10826,7 @@ void CInsBot::ThinkAlive()
             {
                 // Already on the point: hold and defend it. Never chase an
                 // enemy away from a capture zone we are committed to.
+                if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_haveHoldSpot = false; m_haveSniperSpot = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 fwd = 0; side = 0;
             }
@@ -10741,6 +10877,7 @@ void CInsBot::ThinkAlive()
                      || (!losNow && IsSniper() && !m_haveSniperSpot
                          && now - m_enemyLastSeen > 4.5f))
             {
+                if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 Vector chase = losNow ? pi->GetAbsOrigin() : m_enemyLastPos;
                 // Use the same movement path as objectives and cover.  The old
@@ -10750,6 +10887,7 @@ void CInsBot::ThinkAlive()
             }
             else
             {
+                if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 if (IsSniper() && losNow && m_haveSniperSpot
                     && m_sniperStance == SNIPER_STANCE_CROUCH)
@@ -10766,6 +10904,15 @@ void CInsBot::ThinkAlive()
     // ---------------- navigation: objectives, else roam ----------------
     if (!engaging)
     {
+        if (m_haveCover)
+        {
+            if (insbot_debug.GetBool())
+                BotDbg("[insbots] %s COVER exit: combat ended, breaking cover to advance\n", m_name);
+            m_haveCover = false;
+            m_chosenCoverTier = 0;
+            m_chosenCoverIsLow = false;
+            g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
+        }
         m_firing = false;
 
         // Fix L-2/slow-fire: suppression firing is handled by the NATIVE combat

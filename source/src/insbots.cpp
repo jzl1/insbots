@@ -215,6 +215,7 @@ CfgVar insbot_safe_reload("safe_reload", "1", "only reload when safe: dry mag re
 CfgVar insbot_close_range("close_range", "600", "enemy distance considered 'close' - dry primary here means switch to sidearm, not reload");
 CfgVar insbot_takecover("takecover", "1", "retreat to a spot that breaks line-of-sight while reloading or hurt");// ---- take-cover overhaul v2 (see take-cover-overhaul-design.md) ----
 CfgVar insbot_cover_v2("cover_v2", "1", "use precomputed cover database + multi-threat scoring (0=legacy FindCover path)");
+CfgVar insbot_cover_on_engage("cover_on_engage", "1", "seek nearby cover when engaging in the open (0=off)");
 CfgVar insbot_suppress_time("suppress_time", "4", "seconds of reactive cover-seeking after being hit");
 CfgVar insbot_cover_tier_weight("cover_tier_weight", "30", "scoring weight per full tier step");
 CfgVar insbot_cover_dist_weight("cover_dist_weight", "0.25", "scoring penalty per unit distance from bot");

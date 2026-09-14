@@ -600,6 +600,7 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     bool  WorldClear(const Vector &a, const Vector &b) const; // world-only LOS between 2 points
     bool  CanShootMarker(const Vector &marker) const;         // covering-fire probe: eye->marker world trace
     bool  FindCover(const Vector &threat, Vector &out) const; // nearby spot hidden from threat
+    bool  IsPositionExposed(const Vector &myPos, const Vector &threatPos) const;
 float EvaluateCover(const CoverPoint &cp, const Vector &threatPos) const;
 bool  ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int &outTier);
     void  ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd, float &side,

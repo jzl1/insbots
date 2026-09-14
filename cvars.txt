@@ -273,6 +273,7 @@ insbot set takecover                     "1" // retreat to a spot that breaks li
 
 // ---- Take-Cover Overhaul v2 (multi-threat scoring, precomputed cover DB) ----
 insbot set cover_v2                      "1" // use precomputed cover database + multi-threat scoring (0=legacy FindCover path)
+insbot set cover_on_engage               "1" // seek nearby cover when engaging in the open (0=off)
 insbot set suppress_time                 "4" // seconds of reactive cover-seeking after being hit
 insbot set cover_tier_weight            "30" // scoring weight per full tier step
 insbot set cover_dist_weight           "0.25" // scoring penalty per unit distance from bot
