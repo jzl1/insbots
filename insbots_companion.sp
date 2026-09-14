@@ -117,6 +117,9 @@ public void OnMapStart()
     }
     g_iBeamModel = PrecacheModel("sprites/glow01.spr");   // squad glow sprite model
     g_iBeamHalo = 0;
+    PrecacheModel("materials/hud/indicators/attack.vmt", true);
+    PrecacheModel("materials/hud/indicators/defend.vmt", true);
+    InitSquadOffsets();
     UpdateVersions();
 }
 
@@ -1129,6 +1132,25 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
 // ============================================================================
 // Slot Requester Logic
 // ============================================================================
+int g_iOff_SquadTeam = -1;
+int g_iOff_SquadSlots = -1;
+int g_iOff_SquadPlayerSlots = -1;
+
+void InitSquadOffsets()
+{
+    if (g_iOff_SquadTeam == -1)
+    {
+        g_iOff_SquadTeam = FindSendPropInfo("CINSSquad", "m_iParentTeam");
+        if (g_iOff_SquadTeam == -1) g_iOff_SquadTeam = 860;
+
+        g_iOff_SquadSlots = FindSendPropInfo("CINSSquad", "m_iSlots");
+        if (g_iOff_SquadSlots == -1) g_iOff_SquadSlots = 992;
+
+        g_iOff_SquadPlayerSlots = FindSendPropInfo("CINSSquad", "m_iPlayerSlots");
+        if (g_iOff_SquadPlayerSlots == -1) g_iOff_SquadPlayerSlots = 1024;
+    }
+}
+
 void GetClassNameFromId(int team, int classId, char[] name, int maxlen)
 {
     if (team == 1) // USMC
@@ -1201,6 +1223,7 @@ void OpenSlotRequestMenu(int client)
         return;
     }
 
+    InitSquadOffsets();
     Menu menu = new Menu(SlotRequestMenuHandler);
     menu.SetTitle("Select Class (Press #):");
 
@@ -1224,7 +1247,7 @@ void OpenSlotRequestMenu(int client)
 
         if (StrEqual(classname, "CINSSquad"))
         {
-            int team = GetEntData(i, 860, 4);
+            int team = GetEntData(i, g_iOff_SquadTeam, 4);
             if (team != reqTeam) continue;
 
             char squadName[32];
@@ -1232,7 +1255,7 @@ void OpenSlotRequestMenu(int client)
 
             for (int s = 0; s < 8; s++)
             {
-                int playerId = GetEntData(i, 1024 + (s * 4), 4);
+                int playerId = GetEntData(i, g_iOff_SquadPlayerSlots + (s * 4), 4);
                 bool isAvailable = false;
 
                 if (playerId != 0 && playerId != -1)
@@ -1251,7 +1274,7 @@ void OpenSlotRequestMenu(int client)
 
                 if (isAvailable)
                 {
-                    int slotClassId = GetEntData(i, 992 + (s * 4), 4);
+                    int slotClassId = GetEntData(i, g_iOff_SquadSlots + (s * 4), 4);
                     if (slotClassId >= 0 && slotClassId < 32 && !roleAdded[squadIndex][slotClassId])
                     {
                         roleAdded[squadIndex][slotClassId] = true;
@@ -1279,6 +1302,11 @@ void OpenSlotRequestMenu(int client)
         menu.AddItem("", "No slots available on your team", ITEMDRAW_DISABLED);
     }
 
+    // Fit up to 9 items on a single page without splitting key 8 onto page 2
+    if (availableRoleCount <= 9)
+    {
+        menu.Pagination = MENU_NO_PAGINATION;
+    }
     menu.ExitButton = true;
     menu.Display(client, 20);
 }
@@ -1308,6 +1336,7 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                 return 0;
             }
 
+            InitSquadOffsets();
             // Find matching squad entity
             int squadIndex = 0;
             int squadEnt = -1;
@@ -1319,7 +1348,7 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
 
                 if (StrEqual(classname, "CINSSquad"))
                 {
-                    int team = GetEntData(i, 860, 4);
+                    int team = GetEntData(i, g_iOff_SquadTeam, 4);
                     if (team == reqTeam)
                     {
                         if (squadIndex == targetSquadIndex)
@@ -1347,10 +1376,10 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
 
             for (int s = 0; s < 8; s++)
             {
-                int slotClassId = GetEntData(squadEnt, 992 + (s * 4), 4);
+                int slotClassId = GetEntData(squadEnt, g_iOff_SquadSlots + (s * 4), 4);
                 if (slotClassId == targetClassId)
                 {
-                    int playerId = GetEntData(squadEnt, 1024 + (s * 4), 4);
+                    int playerId = GetEntData(squadEnt, g_iOff_SquadPlayerSlots + (s * 4), 4);
                     if (playerId == 0 || playerId == -1)
                     {
                         emptySlots[emptyCount++] = s;
@@ -1386,29 +1415,36 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
 
             if (chosenSlot != -1)
             {
-                char botName[64];
-                if (targetBot > 0)
-                {
-                    GetClientName(targetBot, botName, sizeof(botName));
-                    KickClient(targetBot, "Slot requested by player");
-                }
-
                 int uiTeamIdx = reqTeam - 1;
                 int magicNumber = 5 + targetSquadIndex + (chosenSlot * 4);
-
-                char joinCmd[128];
-                Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
-                ClientCommand(client, joinCmd);
-
                 char squadName[32];
                 GetSquadDisplayName(targetSquadIndex, squadName, sizeof(squadName));
 
                 if (targetBot > 0)
                 {
+                    char botName[64];
+                    GetClientName(targetBot, botName, sizeof(botName));
+                    if (IsClientInGame(targetBot))
+                    {
+                        KickClient(targetBot, "Slot requested by player");
+                    }
+
+                    // Defer pfullsetup to next frame so the engine fully disconnects the bot
+                    // and marks m_players[chosenSlot] == -1 before the join command executes.
+                    DataPack pack = new DataPack();
+                    pack.WriteCell(GetClientUserId(client));
+                    pack.WriteCell(uiTeamIdx);
+                    pack.WriteCell(magicNumber);
+                    RequestFrame(Frame_ExecuteSlotJoin, pack);
+
                     PrintToChat(client, "[SlotRequester] Took over %s slot from '%s' in %s!", className, botName, squadName);
                 }
                 else
                 {
+                    char joinCmd[128];
+                    Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
+                    ClientCommand(client, joinCmd);
+
                     PrintToChat(client, "[SlotRequester] Joined %s slot in %s!", className, squadName);
                 }
             }
@@ -1423,6 +1459,23 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
         delete menu;
     }
     return 0;
+}
+
+public void Frame_ExecuteSlotJoin(DataPack pack)
+{
+    pack.Reset();
+    int userId = pack.ReadCell();
+    int uiTeamIdx = pack.ReadCell();
+    int magicNumber = pack.ReadCell();
+    delete pack;
+
+    int client = GetClientOfUserId(userId);
+    if (client > 0 && IsClientInGame(client))
+    {
+        char joinCmd[128];
+        Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
+        ClientCommand(client, joinCmd);
+    }
 }
 
 // ============================================================================
