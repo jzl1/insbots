@@ -85,9 +85,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "pkg_win/addons/sourcemod/plugins" -Force | Out-Null
+          New-Item -ItemType Directory -Path "pkg_win/addons/sourcemod/translations" -Force | Out-Null
           Copy-Item -Path "insbots.dll" -Destination "pkg_win/addons/"
           Copy-Item -Path "insbots.vdf" -Destination "pkg_win/addons/"
           Copy-Item -Path "insbots_companion.smx" -Destination "pkg_win/addons/sourcemod/plugins/"
+          Copy-Item -Path "translations/insbots_companion.phrases.txt" -Destination "pkg_win/addons/sourcemod/translations/"
           Copy-Item -Path "README.md" -Destination "pkg_win/"
 
           # Create .zip package for Windows
@@ -137,9 +139,11 @@ jobs:
       - name: Prepare Linux Package (.tar.gz)
         run: |
           mkdir -p pkg_linux/addons/sourcemod/plugins
+          mkdir -p pkg_linux/addons/sourcemod/translations
           cp insbots_i486.so pkg_linux/addons/
           cp insbots.vdf pkg_linux/addons/
           cp insbots_companion.smx pkg_linux/addons/sourcemod/plugins/
+          cp translations/insbots_companion.phrases.txt pkg_linux/addons/sourcemod/translations/
           cp README.md pkg_linux/
 
           # Create .tar.gz package for Linux

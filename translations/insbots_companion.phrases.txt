@@ -1,0 +1,270 @@
+"Phrases"
+{
+	// =====================================================================
+	//  InsBots Companion - phrase file
+	//  Encoding: UTF-8 WITHOUT BOM (required by SourceMod)
+	//  Languages: "en" (default/fallback) + "ru"
+	//
+	//  Format rules verified against the 640 stock SourceMod phrase files:
+	//    * Any phrase containing {1}/{2}/... MUST declare a "#format" line.
+	//      Every one of the 119 placeholder phrases in stock files has one;
+	//      zero placeholder phrases omit it.
+	//    * "#format" carries the type/precision ({1:s}, {1:.0f}).
+	//      The translated text itself uses the bare token {1}.
+	//    * The default language key is "en". No stock phrase file uses
+	//      "#default" (that token belongs to gamedata files).
+	//    * Class names (Rifleman, Sapper, Marksman, ...) are intentionally
+	//      NOT translated - they match the game's own class-select screen.
+	// =====================================================================
+
+	// ---------------------------------------------------------------------
+	//  Squad - general
+	// ---------------------------------------------------------------------
+	"Squad F3 Bound"
+	{
+		"en"			"[Squad] F3 bound to squad orders. Type !orders anytime."
+		"ru"			"[Отряд] F3 назначена на приказы отряда. Введите !orders в любое время."
+	}
+
+	"Squad Need Active Squad"
+	{
+		"en"			"[Squad] You need an active squad first. Type !squad."
+		"ru"			"[Отряд] Сначала нужен активный отряд. Введите !squad."
+	}
+
+	"Squad Escort Activated"
+	{
+		"en"			"[Squad] Fireteam escort ACTIVATED. Squad Leader promotion granted."
+		"ru"			"[Отряд] Сопровождение активировано. Вы назначены командиром отряда."
+	}
+
+	"Squad Escort Dismissed"
+	{
+		"en"			"[Squad] Fireteam escort DISMISSED."
+		"ru"			"[Отряд] Сопровождение отменено."
+	}
+
+	"Squad Fireteam Dismissed"
+	{
+		"en"			"[Squad] Fireteam dismissed."
+		"ru"			"[Отряд] Отряд распущен."
+	}
+
+	"Squad Leader Down"
+	{
+		"en"			"[Squad] Leader down - fireteam holding positions until you respawn."
+		"ru"			"[Отряд] Командир выведен из строя - отряд держит позиции до вашего возрождения."
+	}
+
+	// ---------------------------------------------------------------------
+	//  Squad - roster events
+	// ---------------------------------------------------------------------
+	"Squad Mate KIA"
+	{
+		"#format"		"{1:s}"
+		"en"			"[Squad] Squadmate {1} was killed in action!"
+		"ru"			"[Отряд] Боец {1} убит!"
+	}
+
+	"Squad Bot Joined"
+	{
+		"#format"		"{1:s},{2:s}"
+		"en"			"[Squad] {1} joined as {2}."
+		"ru"			"[Отряд] {1} присоединился как {2}."
+	}
+
+	// ---------------------------------------------------------------------
+	//  Squad - covering fire / marking
+	// ---------------------------------------------------------------------
+	"Squad Target Marked"
+	{
+		"#format"		"{1:.0f},{2:.0f},{3:.0f}"
+		"en"			"[Squad] Target marked at {1} {2} {3}. Select Covering Fire to use it."
+		"ru"			"[Отряд] Цель отмечена: {1} {2} {3}. Выберите «Огонь на подавление»."
+	}
+
+	"Squad Mark No Valid Surface"
+	{
+		"en"			"[Squad] No valid surface in range to mark. Aim at a wall or floor."
+		"ru"			"[Отряд] Нет подходящей поверхности для метки. Наведите прицел на стену или пол."
+	}
+
+	"Squad Mark No Surface"
+	{
+		"en"			"[Squad] No surface in range to mark. Aim at a wall or floor."
+		"ru"			"[Отряд] Нет поверхности в пределах досягаемости. Наведите прицел на стену или пол."
+	}
+
+	"Squad Covering Fire Ended"
+	{
+		"en"			"[Squad] Covering fire ended."
+		"ru"			"[Отряд] Огонь на подавление завершён."
+	}
+
+	"Squad Covering Fire At Position"
+	{
+		"#format"		"{1:.0f},{2:.0f},{3:.0f}"
+		"en"			"[Squad] Covering Fire at marked position ({1} {2} {3})"
+		"ru"			"[Отряд] Огонь на подавление по позиции ({1} {2} {3})"
+	}
+
+	"Squad No Valid Target"
+	{
+		"en"			"[Squad] No valid target. Aim at a surface and try again."
+		"ru"			"[Отряд] Нет подходящей цели. Наведите прицел на поверхность и повторите."
+	}
+
+	"Squad Advance Defend"
+	{
+		"en"			"[Squad] Fireteam advancing to marked waypoint and establishing defensive perimeter."
+		"ru"			"[Отряд] Отряд выдвигается к метке и занимает оборону по периметру."
+	}
+
+	// ---------------------------------------------------------------------
+	//  Squad - order confirmations
+	//  Kept as three separate keys instead of "[Squad] Order: %s" so that a
+	//  translated order name is never nested inside a translated sentence.
+	// ---------------------------------------------------------------------
+	"Squad Order Move Out"
+	{
+		"en"			"[Squad] Order: Move Out"
+		"ru"			"[Отряд] Приказ: Вперёд"
+	}
+
+	"Squad Order Defend"
+	{
+		"en"			"[Squad] Order: Defend / Hold"
+		"ru"			"[Отряд] Приказ: Оборона"
+	}
+
+	"Squad Order Backup"
+	{
+		"en"			"[Squad] Order: Need Backup"
+		"ru"			"[Отряд] Приказ: Подкрепление"
+	}
+
+	// ---------------------------------------------------------------------
+	//  Slot requester - status messages
+	// ---------------------------------------------------------------------
+	"Slot Request Disabled"
+	{
+		"en"			"[SlotRequester] Slot request has been disabled by admin."
+		"ru"			"[Запрос слота] Запрос слотов отключён администратором."
+	}
+
+	"Slot Request Need Team"
+	{
+		"en"			"[SlotRequester] You must be on a team to request a slot!"
+		"ru"			"[Запрос слота] Вы должны быть в команде, чтобы запросить слот!"
+	}
+
+	"Slot Take Need Team"
+	{
+		"en"			"[SlotRequester] You must be on a team to take a slot!"
+		"ru"			"[Запрос слота] Вы должны быть в команде, чтобы занять слот!"
+	}
+
+	"Slot Squad Unavailable"
+	{
+		"en"			"[SlotRequester] That squad is no longer available."
+		"ru"			"[Запрос слота] Этот отряд больше недоступен."
+	}
+
+	"Slot All Occupied"
+	{
+		"en"			"[SlotRequester] All slots for that role are currently occupied by players."
+		"ru"			"[Запрос слота] Все слоты для этой роли заняты игроками."
+	}
+
+	// ---------------------------------------------------------------------
+	//  Slot requester - reservation confirmations
+	//  {1} = class name (English, by design)  {2} = squad name  {3} = bot name
+	// ---------------------------------------------------------------------
+	"Slot Reserved From Bot"
+	{
+		"#format"		"{1:s},{2:s},{3:s}"
+		"en"			"[SlotRequester] Reserved {1} in {2} (from '{3}'). You will switch to it after you die and respawn this round."
+		"ru"			"[Запрос слота] Зарезервирован {1} в {2} (у '{3}'). Вы переключитесь на него после смерти и возрождения в этом раунде."
+	}
+
+	"Slot Reserved"
+	{
+		"#format"		"{1:s},{2:s}"
+		"en"			"[SlotRequester] Reserved {1} in {2}. You will switch to it after you die and respawn this round."
+		"ru"			"[Запрос слота] Зарезервирован {1} в {2}. Вы переключитесь на него после смерти и возрождения в этом раунде."
+	}
+
+	// ---------------------------------------------------------------------
+	//  Menus - squad orders (F3)
+	//  AddItem's FIRST argument is the info string switched on by the
+	//  handler and must never be translated. Only the display text is.
+	// ---------------------------------------------------------------------
+	"Menu Squad System"
+	{
+		"en"			"Squad System"
+		"ru"			"Система отряда"
+	}
+
+	"Menu Recruit Fireteam"
+	{
+		"en"			"Recruit Fireteam (3 bots)"
+		"ru"			"Нанять отряд (3 бота)"
+	}
+
+	"Menu Squad Orders"
+	{
+		"en"			"Squad Orders"
+		"ru"			"Приказы отряда"
+	}
+
+	"Menu Move Out"
+	{
+		"en"			"Move Out"
+		"ru"			"Вперёд"
+	}
+
+	"Menu Defend Hold"
+	{
+		"en"			"Defend / Hold Position"
+		"ru"			"Оборона / Держать позицию"
+	}
+
+	"Menu Need Backup"
+	{
+		"en"			"Need Backup"
+		"ru"			"Нужно подкрепление"
+	}
+
+	"Menu Covering Fire"
+	{
+		"en"			"Covering Fire"
+		"ru"			"Огонь на подавление"
+	}
+
+	"Menu Advance Defend"
+	{
+		"en"			"Advance & Defend"
+		"ru"			"Выдвижение и оборона"
+	}
+
+	"Menu Dismiss Squad"
+	{
+		"en"			"Dismiss Squad"
+		"ru"			"Распустить отряд"
+	}
+
+	// ---------------------------------------------------------------------
+	//  Menus - slot requester (F2)
+	// ---------------------------------------------------------------------
+	"Menu Select Class"
+	{
+		"en"			"Select Class (Press #):"
+		"ru"			"Выберите класс (нажмите #):"
+	}
+
+	"Menu No Slots"
+	{
+		"en"			"No slots available on your team"
+		"ru"			"Нет доступных слотов в вашей команде"
+	}
+}

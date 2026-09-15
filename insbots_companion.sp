@@ -55,6 +55,9 @@ int g_iPendingReservedTeam[MAXPLAYERS + 1];
 
 public void OnPluginStart()
 {
+    // Localization: English (fallback) + Russian. See translations/insbots_companion.phrases.txt
+    LoadTranslations("insbots_companion.phrases");
+
     // ---- 1. Version Exposer Setup ----
     g_cvInsbotVersion = CreateConVar("insbot_version", "Unknown", "The current version of the InsBots plugin", FCVAR_NOTIFY | FCVAR_DONTRECORD);
     g_cvInsUtilVersion = CreateConVar("ins_util_version", "Unknown", "The current version of the Ins Utilities plugin", FCVAR_NOTIFY | FCVAR_DONTRECORD);
@@ -105,7 +108,7 @@ public Action Timer_AutoBindComms(Handle timer, any client)
     {
         ClientCommand(client, "bind F2 sm_slotrequest");
         ClientCommand(client, "bind F3 sm_squadorders");
-        PrintToChat(client, "[Squad] F3 bound to squad orders. Type !orders anytime.");
+        PrintToChat(client, "%t", "Squad F3 Bound");
     }
     return Plugin_Stop;
 }
@@ -533,7 +536,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
         {
             char victimName[64];
             GetClientName(victim, victimName, sizeof(victimName));
-            PrintToChat(leader, "[Squad] Squadmate %s was killed in action!", victimName);
+            PrintToChat(leader, "%t", "Squad Mate KIA", victimName);
         }
         g_iBotSquadLeader[victim] = 0;
     }
@@ -554,7 +557,7 @@ public Action Command_SquadRecruit(int args)
 
         if (leader > 0 && leader <= MaxClients && IsClientInGame(leader))
         {
-            PrintToChat(leader, "[Squad] %s joined as %s.", sName, sRole);
+            PrintToChat(leader, "%t", "Squad Bot Joined", sName, sRole);
             if (bot > 0 && bot <= MaxClients && IsClientInGame(bot))
             {
                 if (g_cvCustomSquadSprite.BoolValue)
@@ -574,7 +577,7 @@ public Action Command_SquadLeaderDown(int args)
         int leader = StringToInt(sLeader);
         if (leader > 0 && leader <= MaxClients && IsClientInGame(leader))
         {
-            PrintToChat(leader, "[Squad] Leader down — fireteam holding positions until you respawn.");
+        PrintToChat(leader, "%t", "Squad Leader Down");
         }
     }
     return Plugin_Handled;
@@ -590,13 +593,13 @@ public Action Command_Squad(int client, int args)
     {
         PromoteClientToSquadLeader(client);
         ServerCommand("insbot squad %d 1", client);
-        PrintToChat(client, "[Squad] Fireteam escort ACTIVATED. Squad Leader promotion granted.");
+        PrintToChat(client, "%t", "Squad Escort Activated");
     }
     else
     {
         DemoteClientFromSquadLeader(client);
         ServerCommand("insbot squad %d 0", client);
-        PrintToChat(client, "[Squad] Fireteam escort DISMISSED.");
+        PrintToChat(client, "%t", "Squad Escort Dismissed");
     }
 
     return Plugin_Handled;
@@ -612,7 +615,7 @@ public Action Command_Dismiss(int client, int args)
     g_bSquadActive[client] = false;
     DemoteClientFromSquadLeader(client);
     ServerCommand("insbot squad %d 0", client);
-    PrintToChat(client, "[Squad] Fireteam escort DISMISSED.");
+    PrintToChat(client, "%t", "Squad Escort Dismissed");
     return Plugin_Handled;
 }
 // Replaces the old Event_CommsWaypoint hook (comms_waypoint is not a real INS event).
@@ -625,7 +628,7 @@ public Action Command_MarkTarget(int client, int args)
 
     if (!g_bSquadActive[client])
     {
-        PrintToChat(client, "[Squad] You need an active squad first. Type !squad.");
+        PrintToChat(client, "%t", "Squad Need Active Squad");
         return Plugin_Handled;
     }
 
@@ -644,17 +647,17 @@ public Action Command_MarkTarget(int client, int args)
             g_fWaypointPos[client][1] = endPos[1];
             g_fWaypointPos[client][2] = endPos[2];
             g_bHasWaypoint[client] = true;
-            PrintToChat(client, "[Squad] Target marked at %.0f %.0f %.0f. Select Covering Fire to use it.",
+            PrintToChat(client, "%t", "Squad Target Marked",
                 endPos[0], endPos[1], endPos[2]);
         }
         else
         {
-            PrintToChat(client, "[Squad] No valid surface in range to mark. Aim at a wall or floor.");
+        PrintToChat(client, "%t", "Squad Mark No Valid Surface");
         }
     }
     else
     {
-        PrintToChat(client, "[Squad] No surface in range to mark. Aim at a wall or floor.");
+        PrintToChat(client, "%t", "Squad Mark No Surface");
     }
     CloseHandle(trace);
     return Plugin_Handled;
@@ -880,7 +883,7 @@ void RemoveCoveringFireMarker(int client, bool notifyEnded = false)
 
         if (notifyEnded && IsPlayerAlive(client))
         {
-            PrintToChat(client, "[Squad] Covering fire ended.");
+            PrintToChat(client, "%t", "Squad Covering Fire Ended");
         }
     }
 }
@@ -1036,22 +1039,32 @@ void ShowSquadOrdersMenu(int client)
         return;
 
     Menu menu = new Menu(SquadOrdersMenuHandler);
+    char buf[64];
 
     if (!g_bSquadActive[client])
     {
         // No active squad: offer to recruit one
-        menu.SetTitle("Squad System");
-        menu.AddItem("R", "Recruit Fireteam (3 bots)");
+        Format(buf, sizeof(buf), "%T", "Menu Squad System", client);
+        menu.SetTitle(buf);
+        Format(buf, sizeof(buf), "%T", "Menu Recruit Fireteam", client);
+        menu.AddItem("R", buf);
     }
     else
     {
-        menu.SetTitle("Squad Orders");
-        menu.AddItem("1", "Move Out");
-        menu.AddItem("2", "Defend / Hold Position");
-        menu.AddItem("3", "Need Backup");
-        menu.AddItem("4", "Covering Fire");
-        menu.AddItem("5", "Advance & Defend");
-        menu.AddItem("0", "Dismiss Squad");
+        Format(buf, sizeof(buf), "%T", "Menu Squad Orders", client);
+        menu.SetTitle(buf);
+        Format(buf, sizeof(buf), "%T", "Menu Move Out", client);
+        menu.AddItem("1", buf);
+        Format(buf, sizeof(buf), "%T", "Menu Defend Hold", client);
+        menu.AddItem("2", buf);
+        Format(buf, sizeof(buf), "%T", "Menu Need Backup", client);
+        menu.AddItem("3", buf);
+        Format(buf, sizeof(buf), "%T", "Menu Covering Fire", client);
+        menu.AddItem("4", buf);
+        Format(buf, sizeof(buf), "%T", "Menu Advance Defend", client);
+        menu.AddItem("5", buf);
+        Format(buf, sizeof(buf), "%T", "Menu Dismiss Squad", client);
+        menu.AddItem("0", buf);
     }
 
     menu.Display(client, 20);
@@ -1070,7 +1083,7 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
             g_bSquadActive[client] = true;
             PromoteClientToSquadLeader(client);
             ServerCommand("insbot squad %d 1", client);
-            PrintToChat(client, "[Squad] Fireteam escort ACTIVATED. Squad Leader promotion granted.");
+            PrintToChat(client, "%t", "Squad Escort Activated");
             return 0;
         }
 
@@ -1083,7 +1096,7 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
             g_bSquadActive[client] = false;
             DemoteClientFromSquadLeader(client);
             ServerCommand("insbot squad %d 0", client);
-            PrintToChat(client, "[Squad] Fireteam dismissed.");
+        PrintToChat(client, "%t", "Squad Fireteam Dismissed");
         }
         else if (orderId == 4)
         {
@@ -1114,13 +1127,13 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
                 RemoveDefendMarker(client);
                 ServerCommand("insbot squad %d %d %f %f %f", client, orderId,
                     g_fWaypointPos[client][0], g_fWaypointPos[client][1], g_fWaypointPos[client][2]);
-                PrintToChat(client, "[Squad] Covering Fire at marked position (%.0f %.0f %.0f)",
+                PrintToChat(client, "%t", "Squad Covering Fire At Position",
                     g_fWaypointPos[client][0], g_fWaypointPos[client][1], g_fWaypointPos[client][2]);
                 SpawnCoveringFireMarker(client, g_fWaypointPos[client], 5.0);
             }
             else
             {
-                PrintToChat(client, "[Squad] No valid target. Aim at a surface and try again.");
+                PrintToChat(client, "%t", "Squad No Valid Target");
             }
         }
         else if (orderId == 5)
@@ -1151,11 +1164,11 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
                 RemoveCoveringFireMarker(client);
                 SpawnDefendMarker(client, endPos);
                 ServerCommand("insbot squad %d 5 %f %f %f", client, endPos[0], endPos[1], endPos[2]);
-                PrintToChat(client, "[Squad] Fireteam advancing to marked waypoint and establishing defensive perimeter.");
+                PrintToChat(client, "%t", "Squad Advance Defend");
             }
             else
             {
-                PrintToChat(client, "[Squad] No valid surface in range to mark. Aim at a wall or floor.");
+                PrintToChat(client, "%t", "Squad Mark No Valid Surface");
             }
         }
         else
@@ -1163,14 +1176,12 @@ public int SquadOrdersMenuHandler(Menu menu, MenuAction action, int client, int 
             RemoveCoveringFireMarker(client);
             RemoveDefendMarker(client);
             ServerCommand("insbot squad %d %d", client, orderId);
-            char orderName[32];
             switch (orderId)
             {
-            case 1: strcopy(orderName, sizeof(orderName), "Move Out");
-            case 2: strcopy(orderName, sizeof(orderName), "Defend / Hold");
-            case 3: strcopy(orderName, sizeof(orderName), "Need Backup");
+            case 1: PrintToChat(client, "%t", "Squad Order Move Out");
+            case 2: PrintToChat(client, "%t", "Squad Order Defend");
+            case 3: PrintToChat(client, "%t", "Squad Order Backup");
             }
-            PrintToChat(client, "[Squad] Order: %s", orderName);
         }
     }
     else if (action == MenuAction_End)
@@ -1348,20 +1359,22 @@ void OpenSlotRequestMenu(int client)
 {
     if (!g_cvSlotRequestEnabled.BoolValue)
     {
-        PrintToChat(client, "[SlotRequester] Slot request has been disabled by admin.");
+        PrintToChat(client, "%t", "Slot Request Disabled");
         return;
     }
 
     int reqTeam = GetClientTeam(client);
     if (reqTeam < 1)
     {
-        PrintToChat(client, "[SlotRequester] You must be on a team to request a slot!");
+        PrintToChat(client, "%t", "Slot Request Need Team");
         return;
     }
 
     InitSquadOffsets();
     Menu menu = new Menu(SlotRequestMenuHandler);
-    menu.SetTitle("Select Class (Press #):");
+    char titleBuf[64];
+    Format(titleBuf, sizeof(titleBuf), "%T", "Menu Select Class", client);
+    menu.SetTitle(titleBuf);
 
     int availableRoleCount = 0;
     int squadIndex = 0;
@@ -1448,7 +1461,9 @@ void OpenSlotRequestMenu(int client)
 
     if (availableRoleCount == 0)
     {
-        menu.AddItem("", "No slots available on your team", ITEMDRAW_DISABLED);
+        char noSlotsBuf[64];
+        Format(noSlotsBuf, sizeof(noSlotsBuf), "%T", "Menu No Slots", client);
+        menu.AddItem("", noSlotsBuf, ITEMDRAW_DISABLED);
     }
 
     // Fit up to 9 items on a single page without splitting key 8 onto page 2
@@ -1481,7 +1496,7 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
             int reqTeam = GetClientTeam(client);
             if (reqTeam < 1)
             {
-                PrintToChat(client, "[SlotRequester] You must be on a team to take a slot!");
+                PrintToChat(client, "%t", "Slot Take Need Team");
                 return 0;
             }
 
@@ -1512,7 +1527,7 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
 
             if (squadEnt == -1)
             {
-                PrintToChat(client, "[SlotRequester] That squad is no longer available.");
+                PrintToChat(client, "%t", "Slot Squad Unavailable");
                 return 0;
             }
 
@@ -1619,7 +1634,7 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                     pack.WriteCell(magicNumber);
                     RequestFrame(Frame_ExecuteSlotJoin, pack);
 
-                    PrintToChat(client, "[SlotRequester] Reserved %s in %s (from '%s'). You will switch to it after you die and respawn this round.",
+                    PrintToChat(client, "%t", "Slot Reserved From Bot",
                         className, squadName, botName);
                 }
                 else
@@ -1628,13 +1643,13 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                     Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
                     ClientCommand(client, joinCmd);
 
-                    PrintToChat(client, "[SlotRequester] Reserved %s in %s. You will switch to it after you die and respawn this round.",
+                    PrintToChat(client, "%t", "Slot Reserved",
                         className, squadName);
                 }
             }
             else
             {
-                PrintToChat(client, "[SlotRequester] All slots for that role are currently occupied by players.");
+                PrintToChat(client, "%t", "Slot All Occupied");
             }
         }
     }
