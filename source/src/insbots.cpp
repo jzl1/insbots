@@ -734,6 +734,41 @@ if (!_stricmp(sub, "coverocc")) { Cmd_CoverOcc(); return; }
         Msg("[insbots] %s = %s\n", c->Name(), c->GetString());
         return;
     }
+    if (!_stricmp(sub, "reserve"))
+    {
+        if (argc < 4) { Msg("[insbots] usage: insbot reserve <teamSlot> <slotCode> [userId]\n"); return; }
+        int teamSlot = atoi(engine->Cmd_Argv(2));
+        int slotCode = atoi(engine->Cmd_Argv(3));
+        int userId = (argc > 4) ? atoi(engine->Cmd_Argv(4)) : 0;
+        if (teamSlot < 0 || teamSlot > 1) { Msg("[insbots] reserve: teamSlot must be 0 or 1\n"); return; }
+        if (slotCode < 5 || slotCode > 34) { Msg("[insbots] reserve: slotCode out of range\n"); return; }
+        g_Bots.ReserveRole(teamSlot, slotCode, userId);
+        Msg("[insbots] Reserved teamSlot %d slotCode %d for user %d\n", teamSlot, slotCode, userId);
+        return;
+    }
+    if (!_stricmp(sub, "unreserve"))
+    {
+        if (argc < 4) { Msg("[insbots] usage: insbot unreserve <teamSlot> <slotCode>\n"); return; }
+        int teamSlot = atoi(engine->Cmd_Argv(2));
+        int slotCode = atoi(engine->Cmd_Argv(3));
+        g_Bots.UnreserveRole(teamSlot, slotCode);
+        Msg("[insbots] Unreserved teamSlot %d slotCode %d\n", teamSlot, slotCode);
+        return;
+    }
+    if (!_stricmp(sub, "unreserve_user"))
+    {
+        if (argc < 3) { Msg("[insbots] usage: insbot unreserve_user <userId>\n"); return; }
+        int userId = atoi(engine->Cmd_Argv(2));
+        g_Bots.UnreserveUser(userId);
+        Msg("[insbots] Cleared reservations for user %d\n", userId);
+        return;
+    }
+    if (!_stricmp(sub, "unreserve_all"))
+    {
+        g_Bots.ClearAllReservations();
+        Msg("[insbots] Cleared all role reservations\n");
+        return;
+    }
     Msg("[insbots] unknown subcommand '%s' (try: insbot help)\n", sub);
 }
 static ConCommand insbot_cmd("insbot", Cmd_InsBot, "InsBots control: insbot help");
@@ -913,6 +948,7 @@ public:
         InsBots_SaveLearn();   // don't lose what the bots learned this session
         g_Bots.ResetBodyGracePlayers(true);
         g_Bots.KickAll();
+        g_Bots.ClearAllReservations();
         g_NavMesh.Free();
         // CRITICAL: remove our console command from the engine's list before the
         // DLL unloads, or the engine walks a dangling pointer on the next
@@ -939,6 +975,10 @@ public:
             g_RoundFrozen = true;
         else if (!strcmp(name, "round_reset") || !strcmp(name, "round_unfrozen"))
             g_RoundFrozen = false;
+
+        // A new round rebuilds squads: any pending slot request is void.
+        if (!strcmp(name, "round_reset") || !strcmp(name, "round_end"))
+            g_Bots.ClearAllReservations();
 
         if (insbot_debug.GetBool()
             && (!strcmp(name, "round_reset") || !strcmp(name, "round_end")
@@ -1022,8 +1062,11 @@ public:
                 int cap = BotCap();             // leaves 'reserve' slots for humans
                 int have = g_Bots.Count();
                 int want = insbot_quota.GetInt();
+                int reserved = g_Bots.GetReservationCount();
                 if (want > 0)
                 {
+                    want -= reserved;
+                    if (want < 0) want = 0;
                     if (want > cap) want = cap;
                     // Capture readiness before AddBot.  When the final client is
                     // created below, keep the hold for one complete FrameUpdate

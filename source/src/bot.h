@@ -638,6 +638,14 @@ public:
         memset(m_leaderActive, 0, sizeof(m_leaderActive));
         memset(m_leaderSquadOrder, 0, sizeof(m_leaderSquadOrder));
         ResetPlayerSquads();
+        for (int i = 0; i < 16; i++)
+        {
+            m_reservations[i].inUse = false;
+            m_reservations[i].teamSlot = -1;
+            m_reservations[i].roleId = 0;
+            m_reservations[i].userId = 0;
+            m_reservations[i].reserveTime = 0.0f;
+        }
     }
 
     void  AssignPlayerSquad(int leaderIndex);
@@ -736,6 +744,30 @@ float   *m_coverOwnedSince;
     CInsBot  m_bots[64];
     char     m_mapname[128];
     bool     m_navLoadedForMap;
+
+    // ---- Slot-request reservations (Option B) ----
+    // A human took a bot/slot in the F2 menu and is waiting for their next
+    // natural death to claim it. The roster must not re-fill that slot code
+    // while the reservation is live.
+    struct RoleReservation
+    {
+        bool  inUse;
+        int   teamSlot;
+        int   roleId;      // pfullsetup slot code: 5 + squadIndex + slot*4
+        int   userId;      // SourceMod GetClientUserId() of the requester (0 if unknown)
+        float reserveTime; // gpGlobals->curtime at reservation; 0 means "no expiry"
+    };
+    RoleReservation m_reservations[16];
+
+    void ReserveRole(int teamSlot, int roleId, int userId);
+    void UnreserveRole(int teamSlot, int roleId);
+    void UnreserveUser(int userId);
+    void ClearAllReservations();
+    void SweepReservations();
+    bool IsRoleReserved(int teamSlot, int roleId) const;
+    int  GetReservationCount(int teamSlot = -1) const;
+    bool IsRoleInUse(int teamSlot, int roleId) const;
+
     float    m_captureUpdateTime[3];  // per-team throttle for target refresh (1s)
     float    m_captureRefillTime[3];  // per-team throttle for refilling slots (0.25s)
     int      m_captureTarget[3];      // per-team cached active capture objective

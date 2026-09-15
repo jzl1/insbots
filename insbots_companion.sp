@@ -48,6 +48,11 @@ ConVar g_cvSlotRequestEnabled;
 ConVar g_cvRadioAutoPromote;
 ConVar g_cvCustomSquadSprite;
 
+// Slot-request reservations (Option B). While a reservation is pending, the
+// C++ plugin keeps that slot code empty so bots cannot take it back.
+int g_iPendingReservedSlot[MAXPLAYERS + 1];
+int g_iPendingReservedTeam[MAXPLAYERS + 1];
+
 public void OnPluginStart()
 {
     // ---- 1. Version Exposer Setup ----
@@ -78,6 +83,12 @@ public void OnPluginStart()
     g_cvSlotRequestEnabled = CreateConVar("ins_slot_request_enabled", "1", "Enable or disable the slot requester feature (1 = enabled, 0 = disabled)", FCVAR_NOTIFY);
     RegConsoleCmd("sm_slotrequest", Command_SlotRequestMenu, "Open menu to take a bot-occupied slot (F2)");
     RegConsoleCmd("sm_request", Command_SlotRequestMenu, "Alias for sm_slotrequest");
+
+    for (int c = 0; c <= MaxClients; c++)
+    {
+        g_iPendingReservedSlot[c] = -1;
+        g_iPendingReservedTeam[c] = -1;
+    }
 }
 
 public void OnClientPutInServer(int client)
@@ -114,12 +125,20 @@ public void OnMapStart()
         g_iDefendMarker[i] = 0;
         g_iDefendMarkerAnchor[i] = 0;
         g_hDefendMarkerTimer[i] = INVALID_HANDLE;
+        g_iPendingReservedSlot[i] = -1;
+        g_iPendingReservedTeam[i] = -1;
     }
     g_iBeamModel = PrecacheModel("sprites/glow01.spr");   // squad glow sprite model
     g_iBeamHalo = 0;
     PrecacheModel("materials/hud/indicators/attack.vmt", true);
     PrecacheModel("materials/hud/indicators/defend.vmt", true);
     InitSquadOffsets();
+
+    // Reconciliation guard: the engine can auto-assign a bot into our reserved
+    // (deliberately empty) seat via CPlayTeam::GetRandomSquad, which never
+    // consults insbots. Re-assert the reservation when that happens.
+    CreateTimer(2.0, Timer_EnforceReservations, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+
     UpdateVersions();
 }
 
@@ -198,6 +217,13 @@ public void OnClientDisconnect(int client)
             g_bSquadActive[client] = false;
             DemoteClientFromSquadLeader(client);
             ServerCommand("insbot squad %d 0", client);
+        }
+        if (g_iPendingReservedSlot[client] >= 0)
+        {
+            ServerCommand("insbot unreserve %d %d",
+                g_iPendingReservedTeam[client], g_iPendingReservedSlot[client]);
+            g_iPendingReservedSlot[client] = -1;
+            g_iPendingReservedTeam[client] = -1;
         }
     }
 }
@@ -426,6 +452,22 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
     int client = GetClientOfUserId(event.GetInt("userid"));
     if (client > 0 && IsClientInGame(client))
     {
+        // Release the reservation only once the player actually holds the slot.
+        // Clearing unconditionally on any spawn would re-open the theft window,
+        // because a player can respawn (e.g. round restart) while the engine's
+        // AttemptSquadUpdate is still pending.
+        if (g_iPendingReservedSlot[client] >= 0)
+        {
+            int heldSlot = GetPlayerSquadSlotCode(client);
+            if (heldSlot == g_iPendingReservedSlot[client])
+            {
+                ServerCommand("insbot unreserve %d %d",
+                    g_iPendingReservedTeam[client], g_iPendingReservedSlot[client]);
+                g_iPendingReservedSlot[client] = -1;
+                g_iPendingReservedTeam[client] = -1;
+            }
+        }
+
         if (g_bSquadActive[client])
         {
             CreateTimer(0.2, Timer_ReapplyLeader, client, TIMER_FLAG_NO_MAPCHANGE);
@@ -1136,7 +1178,7 @@ int g_iOff_SquadTeam = -1;
 int g_iOff_SquadSlots = -1;
 int g_iOff_SquadPlayerSlots = -1;
 
-void InitSquadOffsets()
+static void InitSquadOffsets()
 {
     if (g_iOff_SquadTeam == -1)
     {
@@ -1149,6 +1191,90 @@ void InitSquadOffsets()
         g_iOff_SquadPlayerSlots = FindSendPropInfo("CINSSquad", "m_iPlayerSlots");
         if (g_iOff_SquadPlayerSlots == -1) g_iOff_SquadPlayerSlots = 1024;
     }
+}
+
+// Returns the pfullsetup slot code (5 + squadIndex + slot*4) the client
+// currently occupies, or -1 if they are not in any squad slot.
+static int GetPlayerSquadSlotCode(int client)
+{
+    if (client <= 0 || !IsClientInGame(client) || IsFakeClient(client))
+        return -1;
+
+    int reqTeam = GetClientTeam(client);
+    if (reqTeam < 1)
+        return -1;
+
+    int myEnt = client; // SourceMod client index == entity index for players
+    InitSquadOffsets();
+
+    int squadIndex = 0;
+    for (int i = 1; i <= GetMaxEntities(); i++)
+    {
+        if (!IsValidEntity(i))
+            continue;
+        char classname[64];
+        if (!GetEntityNetClass(i, classname, sizeof(classname)))
+            continue;
+        if (!StrEqual(classname, "CINSSquad"))
+            continue;
+
+        int team = GetEntData(i, g_iOff_SquadTeam, 4);
+        if (team != reqTeam)
+            continue;
+
+        for (int s = 0; s < 8; s++)
+        {
+            int playerId = GetEntData(i, g_iOff_SquadPlayerSlots + (s * 4), 4);
+            if (playerId == 0 || playerId == -1)
+                continue;
+            if ((playerId & 0xFFF) == myEnt)
+                return 5 + squadIndex + (s * 4);
+        }
+        squadIndex++;
+    }
+    return -1;
+}
+
+// Finds a fake client occupying the given (teamSlot, slotCode) seat.
+// Returns the client index, or 0 if the seat is empty or held by a human.
+static int FindBotInReservedSlot(int teamSlot, int slotCode)
+{
+    if (slotCode < 5 || slotCode > 34)
+        return 0;
+
+    int squadIndex = (slotCode - 5) % 4;
+    int seat = (slotCode - 5) / 4;
+    int wantTeam = (teamSlot == 0) ? 2 : 1; // teamSlot 0 -> engine team 2
+
+    InitSquadOffsets();
+    int seen = 0;
+    for (int i = 1; i <= GetMaxEntities(); i++)
+    {
+        if (!IsValidEntity(i))
+            continue;
+        char classname[64];
+        if (!GetEntityNetClass(i, classname, sizeof(classname)))
+            continue;
+        if (!StrEqual(classname, "CINSSquad"))
+            continue;
+        if (GetEntData(i, g_iOff_SquadTeam, 4) != wantTeam)
+            continue;
+        if (seen != squadIndex)
+        {
+            seen++;
+            continue;
+        }
+
+        int playerId = GetEntData(i, g_iOff_SquadPlayerSlots + (seat * 4), 4);
+        if (playerId == 0 || playerId == -1)
+            return 0;
+
+        int ent = playerId & 0xFFF;
+        if (ent > 0 && ent <= MaxClients && IsClientInGame(ent) && IsFakeClient(ent))
+            return ent;
+        return 0; // a human occupies it: not our problem
+    }
+    return 0;
 }
 
 void GetClassNameFromId(int team, int classId, char[] name, int maxlen)
@@ -1420,6 +1546,26 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                 char squadName[32];
                 GetSquadDisplayName(targetSquadIndex, squadName, sizeof(squadName));
 
+                // teamSlot 1 -> engine team 1 (USMC); teamSlot 0 -> engine team 2
+                // (Iraqi). This mirrors TeamSlotToTeamIndex() in bot.cpp.
+                int teamSlot = (reqTeam == 1) ? 1 : 0;
+
+                // Drop any previous reservation held by this player first.
+                if (g_iPendingReservedSlot[client] >= 0)
+                {
+                    ServerCommand("insbot unreserve %d %d",
+                        g_iPendingReservedTeam[client], g_iPendingReservedSlot[client]);
+                    g_iPendingReservedSlot[client] = -1;
+                    g_iPendingReservedTeam[client] = -1;
+                }
+
+                // Reserve the slot code so insbots cannot re-fill it while the
+                // requester is still alive waiting for their next death.
+                g_iPendingReservedSlot[client] = magicNumber;
+                g_iPendingReservedTeam[client] = teamSlot;
+                ServerCommand("insbot reserve %d %d %d",
+                    teamSlot, magicNumber, GetClientUserId(client));
+
                 if (targetBot > 0)
                 {
                     char botName[64];
@@ -1437,7 +1583,8 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                     pack.WriteCell(magicNumber);
                     RequestFrame(Frame_ExecuteSlotJoin, pack);
 
-                    PrintToChat(client, "[SlotRequester] Took over %s slot from '%s' in %s!", className, botName, squadName);
+                    PrintToChat(client, "[SlotRequester] Reserved %s in %s (from '%s'). You will switch to it after you die and respawn this round.",
+                        className, squadName, botName);
                 }
                 else
                 {
@@ -1445,7 +1592,8 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                     Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
                     ClientCommand(client, joinCmd);
 
-                    PrintToChat(client, "[SlotRequester] Joined %s slot in %s!", className, squadName);
+                    PrintToChat(client, "[SlotRequester] Reserved %s in %s. You will switch to it after you die and respawn this round.",
+                        className, squadName);
                 }
             }
             else
@@ -1476,6 +1624,45 @@ public void Frame_ExecuteSlotJoin(DataPack pack)
         Format(joinCmd, sizeof(joinCmd), "pfullsetup %d %d", uiTeamIdx, magicNumber);
         ClientCommand(client, joinCmd);
     }
+}
+
+// Reconciliation guard for the engine's auto-assign path. CPlayTeam::GetRandomSquad
+// can place a bot into our reserved (deliberately empty) seat without consulting
+// insbots, because an empty seat is a valid target. When that happens we re-assert
+// the reservation so the quota skip is re-armed and the race is visible in the log.
+public Action Timer_EnforceReservations(Handle timer)
+{
+    InitSquadOffsets();
+
+    for (int c = 1; c <= MaxClients; c++)
+    {
+        if (!IsClientInGame(c) || IsFakeClient(c))
+            continue;
+        if (g_iPendingReservedSlot[c] < 0)
+            continue;
+
+        // If the player has already claimed the slot, release and move on.
+        if (GetPlayerSquadSlotCode(c) == g_iPendingReservedSlot[c])
+        {
+            ServerCommand("insbot unreserve %d %d",
+                g_iPendingReservedTeam[c], g_iPendingReservedSlot[c]);
+            g_iPendingReservedSlot[c] = -1;
+            g_iPendingReservedTeam[c] = -1;
+            continue;
+        }
+
+        // Otherwise: is a BOT now sitting in our reserved seat?
+        int intruder = FindBotInReservedSlot(g_iPendingReservedTeam[c], g_iPendingReservedSlot[c]);
+        if (intruder > 0)
+        {
+            KickClient(intruder, "Slot reserved for human player");
+            ServerCommand("insbot reserve %d %d %d",
+                g_iPendingReservedTeam[c], g_iPendingReservedSlot[c], GetClientUserId(c));
+            LogMessage("[SlotRequester] Reserved seat %d was taken by bot %N; evicted intruder and re-asserted reservation.",
+                g_iPendingReservedSlot[c], intruder);
+        }
+    }
+    return Plugin_Continue;
 }
 
 // ============================================================================

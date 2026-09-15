@@ -579,7 +579,7 @@ static inline int TeamSlotToTeamIndex(int teamSlot)
 
 // The class-menu protocol does not number roles consecutively.  These are the
 // sixteen IDs emitted by the stock USMC and Iraqi menus (same IDs for both).
-static int JoinRoleId(int ordinal, int cycle)
+static int JoinRoleId(int ordinal, int cycle, int teamSlot)
 {
     static const int s_roleIds[16] = {
         5, 9, 13, 17, 21, 25, 29, 33,
@@ -592,6 +592,22 @@ static int JoinRoleId(int ordinal, int cycle)
     else
         roleIndex = (16 - (cycle % 16)) % 16; // retry normally-free roles 15,14,... first
     if (roleIndex < 0) roleIndex += 16;
+
+    // Pass 1: Find a candidate that is neither reserved nor currently requested by an active bot
+    for (int offset = 0; offset < 16; offset++)
+    {
+        int candidate = s_roleIds[(roleIndex + offset) % 16];
+        if (!g_Bots.IsRoleReserved(teamSlot, candidate) && !g_Bots.IsRoleInUse(teamSlot, candidate))
+            return candidate;
+    }
+
+    // Pass 2: Fallback to any unreserved candidate
+    for (int offset = 0; offset < 16; offset++)
+    {
+        int candidate = s_roleIds[(roleIndex + offset) % 16];
+        if (!g_Bots.IsRoleReserved(teamSlot, candidate))
+            return candidate;
+    }
     return s_roleIds[roleIndex];
 }
 
@@ -664,7 +680,17 @@ static int PickPriorityClassRole(int teamSlot)
         if (wanted <= 0) continue;
         if (wanted > roleCount) wanted = roleCount; // never request duplicate slots
         int filled = g_Bots.CountRequestedRoles(teamSlot, roles, roleCount);
-        if (filled < wanted) return roles[filled % roleCount];
+        if (filled < wanted)
+        {
+            for (int r = 0; r < roleCount; r++)
+            {
+                int candidate = roles[(filled + r) % roleCount];
+                if (!g_Bots.IsRoleReserved(teamSlot, candidate))
+                    return candidate;
+            }
+            // Every candidate for this class is reserved; fall through to the
+            // next priority entry rather than stealing a reserved slot.
+        }
     }
     return -1; // quotas met/off: preserve the ordinary automatic rotation
 }
@@ -2886,7 +2912,7 @@ void CInsBot::SendJoinCommands()
     {
         char cmd[64];
         int roleId = (m_requestedRoleId > 0)
-                   ? m_requestedRoleId : JoinRoleId(m_ordinal, m_joinCycles);
+                   ? m_requestedRoleId : JoinRoleId(m_ordinal, m_joinCycles, m_teamSlot);
         UpdateCustomizationWeapon(roleId);
         if (m_joinCmdIndex == 0)
         {
@@ -2970,7 +2996,7 @@ void CInsBot::SendJoinCommands()
             {
                 val = (m_requestedRoleId > 0)
                     ? m_requestedRoleId
-                    : JoinRoleId(m_ordinal, m_joinCycles);
+                    : JoinRoleId(m_ordinal, m_joinCycles, m_teamSlot);
                 UpdateCustomizationWeapon(val);
             }
             if (val >= 0)
@@ -13366,7 +13392,9 @@ CInsBot *CBotRoster::AddBot(const char *nameOrNull)
     int a = 0, b = 0;
     for (int i = 0; i < 64; i++)
         if (m_bots[i].m_inUse) (m_bots[i].m_teamSlot == 0 ? a : b)++;
-    int slot = (a <= b) ? 0 : 1;
+    int a_res = GetReservationCount(0);
+    int b_res = GetReservationCount(1);
+    int slot = ((a + a_res) <= (b + b_res)) ? 0 : 1;
     slot = GetTeamSlotForBotName(nameOrNull, slot);
 
     for (int i = 0; i < 64; i++)
@@ -13482,6 +13510,124 @@ int CBotRoster::CountRequestedRoles(int teamSlot, const int *roleIds, int roleCo
             if (bot.m_requestedRoleId == roleIds[k]) { n++; break; }
     }
     return n;
+}
+
+// Reservation lifetime. A player who never dies (or a lost clear-event) must
+// not block a slot forever.
+#define INSBOT_RESERVATION_TIMEOUT 300.0f
+
+static inline float RosterNow()
+{
+    return gpGlobals ? gpGlobals->curtime : 0.0f;
+}
+
+void CBotRoster::ReserveRole(int teamSlot, int roleId, int userId)
+{
+    if (teamSlot < 0 || teamSlot > 1 || roleId <= 0) return;
+    float now = RosterNow();
+
+    // Update existing if already present
+    for (int i = 0; i < 16; i++)
+    {
+        if (m_reservations[i].inUse && m_reservations[i].teamSlot == teamSlot && m_reservations[i].roleId == roleId)
+        {
+            m_reservations[i].userId = userId;
+            m_reservations[i].reserveTime = now;
+            return;
+        }
+    }
+    // Find free slot
+    for (int i = 0; i < 16; i++)
+    {
+        if (!m_reservations[i].inUse)
+        {
+            m_reservations[i].inUse = true;
+            m_reservations[i].teamSlot = teamSlot;
+            m_reservations[i].roleId = roleId;
+            m_reservations[i].userId = userId;
+            m_reservations[i].reserveTime = now;
+            return;
+        }
+    }
+}
+
+void CBotRoster::UnreserveRole(int teamSlot, int roleId)
+{
+    for (int i = 0; i < 16; i++)
+    {
+        if (m_reservations[i].inUse && m_reservations[i].teamSlot == teamSlot && m_reservations[i].roleId == roleId)
+        {
+            m_reservations[i].inUse = false;
+            return;
+        }
+    }
+}
+
+void CBotRoster::UnreserveUser(int userId)
+{
+    if (userId <= 0) return;
+    for (int i = 0; i < 16; i++)
+    {
+        if (m_reservations[i].inUse && m_reservations[i].userId == userId)
+        {
+            m_reservations[i].inUse = false;
+        }
+    }
+}
+
+void CBotRoster::ClearAllReservations()
+{
+    for (int i = 0; i < 16; i++)
+        m_reservations[i].inUse = false;
+}
+
+void CBotRoster::SweepReservations()
+{
+    float now = RosterNow();
+    for (int i = 0; i < 16; i++)
+    {
+        if (!m_reservations[i].inUse) continue;
+        if (m_reservations[i].reserveTime <= 0.0f) continue; // no expiry
+        if (now - m_reservations[i].reserveTime >= INSBOT_RESERVATION_TIMEOUT)
+        {
+            m_reservations[i].inUse = false;
+            Msg("[insbots] slot reservation expired (teamSlot %d, role %d)\n",
+                m_reservations[i].teamSlot, m_reservations[i].roleId);
+        }
+    }
+}
+
+bool CBotRoster::IsRoleReserved(int teamSlot, int roleId) const
+{
+    for (int i = 0; i < 16; i++)
+    {
+        if (m_reservations[i].inUse && m_reservations[i].teamSlot == teamSlot && m_reservations[i].roleId == roleId)
+            return true;
+    }
+    return false;
+}
+
+int CBotRoster::GetReservationCount(int teamSlot) const
+{
+    int count = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        if (m_reservations[i].inUse && (teamSlot < 0 || m_reservations[i].teamSlot == teamSlot))
+            count++;
+    }
+    return count;
+}
+
+bool CBotRoster::IsRoleInUse(int teamSlot, int roleId) const
+{
+    if (IsRoleReserved(teamSlot, roleId))
+        return true;
+    for (int i = 0; i < 64; i++)
+    {
+        if (m_bots[i].m_inUse && m_bots[i].m_teamSlot == teamSlot && m_bots[i].m_requestedRoleId == roleId)
+            return true;
+    }
+    return false;
 }
 
 void CBotRoster::ResetSniperCaches()
@@ -14219,6 +14365,8 @@ void CBotRoster::AdoptOrphans()
 
 void CBotRoster::FrameUpdate(bool simulating)
 {
+    SweepReservations();
+
     bool bodyGraceTime = simulating && !g_RoundFrozen
         && !(insbot_freeze.GetBool() && !g_ForceGotoActive);
     UpdateBodyGracePlayers(bodyGraceTime);
