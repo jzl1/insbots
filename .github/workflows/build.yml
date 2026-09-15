@@ -14,9 +14,9 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (default: v0.20.3)'
+        description: 'Release Tag (default: v0.20.4)'
         required: false
-        default: 'v0.20.3'
+        default: 'v0.20.4'
         type: string
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then
             TAG="${{ inputs.release_tag }}"
           else
-            TAG="v0.20.3_${TIMESTAMP}"
+            TAG="v0.20.4_${TIMESTAMP}"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
@@ -218,9 +218,15 @@ jobs:
           prerelease: ${{ inputs.is_prerelease }}
           make_latest: true
           body: |
-            ### What's New in v0.20.3:
-            * **Grenade & Smoke Weapon-Switch Crash Fixed:** Bots switching to thrown ordnance could crash the server. INS:MIC registers the carried item (`weapon_m18`) and its thrown projectile (`grenade_m18`) as separate server classes with different vtable sizes, and the old lookup accepted the projectile; handing it to the game's weapon-switch call read past the end of its vtable. The lookup now only accepts genuine carried items, so bots switch grenades and smoke safely.
-            * **Bot Weapon Inventory Bound Corrected:** The carried-weapon scan was using the engine SDK's 48-slot constant, but INS:MIC players actually hold 7. The overscan read past the end of the inventory array into adjacent player fields and could resolve a garbage handle to a live weapon. The bound is now 7, verified against both the Linux and Windows game binaries.
+            ### What's New in v0.20.4:
+            * **F2 Slot Request Menu:** Players can take a bot-occupied slot from an F2 menu (or `!slotrequest`). Slots are grouped by role, so one "Sniper" entry covers every sniper slot in the squad instead of a single hard-coded index, and empty slots are preferred over displacing a live bot.
+            * **Deferred Slot Reservation:** A slot request no longer races the engine's own squad update. The reservation is queued and applied on the player's next respawn wave, and the target slot is protected from being re-filled by a bot in the meantime.
+            * **Bot Ironsights (ADS) Fixed:** Bots now actually shoulder their weapons. INS:MIC raises the sights on a button-18 *release* edge, so the old continuous hold left bots firing from the hip. `ads_mode` (default 1) drives the edge pulse and verifies the resulting state; `ironsights` raises sights when engaging beyond 300u.
+            * **Proactive Cover On Engage:** Bots engaging in the open now break contact and move to nearby cover instead of standing exposed (`cover_on_engage`). Stationed snipers at a validated perch are excluded so they keep their overwatch vantage.
+            * **Cover System V2 Ownership Fixes:** Cover spots are released deterministically on death, respawn, state change, and abandoned pathing, so spots no longer leak or stay claimed by a bot that has walked away.
+            * **Ladder Dismount Tolerance:** Bots now finish a climb and step onto the landing instead of thrashing at the top. `ladder_lip_tol` (default 4.0, clamped to 0..6) absorbs the measured 2.4u-3.1u gap between the navmesh lip and the floor the player hull can actually occupy.
+            * **English & Russian Localization:** Companion menus, notifications, and orders are translated through `translations/insbots_companion.phrases.txt`; the client's `cl_language` picks the language. Class names stay English to match the game's own UI.
+            * **Packaging & Reference:** Release tags are now created annotated rather than lightweight, both release archives ship the translation file, and the repository's `cvars.txt` reference now covers the full `insbot set` surface.
 
           files: |
             release_assets/insbots-windows-x86.zip
