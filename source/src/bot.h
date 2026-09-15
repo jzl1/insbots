@@ -193,6 +193,7 @@ private:
     float  m_nextJoinCmdTime;
     int    m_joinCmdIndex;
     int    m_joinCycles;
+    int    m_resolvedRoleId;       // actual role currently occupied/setup for this bot
     float  m_lastAliveCheck;
     bool   m_joinWarned;
     bool   m_classSetupSent;       // true once pfullsetup has been transmitted for this life
@@ -638,7 +639,7 @@ public:
         memset(m_leaderActive, 0, sizeof(m_leaderActive));
         memset(m_leaderSquadOrder, 0, sizeof(m_leaderSquadOrder));
         ResetPlayerSquads();
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 32; i++)
         {
             m_reservations[i].inUse = false;
             m_reservations[i].teamSlot = -1;
@@ -757,7 +758,7 @@ float   *m_coverOwnedSince;
         int   userId;      // SourceMod GetClientUserId() of the requester (0 if unknown)
         float reserveTime; // gpGlobals->curtime at reservation; 0 means "no expiry"
     };
-    RoleReservation m_reservations[16];
+    RoleReservation m_reservations[32];
 
     void ReserveRole(int teamSlot, int roleId, int userId);
     void UnreserveRole(int teamSlot, int roleId);

@@ -495,13 +495,23 @@ public Action Timer_ReapplyLeader(Handle timer, any client)
 public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 {
     int client = GetClientOfUserId(event.GetInt("userid"));
-    if (client > 0 && client <= MaxClients && g_bSquadActive[client])
+    if (client > 0 && client <= MaxClients)
     {
-        RemoveCoveringFireMarker(client);
-        RemoveDefendMarker(client);
-        g_bSquadActive[client] = false;
-        DemoteClientFromSquadLeader(client);
-        ServerCommand("insbot squad %d 0", client);
+        if (g_bSquadActive[client])
+        {
+            RemoveCoveringFireMarker(client);
+            RemoveDefendMarker(client);
+            g_bSquadActive[client] = false;
+            DemoteClientFromSquadLeader(client);
+            ServerCommand("insbot squad %d 0", client);
+        }
+        if (g_iPendingReservedSlot[client] >= 0)
+        {
+            ServerCommand("insbot unreserve %d %d",
+                g_iPendingReservedTeam[client], g_iPendingReservedSlot[client]);
+            g_iPendingReservedSlot[client] = -1;
+            g_iPendingReservedTeam[client] = -1;
+        }
     }
 }
 
@@ -1400,6 +1410,19 @@ void OpenSlotRequestMenu(int client)
 
                 if (isAvailable)
                 {
+                    int code = 5 + squadIndex + (s * 4);
+                    bool isReservedByOther = false;
+                    for (int p = 1; p <= MaxClients; p++)
+                    {
+                        if (p != client && g_iPendingReservedSlot[p] == code)
+                        {
+                            isReservedByOther = true;
+                            break;
+                        }
+                    }
+                    if (isReservedByOther)
+                        continue;
+
                     int slotClassId = GetEntData(i, g_iOff_SquadSlots + (s * 4), 4);
                     if (slotClassId >= 0 && slotClassId < 32 && !roleAdded[squadIndex][slotClassId])
                     {
@@ -1505,6 +1528,19 @@ public int SlotRequestMenuHandler(Menu menu, MenuAction action, int client, int 
                 int slotClassId = GetEntData(squadEnt, g_iOff_SquadSlots + (s * 4), 4);
                 if (slotClassId == targetClassId)
                 {
+                    int code = 5 + targetSquadIndex + (s * 4);
+                    bool isReservedByOther = false;
+                    for (int p = 1; p <= MaxClients; p++)
+                    {
+                        if (p != client && g_iPendingReservedSlot[p] == code)
+                        {
+                            isReservedByOther = true;
+                            break;
+                        }
+                    }
+                    if (isReservedByOther)
+                        continue;
+
                     int playerId = GetEntData(squadEnt, g_iOff_SquadPlayerSlots + (s * 4), 4);
                     if (playerId == 0 || playerId == -1)
                     {

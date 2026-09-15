@@ -2405,6 +2405,7 @@ bool CInsBot::Create(const char *nameOrNull, int teamSlot, int requestedTeamArg,
     m_teamSlot = teamSlot;
     m_requestedTeamArg = requestedTeamArg;
     m_requestedRoleId = requestedRoleId;
+    m_resolvedRoleId = requestedRoleId;
     _snprintf(m_name, sizeof(m_name), "%s", name);
     m_state = BOT_JOINING;
     m_ordinal = (int)(this - g_Bots.m_bots);
@@ -2452,6 +2453,7 @@ void CInsBot::Adopt(edict_t *e, int teamSlot)
     m_teamSlot = teamSlot;
     m_requestedTeamArg = -1;
     m_requestedRoleId = -1;
+    m_resolvedRoleId = -1;
     _snprintf(m_name, sizeof(m_name), "%s", pi ? pi->GetName() : "[BOT]");
     m_name[sizeof(m_name) - 1] = 0;
     m_state = BOT_JOINING;
@@ -2913,6 +2915,8 @@ void CInsBot::SendJoinCommands()
         char cmd[64];
         int roleId = (m_requestedRoleId > 0)
                    ? m_requestedRoleId : JoinRoleId(m_ordinal, m_joinCycles, m_teamSlot);
+        if (roleId > 0)
+            m_resolvedRoleId = roleId;
         UpdateCustomizationWeapon(roleId);
         if (m_joinCmdIndex == 0)
         {
@@ -2962,6 +2966,7 @@ void CInsBot::SendJoinCommands()
         m_classSetupSent = true;
         m_nextReinforcePulse = now + 2.0f;
         m_joinCmdIndex = 0;
+        m_joinCycles++;
         return;
     }
 
@@ -2997,6 +3002,8 @@ void CInsBot::SendJoinCommands()
                 val = (m_requestedRoleId > 0)
                     ? m_requestedRoleId
                     : JoinRoleId(m_ordinal, m_joinCycles, m_teamSlot);
+                if (val > 0)
+                    m_resolvedRoleId = val;
                 UpdateCustomizationWeapon(val);
             }
             if (val >= 0)
@@ -13419,6 +13426,11 @@ CInsBot *CBotRoster::AddBotToRole(int faction, int roleId)
 {
     int targetFaction = (faction == 1) ? FACTION_IRAQI : FACTION_USMC;
     int slot = GetTeamSlotForFaction(targetFaction);
+    if (IsRoleReserved(slot, roleId))
+    {
+        Msg("[insbots] AddBotToRole: slot %d on team %d is reserved for a human player\n", roleId, slot);
+        return 0;
+    }
     // pfullsetup's first argument is the UI team index (engine team - 1),
     // not a stable USMC/Iraqi faction number. Factions can swap engine teams
     // between maps, so derive it only after resolving the requested faction.
@@ -13527,7 +13539,7 @@ void CBotRoster::ReserveRole(int teamSlot, int roleId, int userId)
     float now = RosterNow();
 
     // Update existing if already present
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (m_reservations[i].inUse && m_reservations[i].teamSlot == teamSlot && m_reservations[i].roleId == roleId)
         {
@@ -13537,7 +13549,7 @@ void CBotRoster::ReserveRole(int teamSlot, int roleId, int userId)
         }
     }
     // Find free slot
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (!m_reservations[i].inUse)
         {
@@ -13553,7 +13565,7 @@ void CBotRoster::ReserveRole(int teamSlot, int roleId, int userId)
 
 void CBotRoster::UnreserveRole(int teamSlot, int roleId)
 {
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (m_reservations[i].inUse && m_reservations[i].teamSlot == teamSlot && m_reservations[i].roleId == roleId)
         {
@@ -13566,7 +13578,7 @@ void CBotRoster::UnreserveRole(int teamSlot, int roleId)
 void CBotRoster::UnreserveUser(int userId)
 {
     if (userId <= 0) return;
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (m_reservations[i].inUse && m_reservations[i].userId == userId)
         {
@@ -13577,14 +13589,14 @@ void CBotRoster::UnreserveUser(int userId)
 
 void CBotRoster::ClearAllReservations()
 {
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
         m_reservations[i].inUse = false;
 }
 
 void CBotRoster::SweepReservations()
 {
     float now = RosterNow();
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (!m_reservations[i].inUse) continue;
         if (m_reservations[i].reserveTime <= 0.0f) continue; // no expiry
@@ -13599,7 +13611,7 @@ void CBotRoster::SweepReservations()
 
 bool CBotRoster::IsRoleReserved(int teamSlot, int roleId) const
 {
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (m_reservations[i].inUse && m_reservations[i].teamSlot == teamSlot && m_reservations[i].roleId == roleId)
             return true;
@@ -13610,7 +13622,7 @@ bool CBotRoster::IsRoleReserved(int teamSlot, int roleId) const
 int CBotRoster::GetReservationCount(int teamSlot) const
 {
     int count = 0;
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
     {
         if (m_reservations[i].inUse && (teamSlot < 0 || m_reservations[i].teamSlot == teamSlot))
             count++;
@@ -13624,7 +13636,7 @@ bool CBotRoster::IsRoleInUse(int teamSlot, int roleId) const
         return true;
     for (int i = 0; i < 64; i++)
     {
-        if (m_bots[i].m_inUse && m_bots[i].m_teamSlot == teamSlot && m_bots[i].m_requestedRoleId == roleId)
+        if (m_bots[i].m_inUse && m_bots[i].m_teamSlot == teamSlot && m_bots[i].m_resolvedRoleId == roleId)
             return true;
     }
     return false;
@@ -14527,6 +14539,7 @@ void CBotRoster::LevelInit(const char *mapname)
 {
     _snprintf(m_mapname, sizeof(m_mapname), "%s", mapname ? mapname : "");
     ResetPlayerSquads();  // clear fireteam rosters for fresh level
+    ClearAllReservations(); // clear any stale slot reservations from previous level
     m_mapname[sizeof(m_mapname) - 1] = 0;
 
     g_ForceGotoActive = false;
