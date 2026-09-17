@@ -31,6 +31,10 @@ struct ObjPoint
     bool   isSpawn;     // a spawn zone (has player spawns on it) - never a goal
     bool   isEnclosed;  // indoors/basement: solid ceiling overhead (skip high-arc shelling)
     char   phonetic;    // HUD letter from the .imc2 (A/B/C...), 0 if unknown
+    int    orderId;     // m_iOrderID: index within the active profile's
+                        // ObjectiveData block; -1 when unreadable, and the
+                        // engine's own sentinel (255/-1) when the profile does
+                        // not use this objective. Test with InsOrderIdValid().
 };
 
 class CObjectives
@@ -97,8 +101,24 @@ public:
     void LoadLetters(const char *gamedir, const char *mapname);
     char LetterFor(const Vector &center) const;   // nearest loaded letter, or 0
 
+    // Read the map's default gametype from its .imc2 so sequential modes can
+    // order their objectives. Call after Reset() and before ScanEntities().
+    void LoadProfile(const char *gamedir, const char *mapname);
+
+    // Re-read m_iOrderID for every objective. The game assigns these during
+    // round setup, NOT at level load, so the values cached by ScanEntities()
+    // are still -1 until the first round_reset. Call this again whenever a
+    // round starts, otherwise every objective reads as "not in the profile"
+    // and the ordering rule silently degrades to the legacy selection.
+    void RefreshOrderIds();
+
     ObjPoint m_objs[INSOBJ_MAX];
     int      m_count;
+
+    // gametype of the map's default profile (see LoadProfile)
+    int      m_gametype;      // 1 = GAMETYPE_PUSH, 2 = GAMETYPE_FIREFIGHT,
+                              // 3 = GAMETYPE_BATTLE, 0 = unknown/unreadable
+    bool     m_ordered;       // true only for sequential modes (Push)
 
     Vector   m_home[3];        // index 1 = team1, 2 = team2
     int      m_homeSamples[3];

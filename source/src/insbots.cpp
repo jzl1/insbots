@@ -168,6 +168,12 @@ CfgVar insbot_active_offset("active_offset", "948", "offset of the 'is a real ob
 CfgVar insbot_owner_offset("owner_offset", "864", "offset of m_iCapturedTeam (0x360); permanent capture (Push)");
 CfgVar insbot_capture_offset("capture_offset", "960", "offset of m_iCaptureTeam (0x3c0)");
 CfgVar insbot_hidden_offset("hidden_offset", "884", "legacy");
+#ifdef _LINUX
+CfgVar insbot_order_offset("order_offset", "844", "Linux CINSObjective m_iOrderID (0x34C): index within the active profile's ObjectiveData");
+#else
+CfgVar insbot_order_offset("order_offset", "824", "CINSObjective m_iOrderID (0x338): index within the active profile's ObjectiveData");
+#endif
+CfgVar insbot_push_order("push_order", "1", "on Push maps only target the next objective in the engine's capture sequence (0=old nearest-to-home behaviour)");
 CfgVar insbot_crouch_chance("crouch_chance", "0.20", "chance to crouch when opening fire");
 CfgVar insbot_crouch_eye_height("crouch_eye_height", "32.0", "predicted crouched firing eye height above origin (units); lower values are conservative");
 CfgVar insbot_sniper_overwatch("sniper_overwatch", "1", "allow sniper-class bots to discover and occupy objective overwatch perches");
@@ -976,6 +982,11 @@ public:
         else if (!strcmp(name, "round_reset") || !strcmp(name, "round_unfrozen"))
             g_RoundFrozen = false;
 
+        // m_iOrderID is assigned during round setup, so refresh it on every
+        // round start; the values cached at ServerActivate() are still -1.
+        if (!strcmp(name, "round_reset") || !strcmp(name, "round_unfrozen"))
+            g_Objectives.RefreshOrderIds();
+
         // A new round rebuilds squads: any pending slot request is void.
         if (!strcmp(name, "round_reset") || !strcmp(name, "round_end"))
             g_Bots.ClearAllReservations();
@@ -1007,6 +1018,7 @@ public:
         {
             char gd[256]; engine->GetGameDir(gd, sizeof(gd));
             g_Objectives.LoadLetters(gd, pMapName);   // HUD letters from .imc2 + .bsp
+            g_Objectives.LoadProfile(gd, pMapName);   // gametype -> ordering mode
         }
         Msg("[insbots] level '%s': nav %s (%d areas)\n", pMapName,
             g_NavMesh.IsLoaded() ? "loaded" : "not found - bots will roam by feel; run nav_generate if available",
@@ -1016,6 +1028,7 @@ public:
     virtual void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
     {
         g_Objectives.ScanEntities();
+        g_Objectives.RefreshOrderIds();  // best-effort; round_reset re-runs it
         InsVoice_Precache();          // register the bot radio-callout waves for this level
         g_Bots.BuildCoverDatabase();  // take-cover v2: traces need loaded world
         s_flQuotaStartTime = gpGlobals ? gpGlobals->curtime : 0.0f;

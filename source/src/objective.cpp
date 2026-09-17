@@ -18,6 +18,7 @@
 #include "cmodel.h"
 
 #include "objective.h"
+#include "objective_order.h"
 #include "cfgvar.h"
 #include "nav.h"
 #include "linux_offsets.h"
@@ -30,6 +31,9 @@ extern CfgVar insbot_active_offset;   // Windows legacy active flag; unused on L
 extern CfgVar insbot_owner_offset;    // m_iCapturedTeam (0x360)
 extern CfgVar insbot_capture_offset;  // m_iCaptureTeam  (0x3c0)
 extern CfgVar insbot_hidden_offset;   // legacy
+extern CfgVar insbot_order_offset;    // m_iOrderID (profile sequence index)
+extern CfgVar insbot_push_order;      // kill switch for Push ordering
+extern CfgVar insbot_debug;           // verbose console logging
 extern CfgVar insbot_goal_classnames; // comma-separated objective class list
 
 // resolve the live CBaseEntity for an objective slot (verifies classname)
@@ -142,6 +146,8 @@ void CObjectives::Reset()
     m_count = 0;
     m_scanned = false;
     m_letterCount = 0;
+    m_gametype = 0;
+    m_ordered = false;
     for (int i = 0; i < 3; i++) { m_home[i] = Vector(0, 0, 0); m_homeSamples[i] = 0; }
 }
 
@@ -156,6 +162,73 @@ char CObjectives::LetterFor(const Vector &center) const
         if (d < bd) { bd = d; best = i; }
     }
     return best >= 0 ? m_letters[best].letter : 0;
+}
+
+// m_iOrderID is assigned by the game during round setup, so reading it once at
+// ServerActivate() caches -1 for every objective and silently disables Push
+// ordering. Re-read on every round start.
+//
+// A failed or sentinel read stays -1, which InsOrderIdValid() rejects, so it
+// can never be mistaken for "objective 0".
+void CObjectives::RefreshOrderIds()
+{
+    const int off = insbot_order_offset.GetInt();
+    int resolved = 0;
+    for (int i = 0; i < m_count; i++)
+    {
+        int oid = -1;
+        CBaseEntity *ent = ObjEntity(m_objs[i].edictIndex);
+        if (ent) TryReadEntityInt(ent, off, oid);
+        m_objs[i].orderId = oid;
+        if (InsOrderIdValid(oid)) resolved++;
+    }
+
+    if (insbot_debug.GetBool())
+        Msg("[insbots] order ids refreshed: %d/%d objectives in the active profile\n",
+            resolved, m_count);
+}
+
+// Read the map's default gametype from its .imc2. This reuses the exact
+// file-read pattern LoadLetters() already uses - no new I/O mechanism.
+//
+// Push is the only sequential stock mode. Firefight and Battle maps also list
+// their objectives in profile order, so ordering MUST be gated on the gametype:
+// applying it unconditionally would change targeting on 7 of the 13 stock maps.
+void CObjectives::LoadProfile(const char *gamedir, const char *mapname)
+{
+    m_gametype = 0;
+    m_ordered = false;
+    if (!gamedir || !mapname || !gamedir[0] || !mapname[0]) return;
+
+    char path[512];
+    _snprintf(path, sizeof(path), "%s/maps/%s.imc2", gamedir, mapname);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return;
+
+    fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+    if (sz <= 0 || sz >= 1000000) { fclose(fp); return; }
+
+    char *b = (char *)malloc(sz + 1);
+    if (!b) { fclose(fp); return; }
+    if (fread(b, 1, sz, fp) != (size_t)sz) { free(b); fclose(fp); return; }
+    b[sz] = 0;
+    fclose(fp);
+
+    int ordered = 0;
+    if (InsParseGametype(b, &ordered))
+    {
+        // Classify for diagnostics. Only Push is sequential today.
+        if (strstr(b, "GAMETYPE_PUSH"))           m_gametype = 1;
+        else if (strstr(b, "GAMETYPE_FIREFIGHT")) m_gametype = 2;
+        else if (strstr(b, "GAMETYPE_BATTLE"))    m_gametype = 3;
+        m_ordered = (ordered != 0);
+    }
+    free(b);
+
+    Msg("[insbots] map gametype: %s (ordered=%d)\n",
+        m_gametype == 1 ? "PUSH" : m_gametype == 2 ? "FIREFIGHT" :
+        m_gametype == 3 ? "BATTLE" : "unknown/unreadable",
+        m_ordered ? 1 : 0);
 }
 
 // Resolve each objective's HUD letter with zero reverse-engineering: the .imc2
@@ -310,6 +383,7 @@ void CObjectives::ScanEntities()
         m_objs[m_count].isSpawn = false;
         m_objs[m_count].isEnclosed = false;
         m_objs[m_count].phonetic = LetterFor(c);
+        m_objs[m_count].orderId = -1;   // resolved by RefreshOrderIds()
         m_count++;
     }
 
@@ -439,7 +513,11 @@ void CObjectives::DebugDump() const
         (m_homeSamples[1] == 0 || m_homeSamples[2] == 0)
             ? "   *** ONE HOME UNKNOWN -> push axis is FLAT (depth=0.5 for all) ***" : "");
 
-    Msg("  idx let  center                owner  raw  rel(t1/t2)  active?  spawn?  depth\n");
+    Msg("  gametype=%s ordered=%d push_order=%d\n",
+        m_gametype == 1 ? "PUSH" : m_gametype == 2 ? "FIREFIGHT" :
+        m_gametype == 3 ? "BATTLE" : "unknown", m_ordered ? 1 : 0,
+        insbot_push_order.GetBool() ? 1 : 0);
+    Msg("  idx let  order  center                owner  raw  rel(t1/t2)  active?  spawn?  depth\n");
     for (int i = 0; i < m_count; i++)
     {
         int owner = GetOwnerTeam(i);
@@ -452,8 +530,8 @@ void CObjectives::DebugDump() const
         CBaseEntity *ent = ObjEntity(m_objs[i].edictIndex);
         int to = insbot_team_offset.GetInt();
         if (ent) TryReadEntityInt(ent, to, raw);
-        Msg("  %-4d %c    (%6.0f %6.0f %5.0f)  %-7s  %-3d  %+d / %+d    %-7s  %-6s  %.2f\n",
-            i, lc, m_objs[i].center.x, m_objs[i].center.y, m_objs[i].center.z,
+        Msg("  %-4d %c    %-5d  (%6.0f %6.0f %5.0f)  %-7s  %-3d  %+d / %+d    %-7s  %-6s  %.2f\n",
+            i, lc, m_objs[i].orderId, m_objs[i].center.x, m_objs[i].center.y, m_objs[i].center.z,
             ostr, raw, Relation(i, 1), Relation(i, 2),
             sz ? "NO(sz)" : "yes", m_objs[i].isSpawn ? "scan" : "-", depth);
     }
@@ -566,6 +644,38 @@ int CObjectives::PickGoal(int team, const Vector &botPos, int curGoal, float agg
         else if (rel == 0 || rel == -1) targ[nt++] = i;
     }
 
+    // ------------------------------------------------------------------
+    // PUSH ORDERING: on a sequential map the engine only accepts a capture
+    // on the next objective in the profile's chain, so "nearest to home" can
+    // commit the team to an objective that cannot be captured yet.
+    //
+    // Rule: among eligible (non-spawn, non-friendly) objectives take the
+    // lowest valid m_iOrderID. This is the same rule for both teams - the
+    // engine's gate is "lowest-order objective you do not own", which also
+    // gives defenders their correct fallback target on capturingfallback
+    // maps. ins_karkar is the case that forces this: its profile uses four of
+    // eight entities and the order IDs are non-contiguous, so no geometric
+    // or mapid-based rule reproduces the chain.
+    //
+    // Every failure mode falls through to the pre-existing selection below:
+    // non-Push gametype (m_ordered false), ordering disabled by cvar, no
+    // eligible objective carrying a valid order ID (custom maps), or an
+    // unreadable field.
+    // ------------------------------------------------------------------
+    int orderedTarget = -1;
+    if (m_ordered && insbot_push_order.GetBool() && nt > 0)
+    {
+        int candOrder[INSOBJ_MAX];
+        bool candElig[INSOBJ_MAX];
+        for (int k = 0; k < nt; k++)
+        {
+            candOrder[k] = m_objs[targ[k]].orderId;
+            candElig[k] = true;
+        }
+        int pick = InsLowestOrderIndex(candOrder, candElig, nt);
+        if (pick >= 0) orderedTarget = targ[pick];
+    }
+
     // ATTACK TARGET = the nearest eligible enemy/neutral objective to our own
     // HOME. With a nav mesh loaded, "nearest" is measured by actual nav path
     // cost so a straight-line-close objective on another floor (Haditha's
@@ -577,7 +687,8 @@ int CObjectives::PickGoal(int team, const Vector &botPos, int curGoal, float agg
     int startArea = g_NavMesh.IsLoaded() ? g_NavMesh.FindArea(ref) : -1;
     if (startArea < 0 && g_NavMesh.IsLoaded())
         startArea = g_NavMesh.FindNearestArea(ref);
-    for (int k = 0; k < nt; k++)
+    // Ordered maps already know the target; skip the A* cost comparison.
+    for (int k = 0; orderedTarget < 0 && k < nt; k++)
     {
         int i = targ[k];
         Vector d = m_objs[i].center - ref;
@@ -600,6 +711,8 @@ int CObjectives::PickGoal(int team, const Vector &botPos, int curGoal, float agg
         float key = dist - (Relation(i, team) == 0 ? 500.0f : 0.0f);   // prefer neutral
         if (key < bestKey) { bestKey = key; atkTarget = i; }
     }
+
+    if (orderedTarget >= 0) atkTarget = orderedTarget;
 
     // A small, stable capture detail must always drive the active front-line
     // objective. This is used when a map's reqpercent needs more than one body

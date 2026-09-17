@@ -265,6 +265,7 @@ insbot set goal_classnames "ins_objective,obj_t1,obj_t2" // objective entity cla
 insbot set intel_time                     "8" // seconds a shared sighting stays actionable
 insbot set intel_range                  "3000" // max units from a shared sighting a bot will investigate (0=unlimited)
 insbot set objectives                     "1" // push toward + hold objectives (0=just roam)
+insbot set push_order                     "1" // on Push maps only target the next objective in the engine's capture sequence (0=old nearest-to-home behaviour)
 insbot set patrol                        "1" // a held objective's defenders may wander inside it instead of standing still
 insbot set patrol_chance                 "0.5" // chance a holding bot patrols (vs holds one spot), rolled per arrival (0..1)
 insbot set patrol_interval                 "7" // base seconds a patrolling bot waits before wandering to a new spot in the point
@@ -283,7 +284,6 @@ insbot set cover_search_radius         "400" // candidate query radius around bo
 insbot set cover_max_reach             "500" // max acceptable travel distance toward chosen cover spot
 insbot set cover_ray_len               "100" // load-time raycast length for directional occlusion tests
 insbot set cover_ray_cutoff             "90" // load-time block-distance cutoff per direction
-insbot set cover_health                  "40" // health at/below which a threatened bot breaks contact and seeks cover
 insbot set cover_formation_bonus        "25" // scoring bonus for cover points closer to squad leader
 
 insbot set teamsight                     "1" // bots share enemy sightings (radio)
@@ -328,10 +328,27 @@ insbot set voice_objective            "1" // objective/support callouts: securin
 
 // =================== ENGINE OFFSETS (ADVANCED) ===================
 
-insbot set active_offset              "0" // legacy raw active offset (unused on Linux; validity uses verified parent/order/hidden fields)
+// DO NOT COPY THIS SECTION INTO YOUR SERVER CONFIG, AND DO NOT CHANGE THESE
+// VALUES UNLESS YOU KNOW WHAT YOU ARE DOING.
+//
+// These are raw byte offsets into the game's own C++ objects. The defaults are
+// the ones verified against the shipped server binaries for this plugin
+// version, per platform. A wrong offset does not fail loudly: the plugin reads
+// whatever bytes happen to sit there, so objectives can silently report the
+// wrong owner, and bots may push to or defend the wrong points. Some of these
+// fields are read through a memory-safety guard, so a bad value usually
+// degrades to "unreadable" rather than crashing - but that still breaks the
+// feature silently.
+//
+// Only touch these if you are re-targeting the plugin at a different game
+// build and have re-derived the offsets from that build's server binary.
+// Offsets are NOT interchangeable between Windows and Linux.
+
+insbot set active_offset              "948" // offset of the 'is a real objective' flag (0x3B4); 0 = spawn/non-objective. Linux uses 0 (unused; validity comes from the verified parent/order/hidden fields)
 insbot set capture_offset             "960" // offset of m_iCaptureTeam (0x3c0)
 insbot set hidden_offset              "884" // legacy
 insbot set learn_persist                "1" // save learned bad nav links to addons/insbots_learn_<map>.txt and restore them on map load
 insbot set owner_offset               "864" // offset of m_iCapturedTeam (0x360); permanent capture (Push)
+insbot set order_offset               "824" // CINSObjective m_iOrderID (0x338): index within the active profile's ObjectiveData. Linux uses 844 (0x34C)
 insbot set team_flip                    "0" // 1 = objective owner field stores the ENEMY team (flip it). Default 0: the raw field already IS the owner (confirmed on ins_baghdad).
 insbot set team_offset                "844" // offset of the objective ownership field (0x34c)
