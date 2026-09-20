@@ -58,6 +58,14 @@ extern CfgVar                insbot_smoke_group_radius;
 extern CfgVar                insbot_smoke_range;
 extern CfgVar                insbot_smoke_scatter;
 extern CfgVar                insbot_smoke_weapon;
+extern CfgVar                insbot_sidearm_a;
+extern CfgVar                insbot_sidearm_b;
+extern CfgVar                insbot_sidearm_usmc;
+extern CfgVar                insbot_sidearm_iraqi;
+extern CfgVar                insbot_grenade_a;
+extern CfgVar                insbot_grenade_b;
+extern CfgVar                insbot_grenade_usmc;
+extern CfgVar                insbot_grenade_iraqi;
 
 // solve the launch angle to lob a projectile of speed V from 'from' so it lands
 // on 'target' under gravity g. Fills yaw/pitch (Source degrees, -pitch = up).
@@ -82,6 +90,23 @@ static bool SolveBallisticArc(const Vector &from, const Vector &target,
     if (outPitch < -80.0f) outPitch = -80.0f;
     if (outPitch >  45.0f) outPitch =  45.0f;
     return true;
+}
+
+const char *CInsBot::SidearmName() const
+{
+    int team = m_info ? m_info->GetTeamIndex() : TeamSlotToTeamIndex(m_teamSlot);
+    int fac  = (team == 1 || team == 2) ? g_teamFaction[team] : FACTION_UNKNOWN;
+    if (fac == FACTION_USMC)  return insbot_sidearm_usmc.GetString();
+    if (fac == FACTION_IRAQI) return insbot_sidearm_iraqi.GetString();
+    return (m_teamSlot == 0) ? insbot_sidearm_a.GetString() : insbot_sidearm_b.GetString();
+}
+const char *CInsBot::GrenadeName() const
+{
+    int team = m_info ? m_info->GetTeamIndex() : TeamSlotToTeamIndex(m_teamSlot);
+    int fac  = (team == 1 || team == 2) ? g_teamFaction[team] : FACTION_UNKNOWN;
+    if (fac == FACTION_USMC)  return insbot_grenade_usmc.GetString();
+    if (fac == FACTION_IRAQI) return insbot_grenade_iraqi.GetString();
+    return (m_teamSlot == 0) ? insbot_grenade_a.GetString() : insbot_grenade_b.GetString();
 }
 
 bool CInsBot::SwitchToWeapon(const char *weaponClass, bool force)

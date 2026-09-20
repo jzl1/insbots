@@ -1,5 +1,5 @@
 // ============================================================================
-// bot.cpp - bot brain: joining, navigation, combat
+// bot_think.cpp - CInsBot::ThinkAlive and debug overlay drawing.
 // ============================================================================
 #include <stdio.h>
 #include <stdlib.h>
@@ -245,23 +245,6 @@ void InsBots_SaveLearn();     // flush learned bad links to disk
 // vtable and jumps into .rodata. The two are distinguished by their classname,
 // so filtering on the "weapon_" prefix - plus the exact classname match required
 // at the call sites - keeps the projectile out.
-const char *CInsBot::SidearmName() const
-{
-    int team = m_info ? m_info->GetTeamIndex() : TeamSlotToTeamIndex(m_teamSlot);
-    int fac  = (team == 1 || team == 2) ? g_teamFaction[team] : FACTION_UNKNOWN;
-    if (fac == FACTION_USMC)  return insbot_sidearm_usmc.GetString();
-    if (fac == FACTION_IRAQI) return insbot_sidearm_iraqi.GetString();
-    return (m_teamSlot == 0) ? insbot_sidearm_a.GetString() : insbot_sidearm_b.GetString();
-}
-const char *CInsBot::GrenadeName() const
-{
-    int team = m_info ? m_info->GetTeamIndex() : TeamSlotToTeamIndex(m_teamSlot);
-    int fac  = (team == 1 || team == 2) ? g_teamFaction[team] : FACTION_UNKNOWN;
-    if (fac == FACTION_USMC)  return insbot_grenade_usmc.GetString();
-    if (fac == FACTION_IRAQI) return insbot_grenade_iraqi.GetString();
-    return (m_teamSlot == 0) ? insbot_grenade_a.GetString() : insbot_grenade_b.GetString();
-}
-
 // begin a grenade throw: compute the arc to 'target', switch to the grenade,
 // aim, throw, switch back. Returns having set state; StartGrenade only runs if
 // a valid arc exists (checked by caller via CanGrenade path).
