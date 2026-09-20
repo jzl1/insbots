@@ -25,7 +25,7 @@ INC += -I$(SDK)/game_shared -I$(SDK)/tier1
 CFLAGS := $(ARCH) $(DEFS) $(WARN) $(INC) -fPIC
 
 OBJS := $(BUILD)/sdk_glue.o $(BUILD)/cfgvar.o $(BUILD)/nav.o $(BUILD)/objective.o
-OBJS += $(BUILD)/voice.o $(BUILD)/profile.o $(BUILD)/bot_util.o $(BUILD)/bot.o $(BUILD)/insbots.o $(BUILD)/convar.o
+OBJS += $(BUILD)/voice.o $(BUILD)/profile.o $(BUILD)/bot_util.o $(BUILD)/bot_entry.o $(BUILD)/bot.o $(BUILD)/insbots.o $(BUILD)/convar.o
 
 all: $(OUT)
 

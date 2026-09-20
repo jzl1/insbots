@@ -38,6 +38,7 @@ compile src/nav.cpp
 compile src/objective.cpp
 compile src/voice.cpp
 compile src/bot/bot_util.cpp
+compile src/bot/bot_entry.cpp
 compile src/bot.cpp
 compile src/insbots.cpp
 compile $SDK/tier1/convar.cpp
@@ -46,7 +47,7 @@ echo "LINK insbots.dll"
 $LINK /dll /machine:x86 /nodefaultlib \
   "/entry:_DllMainCRTStartup" \
   /out:$OUT/insbots.dll \
-  $OUT/crt_stub.obj $OUT/sdk_glue.obj $OUT/cfgvar.obj $OUT/nav.obj $OUT/objective.obj $OUT/voice.obj $OUT/bot_util.obj $OUT/bot.obj $OUT/insbots.obj $OUT/convar.obj \
+  $OUT/crt_stub.obj $OUT/sdk_glue.obj $OUT/cfgvar.obj $OUT/nav.obj $OUT/objective.obj $OUT/voice.obj $OUT/profile.obj $OUT/bot_util.obj $OUT/bot_entry.obj $OUT/bot.obj $OUT/insbots.obj $OUT/convar.obj \
   $SDK/lib/public/tier0.lib $SDK/lib/public/vstdlib.lib \
   $OUT/msvcrt.lib
 
