@@ -18,6 +18,7 @@ BUILD_TIME ?= $(shell date -u '+%b %d %Y %H:%M:%S')
 DEFS += -DBUILD_TIMESTAMP="\"$(BUILD_TIME)\""
 WARN := -w -fno-strict-aliasing
 INC := -I$(SRC)
+INC += -I$(SRC)/bot
 INC += -I$(SDK)/public -I$(SDK)/public/tier0 -I$(SDK)/public/tier1 -I$(SDK)/public/dlls
 INC += -I$(SDK)/public/engine -I$(SDK)/public/vstdlib -I$(SDK)/public/mathlib
 INC += -I$(SDK)/game_shared -I$(SDK)/tier1

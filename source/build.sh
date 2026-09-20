@@ -12,6 +12,7 @@ CFLAGS="--target=i686-pc-windows-msvc /c /O2 /GS- /GR- /EHs-c- /clang:-mstack-pr
   /D_WIN32 /DWIN32 /D_WINDOWS /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DVERSION_SAFE_STEAM_API_INTERFACES
   -fno-builtin
   /I src/shims
+  /I src/bot
   /I $SDK/public
   /I $SDK/public/tier0
   /I $SDK/public/tier1

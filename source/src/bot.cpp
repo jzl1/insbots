@@ -75,7 +75,7 @@ void UpdateSmokeGrenades()
     }
 }
 
-static float DistanceToLineSegment(const Vector& p, const Vector& a, const Vector& b)
+float DistanceToLineSegment(const Vector& p, const Vector& a, const Vector& b)
 {
     Vector ab = b - a;
     Vector ap = p - a;
@@ -92,7 +92,7 @@ static float DistanceToLineSegment(const Vector& p, const Vector& a, const Vecto
     return sqrtf(dx*dx + dy*dy + dz*dz);
 }
 
-static float SignedAngleDiff(float a, float b)
+float SignedAngleDiff(float a, float b)
 {
     float d = fmodf(a - b, 360.0f);
     if (d > 180.0f) d -= 360.0f;
@@ -270,9 +270,9 @@ void InsBots_ForgetLearn();   // wipe learned bad links (memory + file)
 // what they see; teammates read to react. Cleared by staleness.
 struct Sighting { Vector pos; float time; bool valid; };
 struct TeamIntel { Sighting enemy[66]; };
-static TeamIntel g_Intel[3];
+TeamIntel g_Intel[3];
 
-static void IntelReport(int team, int enemyIdx, const Vector &pos, float now)
+void IntelReport(int team, int enemyIdx, const Vector &pos, float now)
 {
     if (team < 1 || team > 2 || enemyIdx < 1 || enemyIdx > 65) return;
     g_Intel[team].enemy[enemyIdx].pos = pos;
@@ -280,7 +280,7 @@ static void IntelReport(int team, int enemyIdx, const Vector &pos, float now)
     g_Intel[team].enemy[enemyIdx].valid = true;
 }
 
-static bool IntelEnemyIsLive(int team, int enemyIdx)
+bool IntelEnemyIsLive(int team, int enemyIdx)
 {
     if (team < 1 || team > 2 || enemyIdx < 1 || enemyIdx > 65
         || !engine || !playerinfomanager)
@@ -294,7 +294,7 @@ static bool IntelEnemyIsLive(int team, int enemyIdx)
 }
 
 // freshest actionable sighting for a team; returns enemy index or 0
-static int IntelFreshest(int team, float now, float maxAge, const Vector &listenerPos,
+int IntelFreshest(int team, float now, float maxAge, const Vector &listenerPos,
                          float maxRange, Vector &outPos)
 {
     if (team < 1 || team > 2) return 0;
@@ -323,7 +323,7 @@ static int IntelFreshest(int team, float now, float maxAge, const Vector &listen
     return best;
 }
 
-static void IntelReset() { memset(g_Intel, 0, sizeof(g_Intel)); }
+void IntelReset() { memset(g_Intel, 0, sizeof(g_Intel)); }
 
 // ---------------- hearing / footstep investigation ----------------
 // This SDK's IPlayerInfo exposes no velocity getter, so a moving enemy's
@@ -332,7 +332,7 @@ static void IntelReset() { memset(g_Intel, 0, sizeof(g_Intel)); }
 // origin samples.
 static Vector s_hearLastOrigin[66];
 static float  s_hearLastTime[66];
-static float  s_hearSpeed[66];
+float  s_hearSpeed[66];
 static int    s_hearUserId[66];
 static bool   s_hearHasLast[66];
 static float  s_hearFrameTime = -1.0f;
@@ -352,14 +352,14 @@ static void HearingClearSlot(int idx)
     s_hearHasLast[idx] = false;
 }
 
-static void HearingReset()
+void HearingReset()
 {
     for (int i = 1; i <= 65; i++) HearingClearSlot(i);
     s_hearFrameTime = -1.0f;
     s_tracePlayerHandleCount = 0;
 }
 
-static void HearingFrameUpdate()
+void HearingFrameUpdate()
 {
     INSPROF_SCOPE(INSPROF_HEARING);
     if (!gpGlobals || !engine || !playerinfomanager) return;
@@ -560,19 +560,19 @@ static const char *TeleportFailureName(int reason)
 
 CBotRoster g_Bots;
 
-static const char *s_BotNamesUSMC[] = {
+const char *s_BotNamesUSMC[] = {
     "James", "John", "Robert", "Michael", "David", "William", "Richard", "Thomas",
     "Charles", "Daniel", "Matthew", "Anthony", "Joseph", "Steven", "Andrew", "Joshua",
 };
 
-static const char *s_BotNamesIraqi[] = {
+const char *s_BotNamesIraqi[] = {
     "Ahmed", "Ali", "Hassan", "Hussein", "Omar", "Abbas", "Mustafa", "Saad",
     "Tariq", "Zaid", "Kareem", "Faisal", "Qasim", "Yasin", "Bilal", "Mahmoud",
 };
 
 // In Insurgency, teamSlot 0 (pteamsetup 1) lands on engine team index 2,
 // while teamSlot 1 (pteamsetup 2) lands on engine team index 1!
-static inline int TeamSlotToTeamIndex(int teamSlot)
+int TeamSlotToTeamIndex(int teamSlot)
 {
     return (teamSlot == 0) ? 2 : 1;
 }
@@ -707,7 +707,7 @@ static int GetTeamSlotForFaction(int targetFaction)
     return (targetFaction == FACTION_USMC) ? 1 : 0;
 }
 
-static int GetTeamSlotForBotName(const char *name, int defaultSlot)
+int GetTeamSlotForBotName(const char *name, int defaultSlot)
 {
     if (!name || !name[0]) return defaultSlot;
     const char *p = name;
@@ -727,12 +727,12 @@ static int GetTeamSlotForBotName(const char *name, int defaultSlot)
     return defaultSlot;
 }
 
-static float frand(float lo, float hi)
+float frand(float lo, float hi)
 {
     return lo + (hi - lo) * ((float)rand() / (float)RAND_MAX);
 }
 
-static int RandomIndex(int count)
+int RandomIndex(int count)
 {
     if (count <= 1) return 0;
     return (int)(((unsigned long long)(unsigned int)rand()
@@ -740,7 +740,7 @@ static int RandomIndex(int count)
                  / ((unsigned long long)(unsigned int)RAND_MAX + 1ULL));
 }
 
-static bool CommandContainsToken(const char *command, const char *token)
+bool CommandContainsToken(const char *command, const char *token)
 {
     if (!command || !token || !token[0]) return false;
     size_t len = strlen(token);
@@ -758,7 +758,7 @@ static bool CommandContainsToken(const char *command, const char *token)
     return false;
 }
 
-static void BotDbg(const char *fmt, ...);
+void BotDbg(const char *fmt, ...);
 
 static const char *CustomizationFactionName(int faction)
 {
@@ -1051,7 +1051,7 @@ static WeaponProfile s_wp[] = {
     { "rpg7",     1, FM_SEMI,           20,   0, 10.0f, WF_LAUNCHER,         WC_RPG,              NULL },
     { "m203",     1, FM_SEMI,           20,   0,  8.0f, WF_LAUNCHER,         WC_GRENADE_LAUNCHER, NULL },
 };
-static WeaponProfile s_wpDefault =
+WeaponProfile s_wpDefault =
     { "default", 30, FM_SEMI|FM_AUTO, 600, 0, 2.5f, 0, WC_RIFLE, NULL };
 
 struct CombatProfile
@@ -1156,27 +1156,27 @@ static CombatProfile *CombatForWeapon(const WeaponProfile *wp)
     return &s_combat[cls];
 }
 
-static int CombatClassForWeapon(const WeaponProfile *wp)
+int CombatClassForWeapon(const WeaponProfile *wp)
 {
     int cls = wp ? (int)wp->combatClass : (int)WC_RIFLE;
     if (cls < 0 || cls >= WC_COUNT) cls = WC_RIFLE;
     return cls;
 }
 
-static int CombatReserveMags(const WeaponProfile *wp)
+int CombatReserveMags(const WeaponProfile *wp)
 {
     CombatProfile *combat = CombatForWeapon(wp);
     int mags = combat->reserveMags ? combat->reserveMags->GetInt() : 0;
     return mags < 0 ? 0 : mags;
 }
 
-static float CombatValue(CfgVar *classValue, CfgVar &fallback)
+float CombatValue(CfgVar *classValue, CfgVar &fallback)
 {
     float value = classValue ? classValue->GetFloat() : -1.0f;
     return value < 0.0f ? fallback.GetFloat() : value;
 }
 
-static float CombatRecoilControl(CombatProfile *combat, float aimError)
+float CombatRecoilControl(CombatProfile *combat, float aimError)
 {
     const char *mode = combat && combat->recoilControl ? combat->recoilControl->GetString() : "inherit";
     if (!mode || !mode[0] || !_stricmp(mode, "inherit"))
@@ -1202,7 +1202,7 @@ static float CombatRecoilControl(CombatProfile *combat, float aimError)
     return control;
 }
 
-static void BotDbg(const char *fmt, ...)
+void BotDbg(const char *fmt, ...)
 {
     if (!insbot_debug.GetBool() || !engine) return;
     char buf[512];
@@ -1213,7 +1213,7 @@ static void BotDbg(const char *fmt, ...)
     Msg("%s", buf);
 }
 
-static inline bool IsHadithaMapName(const char *name)
+bool IsHadithaMapName(const char *name)
 {
     if (!name || !name[0]) return false;
     return !_stricmp(name, "ins_haditha") || !_stricmp(name, "ins_haditha_night");
@@ -1336,7 +1336,7 @@ float CInsBot::Now() const
 // earlier XY gate in PositionOnLadderLanding() (the ladder top sits outside
 // the landing NAV area's XY rect) and never reach this test at all.  Their
 // residual lost-height retries are a navmesh problem, not a tolerance one.
-static float LadderLipTol()
+float LadderLipTol()
 {
     float tol = insbot_ladder_lip_tol.GetFloat();
     if (tol < 0.0f) tol = 0.0f;
@@ -1344,7 +1344,7 @@ static float LadderLipTol()
     return tol;
 }
 
-static Vector LadderAreaInterior(int areaIdx, const Vector &lip);
+Vector LadderAreaInterior(int areaIdx, const Vector &lip);
 
 static int PlayerCollisionGroup(edict_t *edict)
 {
@@ -1354,7 +1354,7 @@ static int PlayerCollisionGroup(edict_t *edict)
     return collideable ? collideable->GetCollisionGroup() : -1;
 }
 
-static bool WritePlayerCollisionGroup(edict_t *edict, int collisionGroup)
+bool WritePlayerCollisionGroup(edict_t *edict, int collisionGroup)
 {
     if (s_offset_m_CollisionGroup < 0 || !edict || edict->IsFree())
         return false;
@@ -3323,7 +3323,7 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
 // edge. Treat those one-axis, short-gap links as virtual portals. This gives
 // steering an actual mouth to line up with instead of aiming diagonally at the
 // landing area's center through the wall beside the opening.
-static bool GetSeparatedTransitionPortal(int fromIdx, int toIdx,
+bool GetSeparatedTransitionPortal(int fromIdx, int toIdx,
                                          Vector &mid, Vector &axis,
                                          float &halfSpan, Vector *insideDest)
 {
@@ -3416,7 +3416,7 @@ static bool GetSeparatedTransitionPortal(int fromIdx, int toIdx,
     return true;
 }
 
-static bool PlayerInsideObjective(const ObjPoint *op, IPlayerInfo *info,
+bool PlayerInsideObjective(const ObjPoint *op, IPlayerInfo *info,
                                   const Vector &pos)
 {
     if (!op || !info) return false;
@@ -3431,7 +3431,7 @@ static bool PlayerInsideObjective(const ObjPoint *op, IPlayerInfo *info,
         && pos.z >= op->minZ - 8.0f && pos.z <= op->maxZ + 8.0f;
 }
 
-static Vector ObjectiveHoldPoint(const ObjPoint *op, const Vector &pos,
+Vector ObjectiveHoldPoint(const ObjPoint *op, const Vector &pos,
                                  float angle, float scale)
 {
     if (!op) return pos;
@@ -3454,7 +3454,7 @@ static Vector ObjectiveHoldPoint(const ObjPoint *op, const Vector &pos,
 // that has only just crossed a doorway may already overlap the trigger; sending
 // committed capture detail toward the opposite corner clears its hull from the
 // throat before it is allowed to become stationary.
-static Vector ObjectiveCornerHoldPoint(const ObjPoint *op, const Vector &entry,
+Vector ObjectiveCornerHoldPoint(const ObjPoint *op, const Vector &entry,
                                        int ordinal)
 {
     if (!op) return entry;
@@ -3491,7 +3491,7 @@ static Vector ObjectiveCornerHoldPoint(const ObjPoint *op, const Vector &entry,
 // points them into one of those walls. Prefer the tactical yaw, but sample
 // nearby alternatives at waist and eye height and turn toward open space when
 // the preferred direction is obstructed.
-static float OpenHoldYaw(const Vector &pos, float preferredYaw)
+float OpenHoldYaw(const Vector &pos, float preferredYaw)
 {
     static const float offsets[] = {
         0.0f, -30.0f, 30.0f, -60.0f, 60.0f,
@@ -3532,7 +3532,7 @@ static float OpenHoldYaw(const Vector &pos, float preferredYaw)
     return bestYaw;
 }
 
-static bool IsHadithaTightDoorEdge(int fromIdx, int toIdx)
+bool IsHadithaTightDoorEdge(int fromIdx, int toIdx)
 {
     if (!IsHadithaMapName(g_Bots.m_mapname)) return false;
     const NavAreaData *from = g_NavMesh.Area(fromIdx);
@@ -3549,7 +3549,7 @@ static bool IsHadithaTightDoorEdge(int fromIdx, int toIdx)
 // The second reported choke is the 25u corner immediately before the broad
 // id320 room. Depending on which of the two tiny source tiles FindArea picks,
 // the active edge can be the short south step or either eastward exit.
-static bool IsHadithaEastDoorEdge(int fromIdx, int toIdx)
+bool IsHadithaEastDoorEdge(int fromIdx, int toIdx)
 {
     if (!IsHadithaMapName(g_Bots.m_mapname)) return false;
     const NavAreaData *from = g_NavMesh.Area(fromIdx);
@@ -3579,7 +3579,7 @@ static bool PositionOnAreaSurface(int areaIdx, const Vector &pos)
 // seam handling. The latter intentionally accepts an origin up to 48 units
 // above a sloped tile; using it for a descending ladder would release the
 // shaft while the bot was still several rungs above the lower landing.
-static bool PositionOnLadderLanding(int areaIdx, const Vector &pos)
+bool PositionOnLadderLanding(int areaIdx, const Vector &pos)
 {
     const NavAreaData *a = g_NavMesh.Area(areaIdx);
     if (!a || pos.x < a->lo.x || pos.x > a->hi.x
@@ -3626,7 +3626,7 @@ static bool CrossedExactPortalIntoArea(int fromIdx, int toIdx,
 // Area centers on a long slope can differ by far more than jump height even
 // though their shared floor seam is continuous. Only a real upward step at
 // that seam should make ordinary waypoint following press +jump.
-static bool WalkEdgeNeedsJump(int fromIdx, int toIdx)
+bool WalkEdgeNeedsJump(int fromIdx, int toIdx)
 {
     Vector seam;
     if (!g_NavMesh.GetPortal(fromIdx, toIdx, seam)) return false;
@@ -3656,7 +3656,7 @@ void InsBots_ResetPhysicalPortalCache()
 // wall-height geometry on both sides; only then do full 32x72 hull sweeps
 // locate the usable center band. The shared cache keeps this bounded per
 // map/edge, not per bot.
-static bool ProbePhysicalPortal(int fromIdx, int toIdx,
+bool ProbePhysicalPortal(int fromIdx, int toIdx,
                                 Vector *safeCenter, float *safeHalfSpan)
 {
     if (!enginetrace) return false;
@@ -3910,7 +3910,7 @@ static bool IsHadithaDoorSourceEnvelope(const Vector &pos)
 // a careful approach. Detect bots within 160u whose next few path edges include
 // the verified gap, allowing the final command builder to withhold +sprint for
 // the entire approaching column instead of only the bot already at the lip.
-static bool IsHadithaDoorNoSprintZone(const int *path, int pathLen,
+bool IsHadithaDoorNoSprintZone(const int *path, int pathLen,
                                       int cursor, const Vector &pos)
 {
     int doorFrom, doorTo; Vector mouth;
@@ -4441,7 +4441,7 @@ void CInsBot::RefreshRouteRank()
 // vertical wish-speed from view pitch while the player pushes into the ladder,
 // so climbing temporarily owns both yaw and pitch. The area cursor still
 // advances only after the bot physically reaches the destination landing.
-static Vector LadderAreaInterior(int areaIdx, const Vector &lip)
+Vector LadderAreaInterior(int areaIdx, const Vector &lip)
 {
     const NavAreaData *area = g_NavMesh.Area(areaIdx);
     if (!area) return lip;
@@ -5168,7 +5168,7 @@ static bool IsDoorClosedOrClosing(void *doorBase, const char *cn)
 }
 
 
-static bool HasDoorwayLineOfSight(const Vector &from, const Vector &to)
+bool HasDoorwayLineOfSight(const Vector &from, const Vector &to)
 {
     if (!enginetrace) return true;
     Ray_t ray;
@@ -5984,7 +5984,7 @@ bool CInsBot::TransferHadithaEastDoor(float now)
     return true;
 }
 
-static float xyd(const Vector &a, const Vector &b)
+float xyd(const Vector &a, const Vector &b)
 {
     float dx = a.x - b.x, dy = a.y - b.y;
     return sqrtf(dx * dx + dy * dy);
@@ -6521,7 +6521,7 @@ void CInsBot::SteerToPoint(float destYaw, float speed, float &fwd, float &side,
 // Convert a desired world-space movement yaw into Source's view-relative
 // forward/side command pair.  Combat bots keep aiming at their enemy while the
 // queue moves them along (or back along) the actual navigation lane.
-static void MoveAtWorldYaw(float worldYaw, float viewYaw, float speed,
+void MoveAtWorldYaw(float worldYaw, float viewYaw, float speed,
                            float &fwd, float &side)
 {
     float rel = (worldYaw - viewYaw) * (3.14159265f / 180.0f);
@@ -12679,7 +12679,7 @@ static void DrawLineTW(const Vector &a, const Vector &b, int r, int g, int bl, f
     debugoverlay->AddLineOverlay(a, b, r, g, bl, true /*noDepthTest*/, dur);
 }
 
-static void DrawBoxTW(const Vector &mn, const Vector &mx, int r, int g, int b, float dur)
+void DrawBoxTW(const Vector &mn, const Vector &mx, int r, int g, int b, float dur)
 {
     Vector c[8] = {
         Vector(mn.x, mn.y, mn.z), Vector(mx.x, mn.y, mn.z),
@@ -14489,7 +14489,7 @@ void CBotRoster::FrameUpdate(bool simulating)
 }
 
 // learned-bad-link file for the current map (persists runtime discoveries)
-static char s_learnPath[512] = {0};
+char s_learnPath[512] = {0};
 
 void InsBots_SaveLearn()
 {
