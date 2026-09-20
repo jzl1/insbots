@@ -261,179 +261,80 @@ static const char *InsBot_stristr(const char *str, const char *substr)
     return NULL;
 }
 
-void CInsBot::ThinkAlive()
+// ---------------------------------------------------------------------------
+// ThinkAlive phases.
+//
+// These were lifted out of ThinkAlive verbatim, with no logic change, to break
+// up a 2.4k-line body. Each one touches no ThinkAlive local except `now`, so
+// the move is mechanical: the block was cut and pasted unchanged and the call
+// sites pass `now`. Keeping them separate from ThinkAlive also makes them
+// individually testable in isolation later.
+// ---------------------------------------------------------------------------
+
+// Dead-bot reset. Runs instead of the rest of ThinkAlive, and leaves the bot in
+// a clean state so the next life starts fresh. Every field reset here is
+// per-life state; anything that must survive death (fireteam identity, cover
+// ownership bookkeeping) is handled explicitly below.
+void CInsBot::ThinkDeadReset(float now)
 {
-    INSPROF_SCOPE(INSPROF_THINKALIVE);
-    float now = Now();
+    ResetLadderTraversal(true);
+    ResetBodyNoCollideRecovery();
+    EndSpawnNoCollide(true);
+    m_state = BOT_DEAD;
+    m_classSetupSent = false;
+    m_nextReinforcePulse = 0.0f;
+    m_enemyIndex = 0;
+    ResetDoorwayRunway();
 
-    // ADS intent is re-derived every frame (the combat block only runs for the
-    // standard-firearms branch). Clearing it here stops a bot that stops
-    // engaging, switches to a launcher or loses its enemy from holding a stale
-    // request, which would latch the sights up and re-pulse forever.
-    m_wantAds = false;
-
-    if (m_info->IsDead())
-    {
-        ResetLadderTraversal(true);
-        ResetBodyNoCollideRecovery();
-        EndSpawnNoCollide(true);
-        m_state = BOT_DEAD;
-        m_classSetupSent = false;
-        m_nextReinforcePulse = 0.0f;
-        m_enemyIndex = 0;
-        ResetDoorwayRunway();
-
-        m_pathLen = 0;
-        m_pathResult = BOT_PATH_NONE;
+    m_pathLen = 0;
+    m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false;
-        m_moveArrivalLatched = false;
-        m_haveLastNavMoveYaw = false;
-        m_notedSpawn = false;
-        m_objGoal = -1;
-                m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
-        // fresh loadout next life
-        m_onSidearm = false; m_sidearmTemporary = false; m_reloadingClass = -1; memset(m_reloadMags, 0, sizeof(m_reloadMags)); memset(m_roundsFired, 0, sizeof(m_roundsFired)); m_fireAccum = 0.0f; m_lastEngineClip = -1;
-        m_reloadUntil = 0; m_launcherPostFireUntil = 0; m_rpgSpeedDumpUntil = 0; m_rpgSpeedDumpEntIndex = 0; m_nadeState = 0; m_nadeKind = 0; m_m203State = 0; m_m203Pulse = false; m_nextM203 = 0.0f; m_nextRpg = 0.0f; m_nextGrenade = 0.0f; m_nextSmoke = 0.0f; m_firing = false;
-        if (m_squadLeaderIndex > 0) g_Bots.StashPendingRespawn(this); // preserve fireteam identity across respawn
-        // Reset transient squad order on death — respawn should start in FOLLOW mode
-        m_squadOrder = SQUAD_ORDER_FOLLOW;
-        m_squadOrderTime = 0.0f;
-        m_leaderInCover = false;
-        m_coverFollowSet = false;
-        m_nextSuppressShot = 0.0f; m_suppressLosClear = false; m_nextSuppressLosCheck = 0.0f; m_haveSuppressRepos = false; m_nextSuppressRepos = 0.0f;
-        m_ironsights = false; m_ironsightTime = 0.0f;
-        m_wantAds = false;
-        m_crouchFireUntil = 0; m_haveCover = false;
-        m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
-        g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
-        m_recoilRise = 0; m_burstShots = 0; m_wp = 0; m_wpToggledMode = false; m_wpName[0] = 0;
-        m_haveHoldSpot = false; m_patrolling = false;
-        m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
-        m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
-        m_avoidObj = -1; m_avoidUntil = 0.0f; m_nextTeleportOk = 0.0f;
-        m_hearUntil = 0; m_nextHearTime = 0;   // stop investigating footsteps when dead
-        m_doorYieldUntil = 0;   // leave the door queue
-        m_doorYieldSlot = 0;
-        m_chokeProgressTime = 0; m_chokeBackoffUntil = 0;
-        m_blocked = false; m_chokeBackedOut = false;
-        m_followSpeed = 0.0f; m_passSide = 0.0f; m_passUntil = 0.0f;
-        m_queueLeaderSlot = 0; m_queueWaitSince = 0.0f; m_queueBreakUntil = 0.0f;
-        m_havePortalSpan = false; m_chokeCacheTime = 0.0f;
-        m_corridorAhead = false; m_corridorLatched = false; m_corridorAheadDist = 0.0f;
-        m_dropAhead = false; m_dropAheadDist = 0.0f;
-        m_lastButtons = 0;
-        m_hasPending = false;
-        m_nextJoinCmdTime = now + 3.0f;
-        RollCustomizationForLife();
-        return;
-    }
+    m_moveArrivalLatched = false;
+    m_haveLastNavMoveYaw = false;
+    m_notedSpawn = false;
+    m_objGoal = -1;
+    m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
+    // fresh loadout next life
+    m_onSidearm = false; m_sidearmTemporary = false; m_reloadingClass = -1; memset(m_reloadMags, 0, sizeof(m_reloadMags)); memset(m_roundsFired, 0, sizeof(m_roundsFired)); m_fireAccum = 0.0f; m_lastEngineClip = -1;
+    m_reloadUntil = 0; m_launcherPostFireUntil = 0; m_rpgSpeedDumpUntil = 0; m_rpgSpeedDumpEntIndex = 0; m_nadeState = 0; m_nadeKind = 0; m_m203State = 0; m_m203Pulse = false; m_nextM203 = 0.0f; m_nextRpg = 0.0f; m_nextGrenade = 0.0f; m_nextSmoke = 0.0f; m_firing = false;
+    if (m_squadLeaderIndex > 0) g_Bots.StashPendingRespawn(this); // preserve fireteam identity across respawn
+    // Reset transient squad order on death — respawn should start in FOLLOW mode
+    m_squadOrder = SQUAD_ORDER_FOLLOW;
+    m_squadOrderTime = 0.0f;
+    m_leaderInCover = false;
+    m_coverFollowSet = false;
+    m_nextSuppressShot = 0.0f; m_suppressLosClear = false; m_nextSuppressLosCheck = 0.0f; m_haveSuppressRepos = false; m_nextSuppressRepos = 0.0f;
+    m_ironsights = false; m_ironsightTime = 0.0f;
+    m_wantAds = false;
+    m_crouchFireUntil = 0; m_haveCover = false;
+    m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
+    g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
+    m_recoilRise = 0; m_burstShots = 0; m_wp = 0; m_wpToggledMode = false; m_wpName[0] = 0;
+    m_haveHoldSpot = false; m_patrolling = false;
+    m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
+    m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
+    m_avoidObj = -1; m_avoidUntil = 0.0f; m_nextTeleportOk = 0.0f;
+    m_hearUntil = 0; m_nextHearTime = 0;   // stop investigating footsteps when dead
+    m_doorYieldUntil = 0;   // leave the door queue
+    m_doorYieldSlot = 0;
+    m_chokeProgressTime = 0; m_chokeBackoffUntil = 0;
+    m_blocked = false; m_chokeBackedOut = false;
+    m_followSpeed = 0.0f; m_passSide = 0.0f; m_passUntil = 0.0f;
+    m_queueLeaderSlot = 0; m_queueWaitSince = 0.0f; m_queueBreakUntil = 0.0f;
+    m_havePortalSpan = false; m_chokeCacheTime = 0.0f;
+    m_corridorAhead = false; m_corridorLatched = false; m_corridorAheadDist = 0.0f;
+    m_dropAhead = false; m_dropAheadDist = 0.0f;
+    m_lastButtons = 0;
+    m_hasPending = false;
+    m_nextJoinCmdTime = now + 3.0f;
+    RollCustomizationForLife();
+}
 
-    DumpPendingRpgSpeed(now);
-
-    if (m_reloadUntil > 0.0f && now >= m_reloadUntil)
-    {
-        m_reloadUntil = 0.0f;
-        m_fireAccum = 0.0f;
-        if (m_reloadingClass >= 0 && m_reloadingClass < INSBOT_COMBAT_CLASS_COUNT)
-        {
-            m_roundsFired[m_reloadingClass] = 0;
-            m_reloadingClass = -1;
-        }
-        else
-        {
-            int cls = m_wp ? ((const WeaponProfile *)m_wp)->combatClass : 0;
-            if (cls >= 0 && cls < INSBOT_COMBAT_CLASS_COUNT) m_roundsFired[cls] = 0;
-        }
-    }
-
-    Vector pos = m_info->GetAbsOrigin();
-
-    // learn this team's home from where it spawns (once per life).
-    // IMPORTANT: on the first frame(s) after respawn GetAbsOrigin can still read
-    // (0,0,0) - the engine has flipped IsDead() to false but hasn't yet teleported
-    // the player onto its spawn point. Sampling that frame collapses the team home
-    // to the world origin (which then makes "nearest to home" mean "nearest to the
-    // map origin" and breaks objective picking entirely). So don't do anything -
-    // and above all don't latch the home - until we actually have a real position.
-    if (!m_notedSpawn)
-    {
-        if (pos.x * pos.x + pos.y * pos.y + pos.z * pos.z < 1.0f)
-            return;                      // not positioned yet - retry next frame
-
-        g_Objectives.NoteSpawn(m_info->GetTeamIndex(), pos);
-        m_notedSpawn = true;
-        m_objGoal = -1;
-                m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
-        m_objRepick = now;
-        m_lastHealth = m_info->GetHealth();   // baseline so we don't "shout hit" on spawn
-        // reset stuck/progress tracking for the new life
-        m_stuckSince = 0; m_stuckStage = 0;
-        m_haveNavDest = false; m_bestDist = 3.4e38f; m_navDestChanged = false;
-        m_moveArrivalLatched = false; m_haveLastNavMoveYaw = false;
-        m_haveRescueLink = false; m_haveLastReportedLink = false;
-        ResetLadderTraversal(true);
-        m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
-        m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
-        m_avoidObj = -1; m_avoidUntil = 0.0f;
-        m_nextRpg = 0.0f; m_nextM203 = 0.0f;
-        m_haveSniperSpot = false; m_sniperRelocateTime = 0.0f; m_sniperKills = 0;
-        m_sniperArea = -1; m_sniperObj = -1; m_sniperTeam = 0;
-        m_sniperStance = SNIPER_STANCE_NONE; m_sniperScore = 0.0f;
-        m_sniperHearingDetour = false;
-        m_sniperHearingReturnTime = 0.0f;
-        m_hearUntil = 0; m_nextHearTime = 0; m_hearTarget = Vector(0, 0, 0);
-        m_doorYieldUntil = 0;   // leave the door queue
-        m_doorYieldSlot = 0;
-        m_chokeProgressTime = 0; m_chokeBackoffUntil = 0;
-        m_blocked = false; m_chokeBackedOut = false;
-        m_followSpeed = 0.0f; m_passSide = 0.0f; m_passUntil = 0.0f;
-        m_queueLeaderSlot = 0; m_queueWaitSince = 0.0f; m_queueBreakUntil = 0.0f;
-        m_laneClass = -1; m_laneIndex = 0;
-        m_havePortalSpan = false; m_chokeCacheTime = 0.0f;
-        m_corridorAhead = false; m_corridorLatched = false; m_corridorAheadDist = 0.0f;
-        m_dropAhead = false; m_dropAheadDist = 0.0f;
-        m_spawnStandTicks = 66;
-        m_nextReloadTime = now + frand(25.0f, 45.0f);
-        m_fireAccum = 0.0f;
-        if (m_ctrl)
-        {
-            // Removed givecurrentammo here too
-            helpers->ClientCommand(m_edict, "creinforce");
-        }
-        BeginSpawnNoCollide(pos);
-    }
-
-    m_haveNavDest = false;   // set true by movement code below if a dest is chosen
-    m_traversingLadder = false;
-    m_navTurnAngle = 0.0f;
-
-    extern CfgVar insbot_freeze;
-    // The game suppresses player movement between round_reset and
-    // round_unfrozen. Do not mistake that intentional freeze for a failed NAV
-    // link, and never allow force-goto to override the round safety guard.
-    // Reset ordinary stuck sampling so no pre-freeze duration fires after the
-    // round opens. A proven body-recovery obligation is preserved and its
-    // active-time counters pause because UpdateBodyNoCollide is not run here.
-    bool manualFreeze = insbot_freeze.GetBool() && !g_ForceGotoActive;
-    UpdateSpawnNoCollide(pos, !g_RoundFrozen && !manualFreeze);
-    if (g_RoundFrozen || manualFreeze)
-    {
-        m_stuckSince = 0.0f;
-        m_stuckStage = 0;
-        if (!m_bodyNoCollideActive && !m_bodyNoCollideEscalating)
-            m_haveRescueLink = false;
-        m_haveNavDest = false;
-        m_bestDist = 3.4e38f;
-        m_navDestChanged = false;
-        m_unstuckUntil = 0.0f;
-        m_stuckCheckPos = pos;
-        m_stuckCheckTime = now + 0.5f;
-        m_pendingFwd = 0; m_pendingSide = 0; m_pendingButtons = 0; m_pendingView = m_curAngles;
-        m_hasPending = true;
-        RunMove(0, 0, 0, m_curAngles);
-        return;
-    }
-
+// Held-weapon profile resolution, engine clip synchronisation, and the
+// damage callouts. Grouped because they all read the bot's live weapon state
+// and must run before any combat or movement decision.
+void CInsBot::ThinkWeaponAndAmmo(float now)
+{
     // ---- resolve the held weapon's profile (re-read name ~2 Hz) ----
     if (now >= m_wpNextCheck || !m_wp)
     {
@@ -544,6 +445,132 @@ void CInsBot::ThinkAlive()
         }
         m_lastHealth = hp;
     }
+}
+
+void CInsBot::ThinkAlive()
+{
+    INSPROF_SCOPE(INSPROF_THINKALIVE);
+    float now = Now();
+
+    // ADS intent is re-derived every frame (the combat block only runs for the
+    // standard-firearms branch). Clearing it here stops a bot that stops
+    // engaging, switches to a launcher or loses its enemy from holding a stale
+    // request, which would latch the sights up and re-pulse forever.
+    m_wantAds = false;
+
+    if (m_info->IsDead())
+    {
+        ThinkDeadReset(now);
+        return;
+    }
+
+    DumpPendingRpgSpeed(now);
+
+    if (m_reloadUntil > 0.0f && now >= m_reloadUntil)
+    {
+        m_reloadUntil = 0.0f;
+        m_fireAccum = 0.0f;
+        if (m_reloadingClass >= 0 && m_reloadingClass < INSBOT_COMBAT_CLASS_COUNT)
+        {
+            m_roundsFired[m_reloadingClass] = 0;
+            m_reloadingClass = -1;
+        }
+        else
+        {
+            int cls = m_wp ? ((const WeaponProfile *)m_wp)->combatClass : 0;
+            if (cls >= 0 && cls < INSBOT_COMBAT_CLASS_COUNT) m_roundsFired[cls] = 0;
+        }
+    }
+
+    Vector pos = m_info->GetAbsOrigin();
+
+    // learn this team's home from where it spawns (once per life).
+    // IMPORTANT: on the first frame(s) after respawn GetAbsOrigin can still read
+    // (0,0,0) - the engine has flipped IsDead() to false but hasn't yet teleported
+    // the player onto its spawn point. Sampling that frame collapses the team home
+    // to the world origin (which then makes "nearest to home" mean "nearest to the
+    // map origin" and breaks objective picking entirely). So don't do anything -
+    // and above all don't latch the home - until we actually have a real position.
+    if (!m_notedSpawn)
+    {
+        if (pos.x * pos.x + pos.y * pos.y + pos.z * pos.z < 1.0f)
+            return;                      // not positioned yet - retry next frame
+
+        g_Objectives.NoteSpawn(m_info->GetTeamIndex(), pos);
+        m_notedSpawn = true;
+        m_objGoal = -1;
+                m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
+        m_objRepick = now;
+        m_lastHealth = m_info->GetHealth();   // baseline so we don't "shout hit" on spawn
+        // reset stuck/progress tracking for the new life
+        m_stuckSince = 0; m_stuckStage = 0;
+        m_haveNavDest = false; m_bestDist = 3.4e38f; m_navDestChanged = false;
+        m_moveArrivalLatched = false; m_haveLastNavMoveYaw = false;
+        m_haveRescueLink = false; m_haveLastReportedLink = false;
+        ResetLadderTraversal(true);
+        m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
+        m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
+        m_avoidObj = -1; m_avoidUntil = 0.0f;
+        m_nextRpg = 0.0f; m_nextM203 = 0.0f;
+        m_haveSniperSpot = false; m_sniperRelocateTime = 0.0f; m_sniperKills = 0;
+        m_sniperArea = -1; m_sniperObj = -1; m_sniperTeam = 0;
+        m_sniperStance = SNIPER_STANCE_NONE; m_sniperScore = 0.0f;
+        m_sniperHearingDetour = false;
+        m_sniperHearingReturnTime = 0.0f;
+        m_hearUntil = 0; m_nextHearTime = 0; m_hearTarget = Vector(0, 0, 0);
+        m_doorYieldUntil = 0;   // leave the door queue
+        m_doorYieldSlot = 0;
+        m_chokeProgressTime = 0; m_chokeBackoffUntil = 0;
+        m_blocked = false; m_chokeBackedOut = false;
+        m_followSpeed = 0.0f; m_passSide = 0.0f; m_passUntil = 0.0f;
+        m_queueLeaderSlot = 0; m_queueWaitSince = 0.0f; m_queueBreakUntil = 0.0f;
+        m_laneClass = -1; m_laneIndex = 0;
+        m_havePortalSpan = false; m_chokeCacheTime = 0.0f;
+        m_corridorAhead = false; m_corridorLatched = false; m_corridorAheadDist = 0.0f;
+        m_dropAhead = false; m_dropAheadDist = 0.0f;
+        m_spawnStandTicks = 66;
+        m_nextReloadTime = now + frand(25.0f, 45.0f);
+        m_fireAccum = 0.0f;
+        if (m_ctrl)
+        {
+            // Removed givecurrentammo here too
+            helpers->ClientCommand(m_edict, "creinforce");
+        }
+        BeginSpawnNoCollide(pos);
+    }
+
+    m_haveNavDest = false;   // set true by movement code below if a dest is chosen
+    m_traversingLadder = false;
+    m_navTurnAngle = 0.0f;
+
+    extern CfgVar insbot_freeze;
+    // The game suppresses player movement between round_reset and
+    // round_unfrozen. Do not mistake that intentional freeze for a failed NAV
+    // link, and never allow force-goto to override the round safety guard.
+    // Reset ordinary stuck sampling so no pre-freeze duration fires after the
+    // round opens. A proven body-recovery obligation is preserved and its
+    // active-time counters pause because UpdateBodyNoCollide is not run here.
+    bool manualFreeze = insbot_freeze.GetBool() && !g_ForceGotoActive;
+    UpdateSpawnNoCollide(pos, !g_RoundFrozen && !manualFreeze);
+    if (g_RoundFrozen || manualFreeze)
+    {
+        m_stuckSince = 0.0f;
+        m_stuckStage = 0;
+        if (!m_bodyNoCollideActive && !m_bodyNoCollideEscalating)
+            m_haveRescueLink = false;
+        m_haveNavDest = false;
+        m_bestDist = 3.4e38f;
+        m_navDestChanged = false;
+        m_unstuckUntil = 0.0f;
+        m_stuckCheckPos = pos;
+        m_stuckCheckTime = now + 0.5f;
+        m_pendingFwd = 0; m_pendingSide = 0; m_pendingButtons = 0; m_pendingView = m_curAngles;
+        m_hasPending = true;
+        RunMove(0, 0, 0, m_curAngles);
+        return;
+    }
+
+    ThinkWeaponAndAmmo(now);
 
     // ---------------- enemy scan (10 Hz) ----------------
     if (!insbot_detect.GetBool() && m_enemyIndex)

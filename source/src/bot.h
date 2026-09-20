@@ -496,6 +496,10 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     void  ThinkJoin();
     void  PruneDuplicateWeapons();
     void  ThinkAlive();
+    // ThinkAlive phases. These touch no ThinkAlive locals except `now`, so they
+    // were lifted out verbatim to keep the 2.4k-line body readable.
+    void  ThinkDeadReset(float now);
+    void  ThinkWeaponAndAmmo(float now);
     void  RollCustomizationForLife();
     void  UpdateCustomizationWeapon(int roleId);
     bool  SendCustomizationBeforeSpawn();
