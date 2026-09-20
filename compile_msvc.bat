@@ -55,7 +55,7 @@ set DEFS=/D_WIN32 /DWIN32 /D_WINDOWS /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DVERSIO
 set INCLUDES=/I source/src /I source/src/shims /I "%SDK%\public" /I "%SDK%\public\tier0" /I "%SDK%\public\tier1" /I "%SDK%\public\dlls" /I "%SDK%\public\engine" /I "%SDK%\public\vstdlib" /I "%SDK%\public\mathlib" /I "%SDK%\game_shared" /I "%SDK%\tier1"
 
 echo Compiling insbots sources with MSVC (UTC: %BUILD_TIME%)...
-cl.exe /O2 /Oi- /GS- /GR- /EHs-c- /W3 %DEFS% %INCLUDES% /Fo:build/ /c source/src/crt_stub.cpp source/src/sdk_glue.cpp source/src/cfgvar.cpp source/src/nav.cpp source/src/objective.cpp source/src/voice.cpp source/src/profile.cpp source/src/bot.cpp source/src/insbots.cpp "%SDK%\tier1\convar.cpp"
+cl.exe /O2 /Oi- /GS- /GR- /EHs-c- /W3 /MP %DEFS% %INCLUDES% /Fo:build/ /c source/src/crt_stub.cpp source/src/sdk_glue.cpp source/src/cfgvar.cpp source/src/nav.cpp source/src/objective.cpp source/src/voice.cpp source/src/profile.cpp source/src/bot.cpp source/src/insbots.cpp "%SDK%\tier1\convar.cpp"
 
 if %ERRORLEVEL% NEQ 0 (
     echo Compilation failed!
