@@ -7,9 +7,9 @@
 // A symbol belongs here only if it is referenced from more than one file under
 // bot/. Symbols with a single consuming TU stay `static` in that TU.
 //
-// Every declaration below is transcribed verbatim from the definition that
-// currently lives in bot.cpp. When a definition moves to its home TU, only its
-// `static` (and any `inline`) keyword is removed - the body never changes.
+// Every declaration below is transcribed verbatim from the definition in its
+// home TU. When a definition moves to that home TU, only its `static` (and any
+// `inline`) keyword is removed - the body never changes.
 // ============================================================================
 #pragma once
 
