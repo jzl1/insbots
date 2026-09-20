@@ -55,7 +55,7 @@ set DEFS=/D_WIN32 /DWIN32 /D_WINDOWS /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DVERSIO
 set INCLUDES=/I source/src /I source/src/shims /I source/src/bot /I "%SDK%\public" /I "%SDK%\public\tier0" /I "%SDK%\public\tier1" /I "%SDK%\public\dlls" /I "%SDK%\public\engine" /I "%SDK%\public\vstdlib" /I "%SDK%\public\mathlib" /I "%SDK%\game_shared" /I "%SDK%\tier1"
 
 echo Compiling insbots sources with MSVC (UTC: %BUILD_TIME%)...
-cl.exe /O2 /Oi- /GS- /GR- /EHs-c- /W3 /MP %DEFS% %INCLUDES% /Fo:build/ /c source/src/crt_stub.cpp source/src/sdk_glue.cpp source/src/cfgvar.cpp source/src/nav.cpp source/src/objective.cpp source/src/voice.cpp source/src/profile.cpp source/src/bot.cpp source/src/insbots.cpp "%SDK%\tier1\convar.cpp"
+cl.exe /O2 /Oi- /GS- /GR- /EHs-c- /W3 /MP %DEFS% %INCLUDES% /Fo:build/ /c source/src/crt_stub.cpp source/src/sdk_glue.cpp source/src/cfgvar.cpp source/src/nav.cpp source/src/objective.cpp source/src/voice.cpp source/src/profile.cpp source/src/bot/bot_util.cpp source/src/bot.cpp source/src/insbots.cpp "%SDK%\tier1\convar.cpp"
 
 if %ERRORLEVEL% NEQ 0 (
     echo Compilation failed!
@@ -140,7 +140,7 @@ echo time
 lib.exe /def:build\msvcrt.def /out:build\msvcrt.lib /machine:x86
 
 echo Linking insbots.dll...
-link.exe /dll /machine:x86 /nodefaultlib /entry:_DllMainCRTStartup /out:insbots.dll build\crt_stub.obj build\sdk_glue.obj build\cfgvar.obj build\nav.obj build\objective.obj build\voice.obj build\profile.obj build\bot.obj build\insbots.obj build\convar.obj "%SDK%\lib\public\tier0.lib" "%SDK%\lib\public\vstdlib.lib" build\msvcrt.lib kernel32.lib
+link.exe /dll /machine:x86 /nodefaultlib /entry:_DllMainCRTStartup /out:insbots.dll build\crt_stub.obj build\sdk_glue.obj build\cfgvar.obj build\nav.obj build\objective.obj build\voice.obj build\profile.obj build\bot_util.obj build\bot.obj build\insbots.obj build\convar.obj "%SDK%\lib\public\tier0.lib" "%SDK%\lib\public\vstdlib.lib" build\msvcrt.lib kernel32.lib
 
 if %ERRORLEVEL% EQU 0 (
     echo SUCCESS: insbots.dll compiled and built successfully!

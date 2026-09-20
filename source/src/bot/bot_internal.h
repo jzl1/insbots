@@ -14,6 +14,56 @@
 #pragma once
 
 #include "bot.h"
+#include "cfgvar.h"
+
+// ---- shared value types ----------------------------------------------------
+// These were defined locally in bot.cpp. They move here because several
+// declarations below need them, and a private header is the right home for
+// types that only bot/ translation units use.
+
+// Per team (1,2) last-known position of each enemy entity index. Bots write
+// what they see; teammates read to react. Cleared by staleness.
+struct Sighting { Vector pos; float time; bool valid; };
+struct TeamIntel { Sighting enemy[66]; };
+
+enum WeaponCombatClass
+{
+    WC_RIFLE = 0,
+    WC_LMG,
+    WC_SNIPER,
+    WC_SHOTGUN,
+    WC_PISTOL,
+    WC_RPG,
+    WC_GRENADE_LAUNCHER,
+    WC_COUNT = INSBOT_COMBAT_CLASS_COUNT
+};
+
+struct WeaponProfile
+{
+    const char   *cls;       // classname suffix (after "weapon_")
+    short         mag;
+    unsigned char modes;
+    short         rpm;        // cyclic rate, rounds/min
+    short         burstRpm;   // rate within a burst (0 => use rpm)
+    float         recoil;
+    unsigned char flags;
+    unsigned char combatClass;
+    CfgVar       *safe_reload_cvar;
+};
+
+struct CombatProfile
+{
+    const char *name;
+    CfgVar *detectRange;
+    CfgVar *engageRange;
+    CfgVar *stopDist;
+    CfgVar *reaction;
+    CfgVar *aimError;
+    CfgVar *aimSpeed;
+    CfgVar *reserveMags;
+    CfgVar *recoilControl;
+    CfgVar *recoilPercent;
+};
 
 // ---- util (bot_util.cpp) ---------------------------------------------------
 void BotDbg(const char *fmt, ...);
