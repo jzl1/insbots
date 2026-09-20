@@ -25,7 +25,7 @@ INC += -I$(SDK)/game_shared -I$(SDK)/tier1
 CFLAGS := $(ARCH) $(DEFS) $(WARN) $(INC) -fPIC
 
 OBJS := $(BUILD)/sdk_glue.o $(BUILD)/cfgvar.o $(BUILD)/nav.o $(BUILD)/objective.o
-OBJS += $(BUILD)/voice.o $(BUILD)/profile.o $(BUILD)/bot_util.o $(BUILD)/bot_entry.o $(BUILD)/bot_cover.o $(BUILD)/bot_core.o $(BUILD)/bot_perceive.o $(BUILD)/bot_roster.o $(BUILD)/bot_haditha.o $(BUILD)/bot_ladder.o $(BUILD)/bot_body.o $(BUILD)/bot_steer.o $(BUILD)/bot_recover.o $(BUILD)/bot_doorway.o $(BUILD)/bot_path.o $(BUILD)/bot.o $(BUILD)/insbots.o $(BUILD)/convar.o
+OBJS += $(BUILD)/voice.o $(BUILD)/profile.o $(BUILD)/bot_util.o $(BUILD)/bot_entry.o $(BUILD)/bot_cover.o $(BUILD)/bot_core.o $(BUILD)/bot_perceive.o $(BUILD)/bot_roster.o $(BUILD)/bot_haditha.o $(BUILD)/bot_ladder.o $(BUILD)/bot_body.o $(BUILD)/bot_steer.o $(BUILD)/bot_recover.o $(BUILD)/bot_doorway.o $(BUILD)/bot_path.o $(BUILD)/bot_weapons.o $(BUILD)/bot.o $(BUILD)/insbots.o $(BUILD)/convar.o
 
 all: $(OUT)
 

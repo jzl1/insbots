@@ -191,6 +191,14 @@ extern WeaponProfile s_wpDefault;
 extern const char *s_BotNamesUSMC[16];
 extern const char *s_BotNamesIraqi[16];
 
+// ---- weapon inventory helpers (bot.cpp / bot_weapons.cpp) -------------------
+// INS_MAX_WEAPONS is the m_hMyWeapons array bound in this Source branch.
+#define INS_MAX_WEAPONS 7
+// Defined in bot.cpp. Both bot_weapons.cpp and the loadout code that still
+// lives in bot.cpp resolve carried weapons through these.
+const WeaponProfile *WeaponFind(const char *name);
+edict_t *InsBotResolveWeaponSlot(char *playerBase, int slot, int *pOutIndex);
+
 // ---- navigation (bot_path.cpp) ---------------------------------------------
 bool   GetSeparatedTransitionPortal(int fromIdx, int toIdx, Vector &mid, Vector &axis,
                                     float &halfSpan, Vector *insideDest);
