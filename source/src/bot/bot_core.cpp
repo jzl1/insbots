@@ -30,6 +30,34 @@ extern CGlobalVars          *gpGlobals;
 extern CfgVar                insbot_join_interval;
 extern CfgVar                insbot_crouch_eye_height;
 
+CInsBot::CInsBot()
+{
+    memset(this, 0, sizeof(*this));
+    m_primaryWeaponName[0] = 0;
+    m_reloadingClass = -1;
+    m_sidearmTemporary = false;
+    m_sniperHoldUntil = 0.0f;
+    m_dropHoldExpired = false;
+    m_setupRoleId = -1;
+    m_customizationWeapon = -1;
+    m_lastCustomizationRoleId = -1;
+    m_lastCustomizationWeapon = -1;
+    m_m203State = 0;
+    m_nextM203 = 0.0f;
+    m_m203Timer = 0.0f;
+    m_m203Pulse = false;
+    m_areaCache = -1;
+    m_areaCacheTime = -1.0f;
+    m_routeRemaining = 3.4e38f;
+    m_captureObj = -1;
+    m_captureTeam = 0;
+    m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
+    m_ladderClimbIdx = -1;
+    m_ladderFromArea = m_ladderToArea = -1;
+    m_sniperArea = -1;
+    m_sniperObj = -1;
+}
+
 bool CInsBot::IsSniper() const
 {
     if (m_wp)

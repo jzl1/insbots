@@ -118,6 +118,16 @@ enum
     WF_EMPTY_RELOAD_ONLY = 16
 };
 
+// WeaponProfile::modes bits. Shared because the profile table lives in
+// bot_loadout.cpp while ThinkAlive (bot_think.cpp) and bot.cpp select the
+// fire mode from these bits.
+enum
+{
+    FM_SEMI = 1,
+    FM_BURST = 2,
+    FM_AUTO = 4
+};
+
 struct WeaponProfile
 {
     const char   *cls;       // classname suffix (after "weapon_")
