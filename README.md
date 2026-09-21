@@ -96,3 +96,11 @@ Players can lead and direct AI squadmates using in-game chat or the SourceMod or
 | `!mark` | Trace an eye-ray to mark a physical world surface for covering fire. |
 | `!request` / `ins_request_slot` | Request a class slot currently occupied by an AI bot. |
 
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+Copyright (c) 2026 jzl1
+
