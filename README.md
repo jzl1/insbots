@@ -6,7 +6,7 @@ AI bot players for *Insurgency: Modern Infantry Combat* (Source 2006 / Episode 1
 
 ## Description
 
-**InsBots** is a standalone C++ Metamod:Source server plugin paired with a SourceMod companion plugin that brings full-featured, tactical AI bot players to *Insurgency: Modern Infantry Combat*.
+**InsBots** is a standalone C++ Valve Server Plugin (VSP) paired with an optional SourceMod companion plugin that brings full-featured, tactical AI bot players to *Insurgency: Modern Infantry Combat*. The core plugin loads directly from `addons/insbots.vdf` and does not require MetaMod:Source.
 
 ### Key Features
 * **Realistic Tactical Combat:** Threat perception (vision and hearing), stance transitions (standing, crouching), cyclic fire control, and tactical cover-seeking.
