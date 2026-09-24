@@ -17,6 +17,8 @@
 #include "engine/IEngineTrace.h"
 #include "engine/ivdebugoverlay.h"
 #include "engine/IEngineSound.h"
+#include "shake.h"                 // ShakeCommand_t, needed by IEffects.h
+#include "IEffects.h"              // game_shared/, for g_pEffects
 #include "convar.h"
 #include "icvar.h"
 
@@ -28,6 +30,7 @@
 #include "profile.h"
 #include "server_class.h"
 #include "dt_send.h"
+#include "turret.h"
 #include "igameevents.h"
 #include "linux_offsets.h"
 
@@ -84,6 +87,11 @@ ICvar                *g_pCVar = 0;
 CGlobalVars          *gpGlobals = 0;
 IVDebugOverlay       *debugoverlay = 0;
 extern IEngineSound  *enginesound;   // defined in voice.cpp, set in Load()
+
+// Defined here, declared extern in turret.cpp. Optional, like enginesound: a
+// missing IEffects degrades the turret to damage + sound rather than failing
+// the load.
+IEffects             *g_pEffects = 0;
 static bool  s_bLevelActive = false;
 static float s_flQuotaStartTime = 0.0f;
 static float s_flNextQuotaCheck = 0.0f;
@@ -775,6 +783,11 @@ if (!_stricmp(sub, "coverocc")) { Cmd_CoverOcc(); return; }
         Msg("[insbots] Cleared all role reservations\n");
         return;
     }
+    if (!_stricmp(sub, "turret"))
+    {
+        TurretHandleCommand(argc);
+        return;
+    }
     Msg("[insbots] unknown subcommand '%s' (try: insbot help)\n", sub);
 }
 static ConCommand insbot_cmd("insbot", Cmd_InsBot, "InsBots control: insbot help");
@@ -793,6 +806,9 @@ public:
         g_pCVar = (ICvar *)interfaceFactory(VENGINE_CVAR_INTERFACE_VERSION, 0);
         debugoverlay = (IVDebugOverlay *)interfaceFactory(VDEBUG_OVERLAY_INTERFACE_VERSION, 0); // optional
         enginesound = (IEngineSound *)interfaceFactory(IENGINESOUND_SERVER_INTERFACE_VERSION, 0); // optional (bot voice)
+        // Optional, like enginesound: a missing IEffects degrades the turret to
+        // damage + sound only rather than failing the load.
+        g_pEffects = (IEffects *)interfaceFactory(IEFFECTS_INTERFACE_VERSION, 0);
         playerinfomanager = (IPlayerInfoManager *)gameServerFactory(INTERFACEVERSION_PLAYERINFOMANAGER, 0);
         botmanager = (IBotManager *)gameServerFactory(INTERFACEVERSION_PLAYERBOTMANAGER, 0);
         server = (IServerGameDLL *)gameServerFactory("ServerGameDLL006", 0);
@@ -845,6 +861,26 @@ public:
 
                 int offset_clip = FindSendPropOffset(pClass->m_pTable, "m_iClip");
                 if (offset_clip >= 0 && s_offset_m_iClip1 == -1) s_offset_m_iClip1 = offset_clip;
+
+                if (strcmp(pClass->GetName(), "CPropVehicleDriveable") == 0 ||
+                    strcmp(pClass->GetName(), "CPropVehicle") == 0)
+                {
+                    // Resolved BY NAME so a future build that moves the member
+                    // fails closed (offset stays -1) instead of reading the
+                    // wrong dword. Design spec section 3.3.
+                    int off = FindSendPropOffset(pClass->m_pTable, "m_hPlayer");
+                    if (off >= 0 && g_TurretOffsetDriver == -1)
+                    {
+                        g_TurretOffsetDriver = off;
+                        Msg("[insbots] Found m_hPlayer at offset %d\n", off);
+                    }
+                    off = FindSendPropOffset(pClass->m_pTable, "m_flPoseParameter");
+                    if (off >= 0 && g_TurretOffsetPoseParameter == -1)
+                    {
+                        g_TurretOffsetPoseParameter = off;
+                        Msg("[insbots] Found m_flPoseParameter at offset %d\n", off);
+                    }
+                }
 
                 pClass = pClass->m_pNext;
             }
@@ -1160,6 +1196,7 @@ public:
             }
         }
         g_Bots.FrameUpdate(simulating);
+        g_Turrets.FrameUpdate(simulating);
         InsProf_FrameEnd();
         InsProf_Tick();
     }
@@ -1169,6 +1206,13 @@ public:
         s_bLevelActive = false;
         g_RoundFrozen = s_bRoundFreezeEventsReady;
         g_HoldQuotaJoins = false;
+        // Drop every turret: the entities they reference are about to be freed,
+        // and a stale entry would otherwise be purged one-per-frame by
+        // CTurret::Validate() the next time the map loads. The registry is keyed
+        // by entindex, which is NOT stable across a level, so it must never
+        // survive one.
+        g_Turrets.RemoveAll();
+        TurretOverridesClear();
         g_Bots.LevelShutdown();
     }
 

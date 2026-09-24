@@ -798,11 +798,20 @@ private:
 
 extern void UpdateSmokeGrenades();
 
+// Smoke occlusion, exposed so the Humvee auto-turret applies the SAME rule the
+// bots do (bot_perceive.cpp:424) instead of growing a second copy of the 140u
+// threshold. One definition, two consumers.
+extern bool LineGoesThroughSmoke(const Vector &from, const Vector &to);
+
 extern CBotRoster g_Bots;
 extern int s_offset_flNextAttack;
 extern int s_offset_m_IronsightsState;
 extern int s_offset_angEyeAngles0;
 extern int s_offset_angEyeAngles1;
+
+// Humvee auto-turret offsets, resolved by name in insbots.cpp Load().
+extern int g_TurretOffsetDriver;
+extern int g_TurretOffsetPoseParameter;
 
 // learned-bad-link persistence (implemented in bot.cpp)
 void InsBots_SaveLearn();

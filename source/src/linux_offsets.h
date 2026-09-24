@@ -32,11 +32,34 @@ enum InsBotsLinuxOffset
 
     INS_LINUX_MUZZLE_ORIGIN           = 0x10BC,
     INS_LINUX_MUZZLE_ANGLES           = 0x10C8,
-    INS_LINUX_RPG_PRIMARY_ATTACK_SLOT = 213
+    INS_LINUX_RPG_PRIMARY_ATTACK_SLOT = 213,
+
+    // ---- Humvee auto-turret (see turret_abi.h) ----------------------------
+    // Measured from the shipped server_i486.so and confirmed live on srcds.
+    INS_LINUX_TURRET_OTD_SLOT          = 54,        // CBaseEntity::OnTakeDamage
+    INS_LINUX_TURRET_ACCEPTINPUT_SLOT  = 35,        // CBaseEntity::AcceptInput
+    INS_LINUX_TURRET_ALLOCPOOLEDSTRING = 0x44256E   // _Z17AllocPooledStringPKc
 };
 
 #define INSBOTS_LINUX_SERVER_SHA256 \
     "7afe49221a6f15d583261d9f019b706d88160ad67e6ca1141f5990f7152ffe70"
 #endif
+
+// Windows values. These are NOT offsets into a Linux layout - they are the
+// Windows equivalents, measured from the shipped server.dll. They live outside
+// the _LINUX guard because turret_abi.h consumes them on both platforms and
+// picks the right one.
+//
+//   OnTakeDamage slot 53        - read from the engine's own TakeDamage call
+//                                 site, then confirmed live on Windows srcds.
+//   AcceptInput  slot 34        - derived by walking the CBaseEntity vtable
+//                                 through RTTI, cross-checked against
+//                                 SourceMod's published gamedata.
+//   AllocPooledString 0x1007DC10- derived via the dumpgamestringtable ->
+//                                 CGameStringPool route; see the shell-eject
+//                                 verification doc section 5.1.
+#define INSBOTS_WIN_TURRET_OTD_SLOT          53
+#define INSBOTS_WIN_TURRET_ACCEPTINPUT_SLOT  34
+#define INSBOTS_WIN_TURRET_ALLOCPOOLEDSTRING 0x1007DC10ul
 
 #endif

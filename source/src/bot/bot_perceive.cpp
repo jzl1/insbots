@@ -423,6 +423,14 @@ bool CInsBot::FindVisibleTargetPoint(edict_t *target, const Vector &origin,
 // from the bot's eye approximation to targetPt right now.
 bool CInsBot::LineGoesThroughSmoke(const Vector &from, const Vector &to) const
 {
+    return ::LineGoesThroughSmoke( from, to );
+}
+
+// Free-function form of the same test, for consumers that are not a CInsBot
+// (the Humvee auto-turret). The member above delegates here so there is exactly
+// one 140u threshold and one loop in the binary.
+bool LineGoesThroughSmoke(const Vector &from, const Vector &to)
+{
     for (int k = 0; k < g_NumSmokeGrenades; k++)
     {
         float distToSmoke = DistanceToLineSegment(g_SmokeGrenades[k], from, to);

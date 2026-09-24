@@ -22,10 +22,18 @@ INC += -I$(SRC)/bot
 INC += -I$(SDK)/public -I$(SDK)/public/tier0 -I$(SDK)/public/tier1 -I$(SDK)/public/dlls
 INC += -I$(SDK)/public/engine -I$(SDK)/public/vstdlib -I$(SDK)/public/mathlib
 INC += -I$(SDK)/game_shared -I$(SDK)/tier1
-CFLAGS := $(ARCH) $(DEFS) $(WARN) $(INC) -fPIC
+# game_shared/IEffects.h (used by turret.cpp) pulls in predictable_entity.h,
+# which needs sendproxy.h. That header lives in $(SDK)/dlls, not public/dlls.
+INC += -I$(SDK)/dlls
+# -MMD -MP emit a .d file per object listing the headers it included, so a
+# change to a header rebuilds every object that consumes it. Without this the
+# pattern rule below depends ONLY on the .cpp, and a header-only edit is
+# silently ignored: that is exactly how a fix to turret_math.h produced a
+# "clean" build that still contained the old code.
+CFLAGS := $(ARCH) $(DEFS) $(WARN) $(INC) -fPIC -MMD -MP
 
 OBJS := $(BUILD)/sdk_glue.o $(BUILD)/cfgvar.o $(BUILD)/nav.o $(BUILD)/objective.o
-OBJS += $(BUILD)/voice.o $(BUILD)/profile.o $(BUILD)/bot_util.o $(BUILD)/bot_entry.o $(BUILD)/bot_loadout.o $(BUILD)/bot_cover.o $(BUILD)/bot_core.o $(BUILD)/bot_perceive.o $(BUILD)/bot_roster.o $(BUILD)/bot_haditha.o $(BUILD)/bot_ladder.o $(BUILD)/bot_body.o $(BUILD)/bot_steer.o $(BUILD)/bot_recover.o $(BUILD)/bot_doorway.o $(BUILD)/bot_path.o $(BUILD)/bot_weapons.o $(BUILD)/bot_squad.o $(BUILD)/bot_think.o $(BUILD)/insbots.o $(BUILD)/convar.o
+OBJS += $(BUILD)/voice.o $(BUILD)/profile.o $(BUILD)/bot_util.o $(BUILD)/bot_entry.o $(BUILD)/bot_loadout.o $(BUILD)/bot_cover.o $(BUILD)/bot_core.o $(BUILD)/bot_perceive.o $(BUILD)/bot_roster.o $(BUILD)/bot_haditha.o $(BUILD)/bot_ladder.o $(BUILD)/bot_body.o $(BUILD)/bot_steer.o $(BUILD)/bot_recover.o $(BUILD)/bot_doorway.o $(BUILD)/bot_path.o $(BUILD)/bot_weapons.o $(BUILD)/bot_squad.o $(BUILD)/bot_think.o $(BUILD)/turret.o $(BUILD)/insbots.o $(BUILD)/convar.o
 
 all: $(OUT)
 
@@ -46,5 +54,7 @@ $(OUT): $(OBJS)
 
 clean:
 	rm -rf $(BUILD) $(OUT)
+
+-include $(OBJS:.o=.d)
 
 .PHONY: all clean

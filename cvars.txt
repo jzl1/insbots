@@ -326,6 +326,34 @@ insbot set voice_combat              "1" // combat callouts: engaging, reloading
 insbot set voice_interval             "4.0" // minimum seconds between one bot's callouts (anti-spam)
 insbot set voice_objective            "1" // objective/support callouts: securing, moving up, need backup
 
+// =================== HUMVEE AUTO-TURRET ===================
+// The Humvee's M249 is unmanned and automatic. A Humvee is spawned inert; the
+// turret arms the first time a player on a play team (1 or 2) sits in the
+// driver seat, and that player's team owns it from then on. Leaving the vehicle
+// does not disarm it, and boarding an enemy turret does not steal it.
+//
+// These settings are read live. A per-turret override can be set with
+//   insbot turret set <entindex> <name> <value>
+// and "all" writes the global instead:
+//   insbot turret set all <name> <value>
+//
+// turret_damage is per BULLET and the turret fires in bursts, so sustained
+// damage is much higher than a single hit. The real M249 round in this mod does
+// about 151 damage; the default of 50 is a deliberate playtest value, not a
+// simulation of the weapon. See docs/humvee-turret-damage-audit.md.
+
+insbot set turret_enabled              "1"     // master switch for the Humvee auto-turret (0=off)
+insbot set turret_aim_speed            "90"    // turret traverse speed (deg/s)
+insbot set turret_aim_error            "4.0"   // turret aim error in degrees (0=perfect)
+insbot set turret_engage_range         "1500"  // turret firing gate distance (units)
+insbot set turret_damage               "50"    // turret damage per bullet
+insbot set turret_burst_time           "0.30"  // turret firing burst length (s)
+insbot set turret_burst_pause          "0.45"  // turret pause between bursts (s)
+insbot set turret_scan_speed           "20"    // turret idle scan speed (deg/s)
+insbot set turret_fire_tolerance_yaw    "5.0"  // turret fire gate: max yaw error (deg)
+insbot set turret_fire_tolerance_pitch  "4.0"  // turret fire gate: max pitch error (deg)
+insbot set turret_spread               "0.230" // turret bullet spread cone (deg; M249 real value)
+
 // =================== ENGINE OFFSETS (ADVANCED) ===================
 
 // DO NOT COPY THIS SECTION INTO YOUR SERVER CONFIG, AND DO NOT CHANGE THESE
