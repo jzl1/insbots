@@ -44,6 +44,10 @@
 // ---- engine/game interface pointers ----------------------------------------
 IVEngineServer       *engine = 0;
 IEngineTrace         *enginetrace = 0;
+// Server-side model info. Used by the turret to resolve its two pose-parameter
+// INDICES BY NAME out of the loaded .mdl rather than hardcoding them; see the
+// block comment on CTurret::WritePose.
+IVModelInfo          *modelinfo = 0;
 IPlayerInfoManager   *playerinfomanager = 0;
 IBotManager          *botmanager = 0;
 IServerGameDLL       *server = 0;
@@ -806,6 +810,9 @@ public:
         g_pCVar = (ICvar *)interfaceFactory(VENGINE_CVAR_INTERFACE_VERSION, 0);
         debugoverlay = (IVDebugOverlay *)interfaceFactory(VDEBUG_OVERLAY_INTERFACE_VERSION, 0); // optional
         enginesound = (IEngineSound *)interfaceFactory(IENGINESOUND_SERVER_INTERFACE_VERSION, 0); // optional (bot voice)
+        // Optional: without it the turret cannot resolve its pose indices and
+        // degrades to "gun does not move" rather than writing a wrong slot.
+        modelinfo = (IVModelInfo *)interfaceFactory(VMODELINFO_SERVER_INTERFACE_VERSION, 0);
         // Optional, like enginesound: a missing IEffects degrades the turret to
         // damage + sound only rather than failing the load.
         g_pEffects = (IEffects *)interfaceFactory(IEFFECTS_INTERFACE_VERSION, 0);
@@ -822,6 +829,8 @@ public:
         // unloaded DLL.
 
         Msg("[insbots] IServerGameDLL: %p\n", server);
+        Msg("[insbots] IVModelInfo: %p%s\n", modelinfo,
+            modelinfo ? "" : "  (absent - the turret cannot resolve its pose parameters)");
         if (server)
         {
             ServerClass *pClass = server->GetAllServerClasses();

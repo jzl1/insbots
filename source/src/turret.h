@@ -76,6 +76,22 @@ public:
     // shot every 45 s).
     float  m_residualYaw;
     float  m_residualPitch;
+    // Pose-parameter indices resolved from the MODEL by name, not hardcoded.
+    // -1 means "not yet resolved", and WritePose() then does nothing rather
+    // than writing to a slot that belongs to the engine's own vehicle
+    // parameters.
+    //
+    // This must be a lookup rather than a constant. The shipped model declares
+    // eleven ENGINE-driven parameters (four wheel heights, four wheel spins,
+    // steer, action, gauge) at indices 0..10, and the turret's two are appended
+    // at 11 and 12. Writing 0 and 1 - which an earlier version of this code
+    // did - writes into `vehicle_wheel_fl_height` / `vehicle_wheel_fr_height`,
+    // the two parameters CFourWheelVehiclePhysics::UpdateVehicle writes every
+    // frame. That fights the engine for the suspension and is exactly the kind
+    // of fault that shows up as glitching wheels rather than as a compile or
+    // runtime error.
+    int    m_poseYaw;
+    int    m_posePitch;
     TurretState m_state;
 };
 

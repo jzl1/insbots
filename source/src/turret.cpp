@@ -37,6 +37,8 @@
 #include "edict.h"
 #include "const.h"                 // ENT_ENTRY_MASK, INVALID_EHANDLE_INDEX
 #include "tier0/dbg.h"
+#include "engine/ivmodelinfo.h"    // IVModelInfo::GetStudiomodel, for the pose lookup
+#include "studio.h"                // studiohdr_t / mstudioposeparamdesc_t (ivmodelinfo.h only forward-declares)
 
 #include <string.h>
 #include <stdlib.h>      // rand(), atoi(), atof()
@@ -45,6 +47,7 @@
 
 // ---- engine globals owned by insbots.cpp -----------------------------------
 extern IVEngineServer      *engine;
+extern IVModelInfo         *modelinfo;       // defined in insbots.cpp; optional
 extern IPlayerInfoManager  *playerinfomanager;
 extern IEngineTrace        *enginetrace;
 extern CGlobalVars         *gpGlobals;
@@ -283,6 +286,8 @@ CTurret::CTurret()
     m_aimErrorPitch = 0.0f;
     m_residualYaw = 0.0f;
     m_residualPitch = 0.0f;
+    m_poseYaw = -1;
+    m_posePitch = -1;
     m_state = TURRET_IDLE;
 }
 
@@ -307,6 +312,8 @@ void CTurret::Reset( int entindex, int team )
     m_aimErrorPitch = 0.0f;
     m_residualYaw = 0.0f;
     m_residualPitch = 0.0f;
+    m_poseYaw = -1;
+    m_posePitch = -1;
     m_state = TURRET_IDLE;
 }
 
@@ -1089,25 +1096,44 @@ static ICollideable *TurretCollideable( CTurret *t )
 // forward. Using the plan's value put the muzzle ~83 units ahead of and 10
 // units below the real ring, which is why the firing trace was inconsistent.
 //
-// MUZZLE_FORWARD is the ring-centre to muzzle-tip distance along the barrel.
-// This is the ONE value here that is still an estimate: the shipped model has
-// no `muzzle` attachment to read (verified with
-// temp/humvee_slot_probe/verify_humvee_attachments.py), so it cannot be
-// confirmed until the model rebuild lands. Task 10 records the visual result as
-// NOT VERIFIED, and the design's fallback is to read the rebuilt attachment.
-#define INS_TURRET_PIVOT_LOCAL_X   ( -0.50f)
-#define INS_TURRET_PIVOT_LOCAL_Y   (  3.22f)
-#define INS_TURRET_PIVOT_LOCAL_Z   ( 86.23f)
-#define INS_TURRET_MUZZLE_FORWARD  ( 62.0f)
+// PIVOT is the turret RING centre; PITCH_PIVOT is the elevation hinge the gun
+// rotates about. Both are MEASURED from the shipped model's own bone table
+// (temp/humvee_turret_rig/check_muzzle_math.py prints them), in the vehicle's
+// LOCAL space:
+//
+//     ring        (-0.505,   3.215,  86.230)   [x lateral, y fore/aft, z up]
+//     pitch hinge (-0.505,  21.550, 103.800)
+//     muzzle tip  (-0.941,  35.234, 106.380)
+//
+// The muzzle must be computed FROM THE PITCH HINGE, not the ring. The gun
+// rotates about the hinge, so `ring + dir * |ring->muzzle|` is only correct at
+// one elevation: the two vectors differ by ~21 degrees, which at 1500 units is
+// a visibly misplaced tracer origin. `hinge + dir * |hinge->muzzle|` is correct
+// at every elevation, because the hinge is the fixed point of the rotation and
+// the barrel direction from it IS the aim direction once the pose levels the
+// gun (which the rebuilt model's poses do - see gen_turret.py's REST_ELEV).
+//
+// MUZZLE_FORWARD was 62.0, a guess made while no `muzzle` attachment existed.
+// The rebuilt model has one, and the measured hinge-to-muzzle distance is
+// 13.93 units.
+#define INS_TURRET_PIVOT_LOCAL_X        ( -0.50f)
+#define INS_TURRET_PIVOT_LOCAL_Y        (  3.22f)
+#define INS_TURRET_PIVOT_LOCAL_Z        ( 86.23f)
+#define INS_TURRET_PITCH_PIVOT_LOCAL_Y  ( 21.55f)
+#define INS_TURRET_PITCH_PIVOT_LOCAL_Z  (103.80f)
+#define INS_TURRET_MUZZLE_FORWARD       ( 13.93f)
 
 static Vector TurretMuzzlePosition( CTurret *t )
 {
     ICollideable *col = TurretCollideable( t );
     if (!col) return Vector( 0, 0, 0 );
 
+    // The elevation hinge, NOT the ring: the gun rotates about this point, so it
+    // is the fixed origin the muzzle direction is measured from. The lateral
+    // offset is shared with the ring - the model puts both on x = -0.505.
     Vector pivotLocal( INS_TURRET_PIVOT_LOCAL_X,
-                       INS_TURRET_PIVOT_LOCAL_Y,
-                       INS_TURRET_PIVOT_LOCAL_Z );
+                       INS_TURRET_PITCH_PIVOT_LOCAL_Y,
+                       INS_TURRET_PITCH_PIVOT_LOCAL_Z );
 
     // Vehicle-local -> world, using the same entity transform the engine uses.
     QAngle vehAngles = col->GetCollisionAngles();
@@ -1131,13 +1157,36 @@ static Vector TurretMuzzlePosition( CTurret *t )
     //
     // CONVENTION - this must match what Aim() produces and what WritePose()
     // stores, because m_flPoseParameter is a LOCAL rotation relative to the
-    // hull. The mesh's front is -Y (see the spawner's facing notes), so:
-    //   yaw 0    -> (0,-1,0), straight out over the bonnet
-    //   yaw +90  -> (+1,0,0), local +X
-    //   pitch    -> negative is UP (the design's +47 "roof" stop is a
-    //               DEPRESSION limit, so elevation is the negative direction)
-    Vector dirLocal(  sinf( yawRad ) * cosf( pitchRad ),
-                     -cosf( yawRad ) * cosf( pitchRad ),
+    // hull.
+    //
+    // Aim() computes `localYaw = worldYaw - hullYaw - 90`, so the barrel's
+    // world bearing is `localYaw + hullYaw + 90`. At localYaw = 0 that is
+    // bearing 90, i.e. the entity's LOCAL +Y - and that is where this model's
+    // barrel actually points at rest: the M249's geometry sits 32 units
+    // forward of the turret ring and only 8.6 behind it, and the QC puts the
+    // bonnet at model +Y. The FOV test agrees independently:
+    // `yawRad = m_curYaw + hullYaw + 90` with `fwd = (cos, sin)`.
+    //
+    // So, for a plugin yaw of `theta`:
+    //   yaw 0     -> (0,+1,0), out over the bonnet
+    //   yaw +90   -> (-1,0,0), local -X
+    //   yaw -90   -> (+1,0,0), local +X
+    //   pitch     -> positive is DOWN: +20 depresses, -55 elevates
+    //
+    // THIS WAS WRONG. It previously read `(sin, -cos)`, which is the mirror of
+    // the above: at yaw 0 it pointed local -Y, i.e. 180 degrees out from both
+    // Aim() and the FOV test. The comment justifying it ("the mesh's front is
+    // -Y") came from the spawner's facing note, which is about where the ENGINE
+    // expects a vehicle's front to sit for steering purposes - not about where
+    // this mesh's barrel points. The error put the computed muzzle ~62 units
+    // behind the ring, so the tracer, the muzzle flash and the LOS trace origin
+    // all sat inside or behind the cab. Damage was unaffected because the
+    // firing trace is drawn from the target side.
+    //
+    // See temp/humvee_turret_rig/yaw_convention.py, which derives this from the
+    // gun geometry and the compiled model rather than from prose.
+    Vector dirLocal( -sinf( yawRad ) * cosf( pitchRad ),
+                      cosf( yawRad ) * cosf( pitchRad ),
                      -sinf( pitchRad ) );
 
     float dx, dy, dz;
@@ -1416,19 +1465,28 @@ void CTurret::Traverse( float dt )
 // player. The values are written as NORMALISED 0..1 controls, matching what
 // Studio_SetPoseParameter stores and what the client's bone solver reads.
 //
-// The parameter indices come from the rebuilt model's declaration order.
+// THE INDICES ARE RESOLVED FROM THE MODEL BY NAME, NOT HARDCODED.
 //
-// The plan said indices 11 and 12, reasoning that "the current model declares
-// 11 parameters and the two new ones are appended". That is wrong: measured
-// with temp/humvee_slot_probe/verify_humvee_attachments.py, the shipped model
-// declares numposeparameters = 0 (it has 11 BONES - turret_yaw and gun_pitch
-// among them - and the plan confused the two tables). The rebuild's two new
-// pose parameters are therefore the FIRST ones declared, at indices 0 and 1.
+// The shipped model declares ELEVEN pose parameters and all eleven belong to
+// the engine's own vehicle physics: four wheel heights (0..3), four wheel spins
+// (4..7), steer (8), action (9) and gauge (10). CFourWheelVehiclePhysics
+// resolves those by name and writes them every frame. The turret's two are
+// appended by the model rebuild at indices 11 and 12.
 //
-// Writing an index the model does not declare is harmless rather than fatal -
-// the network array is a fixed 24 slots and unused ones are simply never read
-// by the client's bone solver - so this fails safe if the rebuild renumbers.
-// Task 10 records the visual result as NOT VERIFIED until the rebuild lands.
+// An earlier version of this file wrote slots 0 and 1, on the belief that the
+// model declared no pose parameters at all. That belief came from reading the
+// wrong studiohdr_t offset: the probe used +0xF8, while numlocalposeparameters
+// is at +0x12C (public/studio.h, studiohdr_t). The true count is 11, so writing
+// 0 and 1 meant writing `vehicle_wheel_fl_height` and `vehicle_wheel_fr_height`
+// - the two parameters the engine is simultaneously driving to hold the front
+// suspension up. Nothing crashed and nothing failed to build; the visible
+// result is wheels fighting the plugin.
+//
+// Resolving by name means the code cannot be broken by the rebuild renumbering
+// its parameters, and it also fails SAFE on a model that has not been rebuilt:
+// if `vehicle_turret_yaw` is absent the lookup returns -1 and WritePose() does
+// nothing, instead of clobbering whichever parameter happens to sit at the
+// hardcoded index.
 void CTurret::WritePose()
 {
     if (g_TurretOffsetPoseParameter < 0) return;
@@ -1439,14 +1497,55 @@ void CTurret::WritePose()
     void *pVehicle = unk->GetBaseEntity();
     if (!pVehicle) return;
 
+    // Resolve once per turret. A model swap or a level change resets the turret
+    // (Reset() clears these), so a stale index cannot survive.
+    if (m_poseYaw < 0 || m_posePitch < 0)
+    {
+        if (!modelinfo) return;
+        IServerEntity *se = e->GetIServerEntity();
+        if (!se) return;
+        const model_t *mod = modelinfo->GetModel( se->GetModelIndex() );
+        if (!mod) return;
+        const studiohdr_t *hdr = modelinfo->GetStudiomodel( mod );
+        if (!hdr) return;
+
+        int yawIdx = -1, pitchIdx = -1;
+        const int n = hdr->numlocalposeparameters;
+        for (int i = 0; i < n; ++i)
+        {
+            const char *name = hdr->pLocalPoseParameter( i )->pszName();
+            if (!name) continue;
+            if (!strcmp( name, "vehicle_turret_yaw" ))   yawIdx   = i;
+            if (!strcmp( name, "vehicle_turret_pitch" )) pitchIdx = i;
+        }
+
+        if (yawIdx < 0 || pitchIdx < 0)
+        {
+            // The model has not been rebuilt, or is a different vehicle. Stay
+            // silent after the first report so this cannot spam per frame.
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                Msg("[insbots] turret: model '%s' declares no vehicle_turret_yaw/pitch "
+                    "pose parameters - the gun cannot move. Rebuild the model.\n",
+                    EntityModelName( e ));
+            }
+            return;
+        }
+
+        m_poseYaw   = yawIdx;
+        m_posePitch = pitchIdx;
+        Msg("[insbots] turret: pose parameters resolved - yaw=%d pitch=%d (%d declared)\n",
+            m_poseYaw, m_posePitch, n);
+    }
+
     float *pose = (float *)((char *)pVehicle + g_TurretOffsetPoseParameter);
 
     // Declared ranges must match the QC's $poseparameter lines exactly.
     const float kYawStart   = -180.0f, kYawEnd   =  180.0f;
     const float kPitchStart =  -55.0f, kPitchEnd =   20.0f;
-    const int   kYawIndex   = 0;
-    const int   kPitchIndex = 1;
 
-    pose[kYawIndex]   = InsTurretNormPose( m_curYaw,   kYawStart,   kYawEnd );
-    pose[kPitchIndex] = InsTurretNormPose( m_curPitch, kPitchStart, kPitchEnd );
+    pose[m_poseYaw]   = InsTurretNormPose( m_curYaw,   kYawStart,   kYawEnd );
+    pose[m_posePitch] = InsTurretNormPose( m_curPitch, kPitchStart, kPitchEnd );
 }
