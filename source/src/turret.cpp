@@ -100,7 +100,6 @@ CTurretRegistry g_Turrets;
 // ---------------------------------------------------------------------------
 static ICollideable   *TurretCollideable( CTurret *t );
 static Vector          TurretMuzzlePosition( CTurret *t );
-static QAngle          TurretMuzzleAngles( CTurret *t );
 static void            TurretApplyDamage( CTurret *t, int targetIdx,
                                           const Vector &dir, float dmg );
 static void           *TurretGetVtableSlot( void *pObject, int slot );
@@ -273,8 +272,12 @@ CfgVar insbot_turret_aim_speed    ("turret_aim_speed",    "90",   "turret traver
 CfgVar insbot_turret_aim_error    ("turret_aim_error",    "4.0",  "turret aim error in degrees (0=perfect)");
 CfgVar insbot_turret_engage_range ("turret_engage_range", "1500", "turret firing gate distance (units)");
 CfgVar insbot_turret_damage       ("turret_damage",       "50",   "turret damage per bullet (real M249 is 151.2; see design section 15)");
-CfgVar insbot_turret_burst_time   ("turret_burst_time",   "0.30", "turret firing burst length (s)");
-CfgVar insbot_turret_burst_pause  ("turret_burst_pause",  "0.45", "turret pause between bursts (s)");
+// NOTE: turret_burst_time and turret_burst_pause were REMOVED here. The turret
+// is automatic now - see the note in Fire(). They had been copied from the
+// bots' own `burst_time` / `burst_pause`, which are dead settings (declared but
+// never read), so the turret was pacing itself off a mechanism that no longer
+// existed. Do not reintroduce a burst cycle without a reason that comes from
+// the turret's own design rather than from the bots'.
 CfgVar insbot_turret_scan_speed   ("turret_scan_speed",   "20",   "turret idle scan speed (deg/s)");
 
 // Fire-gate tolerances and spread. The design calls these tunable but not
@@ -299,8 +302,6 @@ CTurret::CTurret()
     m_desiredYaw = 0.0f;
     m_desiredPitch = 0.0f;
     m_nextAcquire = 0.0f;
-    m_burstUntil = 0.0f;
-    m_pauseUntil = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
     m_rejectsLogged = 0;
@@ -328,8 +329,6 @@ void CTurret::Reset( int entindex, int team )
     m_desiredYaw = 0.0f;
     m_desiredPitch = 0.0f;
     m_nextAcquire = 0.0f;
-    m_burstUntil = 0.0f;
-    m_pauseUntil = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
     m_rejectsLogged = 0;
@@ -670,22 +669,74 @@ static bool TurretHullInverted( CTurret *t )
     return uz < cosf( 60.0f * (3.14159265f / 180.0f) );
 }
 
-static void TurretMuzzleFlash( const Vector &pos, const QAngle &ang )
+// The visible muzzle signature.
+//
+// WHY THIS IS NOT MuzzleFlash() ANY MORE - measured, not assumed.
+//
+// The plugin used to call g_pEffects->MuzzleFlash(pos, ang, 1.0f, 0). That
+// call is correctly formed and lands on the right vtable slot, but in the
+// SHIPPED CLIENT the method is an empty function:
+//
+//     CEffectsClient::MuzzleFlash   0x1021FB30   ret 0x10   <- 4 args, no body
+//     CEffectsClient::Beam          0x1021FB20   ret 0x40   <- likewise
+//
+// (Resolved through the client's own RTTI: .?AVCEffectsClient@@ ->
+// CompleteObjectLocator -> vtable -> ILT thunk -> body. The argument counts
+// match the declared signatures, which cross-checks the mapping.) The server
+// half is real - CEffectsServer::MuzzleFlash does build and send a
+// TE_MuzzleFlash - but the client's C_TEMuzzleFlash::PostDataUpdate hands it
+// straight to that empty stub, so nothing is ever drawn. No value of `type`
+// or `scale` can change that.
+//
+// Sparks() IS real on both sides: the server emits TE_Sparks, and the client
+// implements it as FX_ElectricSpark - a burst of bright trail particles that
+// respects gravity. Fired along the barrel from the muzzle attachment it is
+// the closest thing to a muzzle flash this client can actually draw, and it
+// is the same call the game DLL itself uses for weapon hits
+// (basecombatcharacter.cpp:2072: g_pEffects->Sparks( pos, 2, 2 )).
+//
+// Particle budget: FX_ElectricSpark creates nMagnitude^2 * [2,4] particles
+// with a lifetime of nMagnitude * [1,2] seconds, and the turret fires at
+// 800 RPM, so magnitude 2 is 8-16 particles living 2-4 s. At 13 shots/second
+// that is a few hundred live particles while a target is held. Magnitude 1
+// would quarter it; drop to 1 here if the particle count ever matters.
+static void TurretMuzzleFlash( const Vector &pos, const Vector &dir )
 {
-    if (g_pEffects) g_pEffects->MuzzleFlash( pos, ang, 1.0f, 0 );
+    if (!g_pEffects) return;
+    g_pEffects->Sparks( pos, 2, 2, &dir );
 }
 
+// The tracer is DEAD on this client, for the same reason the muzzle flash was.
+//
+// g_pEffects->Beam() is correctly declared and reaches the right slot, but the
+// shipped client's implementation is empty:
+//
+//     CEffectsClient::Beam   0x1021FB20   ret 0x40   <- 16 args, no body
+//
+// So there is nothing to fix on the plugin side: the beam can never be drawn.
+// Rather than keep a call that provably does nothing, the shot now reuses the
+// one path that IS live - a short, tight Sparks burst along the flight line.
+// Sparks' direction argument biases the particle velocity, so a burst at the
+// muzzle already throws material down the barrel; this adds a second, much
+// smaller burst partway along the trace to suggest the round in flight.
+//
+// If a real tracer is ever wanted, it has to come from a client-side change
+// or from an effect the client genuinely implements - see
+// temp/humvee_turret_rig/RESULTS.md.
 static void TurretTracer( const Vector &from, const Vector &to )
 {
     if (!g_pEffects) return;
-    // The real signature (game_shared/IEffects.h) is 16 parameters and takes
-    // the frame/fade/noise values as bytes, not floats. A zero model index
-    // makes the engine use the default laser beam sprite.
-    //   Beam( start, end, modelIndex, haloIndex, frameStart, frameRate,
-    //         life, width, endWidth, fadeLength, noise, r, g, b, brightness,
-    //         speed )
-    g_pEffects->Beam( from, to, 0, 0, 0, 0, 0.05f, 1, 1, 0, 0,
-                      255, 255, 255, 255, 0 );
+    Vector dir = to - from;
+    // NormalizeInPlace returns the ORIGINAL length, which is the shot
+    // distance - the offset below must be a fraction of that, not of a unit
+    // vector, or the burst lands 0.25 units from the muzzle.
+    float dist = InsTurretNormalize( dir.x, dir.y, dir.z );
+    if (dist < 1.0f) return;                                      // degenerate
+
+    // A quarter of the way down the line: close enough to the muzzle to read
+    // as the same event, far enough to suggest travel.
+    Vector mid = from + dir * (dist * 0.25f);
+    g_pEffects->Sparks( mid, 1, 1, &dir );
 }
 
 static void TurretImpact( const Vector &pos, const Vector &dir )
@@ -1062,23 +1113,34 @@ void CTurret::Fire( float now )
     if (!m_target) return;
     if (TurretHullInverted( this )) INS_TURRET_REJECT( "hull inverted/collideable null" );
 
-    // Burst state machine: 0.30 s firing, 0.45 s pause, reusing the bots'
-    // tuned defaults.
-    if (now < m_pauseUntil) return;
-    if (m_burstUntil == 0.0f)
-    {
-        m_burstUntil = now + insbot_turret_burst_time.GetFloat();
-    }
-    else if (now > m_burstUntil)
-    {
-        m_burstUntil = 0.0f;
-        m_pauseUntil = now + insbot_turret_burst_pause.GetFloat();
-        return;
-    }
-
-    // Per-shot rate limit. Without this the burst loop fires once PER FRAME -
-    // 60+ rounds/second, which is neither the M249's real cadence nor kind to
-    // the temp-entity budget. 800 RPM is the M249's sustained rate.
+    // FIRE RATE - the only thing pacing the gun.
+    //
+    // There used to be a burst/pause state machine here (0.30 s firing,
+    // 0.45 s pause) driven by turret_burst_time / turret_burst_pause. Both
+    // settings are GONE, deliberately, and the gun is now automatic: while it
+    // holds a target and the fire gate is satisfied, it fires continuously at
+    // the M249's sustained rate.
+    //
+    // Why the burst cycle was removed: it was never a design decision. Those
+    // two CfgVars were copied from the BOT settings `burst_time` /
+    // `burst_pause`, which are themselves dead - they are declared in
+    // insbots.cpp and read by nothing, and the bot field that once consumed
+    // them (m_fireStateEnd, bot.h) is likewise never touched. So the turret
+    // inherited a rhythm from a mechanism that no longer exists on the bot
+    // side, and the only effect of keeping it was to cap the gun at a 40% duty
+    // cycle for no reason.
+    //
+    // The old cycle also had a real failure mode: the burst window was
+    // consumed by FRAMES, not by shots, and the fire gate (aim/LOS) is
+    // evaluated further down. A burst that elapsed while the gate was
+    // rejecting frames therefore produced fewer shots than the window
+    // implied - and at a very short burst_time it could expire without firing
+    // at all.
+    //
+    // What replaces it is the per-shot cooldown below, which is a property of
+    // the weapon rather than a policy: 800 RPM is the M249's sustained rate.
+    // Without a cooldown the fire loop runs once PER FRAME (60+ rounds/second),
+    // which is neither the real cadence nor kind to the temp-entity budget.
     if (now < m_nextShot) return;
     m_nextShot = now + (60.0f / 800.0f);        // 0.075 s between rounds
 
@@ -1133,7 +1195,9 @@ void CTurret::Fire( float now )
     TurretApplyDamage( this, m_target, dir,
                        TurretValue( this, "turret_damage",
                                     insbot_turret_damage.GetFloat() ) );
-    TurretMuzzleFlash( from, TurretMuzzleAngles( this ) );
+    // The shot direction, not the aim angles: Sparks' fourth argument is a
+    // velocity bias, so the sparks must fly down the barrel.
+    TurretMuzzleFlash( from, dir );
     TurretTracer( from, hitPos );
     if (tr.fraction < 1.0f) TurretImpact( tr.endpos, dir );
     TurretSound( from, m_entIndex );
@@ -1543,10 +1607,12 @@ static Vector TurretMuzzlePosition( CTurret *t )
     return Vector( px, py, pz ) + Vector( dx, dy, dz ) * INS_TURRET_MUZZLE_FORWARD;
 }
 
-static QAngle TurretMuzzleAngles( CTurret *t )
-{
-    return QAngle( t->m_curPitch, t->m_curYaw, 0.0f );
-}
+// TurretMuzzleAngles() lived here and fed MuzzleFlash's angles argument. It
+// was removed with that call: the replacement (Sparks) takes a direction
+// vector, which Fire() already has in world space from the target vector, so
+// rebuilding the local (pitch, yaw) into a QAngle would only reintroduce the
+// frame conversion this code has already been bitten by twice. The angles are
+// still recoverable from m_curPitch/m_curYaw if a future effect needs them.
 
 // Kept as the shared entry point so the earlier tasks' call sites do not move.
 static Vector TurretRayOrigin( CTurret *t )
@@ -1894,6 +1960,40 @@ void CTurret::WritePose()
     const float kYawStart   = -180.0f, kYawEnd   =  180.0f;
     const float kPitchStart =  -55.0f, kPitchEnd =   20.0f;
 
-    pose[m_poseYaw]   = InsTurretNormPose( m_curYaw,   kYawStart,   kYawEnd );
-    pose[m_posePitch] = InsTurretNormPose( m_curPitch, kPitchStart, kPitchEnd );
+    float newYaw   = InsTurretNormPose( m_curYaw,   kYawStart,   kYawEnd );
+    float newPitch = InsTurretNormPose( m_curPitch, kPitchStart, kPitchEnd );
+
+    // Stationary gun: nothing changed, so nothing has to be sent. This is what
+    // keeps the forced full-entity update below off a parked, idle turret.
+    if (pose[m_poseYaw] == newYaw && pose[m_posePitch] == newPitch)
+        return;
+
+    pose[m_poseYaw]   = newYaw;
+    pose[m_posePitch] = newPitch;
+
+    // THE TWO WRITES ABOVE ARE RAW POINTER WRITES.
+    //
+    // They therefore bypass CNetworkArray::Set(), which is the ONLY thing that
+    // calls NetworkStateChanged() for these elements (networkvar.h:726-741).
+    // With no dirty mark the new values reach a client only when something ELSE
+    // dirties the vehicle - and that is precisely the situation while the truck
+    // is being driven: the engine writes its own steer / speedo / wheel pose
+    // parameters every tick and the moving origin keeps the edict dirty, so the
+    // turret's values ride along in those updates.
+    //
+    // The moment the driver dies the truck comes to rest, the engine's own pose
+    // writes stop changing, nothing dirties the edict, and these values are
+    // never sent again. The visible result is a gun that tracks while the Humvee
+    // is driven and then freezes in place once the driver dies - while the
+    // server carries on acquiring, aiming and firing, because none of that
+    // reads the driver (verified live: a turret on a driverless Humvee keeps
+    // scanning and landing damage).
+    //
+    // FL_FULL_EDICT_CHANGED is REQUIRED, not optional. The offset-tracking
+    // overload StateChanged(unsigned short) needs engine-private symbols that
+    // are not linkable from a standalone VSP, so the full-edict flag is the
+    // only public way to say "re-read this entity's properties" - see
+    // bot_body.cpp:96-99 and ins_utilities' door smoothing, which use this same
+    // pair for the same reason.
+    e->m_fStateFlags |= FL_EDICT_CHANGED | FL_FULL_EDICT_CHANGED;
 }

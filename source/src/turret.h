@@ -58,10 +58,8 @@ public:
     float  m_desiredYaw;
     float  m_desiredPitch;
     float  m_nextAcquire;
-    float  m_burstUntil;
-    float  m_pauseUntil;
-    // Per-shot rate limit (M249 ~800 RPM). Without it the burst loop fires on
-    // every frame the gate is satisfied.
+    // Per-shot rate limit (M249 ~800 RPM). This is the ONLY thing pacing the
+    // turret's fire: there is no burst/pause cycle any more (see Fire()).
     float  m_nextShot;
     // Diagnostic counter: the first few shots per turret are logged so a live
     // run can distinguish "never fired" from "fired but nothing visible".

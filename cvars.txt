@@ -337,18 +337,18 @@ insbot set voice_objective            "1" // objective/support callouts: securin
 // and "all" writes the global instead:
 //   insbot turret set all <name> <value>
 //
-// turret_damage is per BULLET and the turret fires in bursts, so sustained
-// damage is much higher than a single hit. The real M249 round in this mod does
-// about 151 damage; the default of 50 is a deliberate playtest value, not a
-// simulation of the weapon. See docs/humvee-turret-damage-audit.md.
+// turret_damage is per BULLET and the turret is fully automatic - while it
+// holds a target it fires continuously at the M249's 800 RPM, with no burst or
+// pause cycle - so sustained damage is far higher than a single hit. The real
+// M249 round in this mod does about 151 damage; the default of 50 is a
+// deliberate playtest value, not a simulation of the weapon.
+// See docs/humvee-turret-damage-audit.md.
 
 insbot set turret_enabled              "1"     // master switch for the Humvee auto-turret (0=off)
 insbot set turret_aim_speed            "90"    // turret traverse speed (deg/s)
 insbot set turret_aim_error            "4.0"   // turret aim error in degrees (0=perfect)
 insbot set turret_engage_range         "1500"  // turret firing gate distance (units)
 insbot set turret_damage               "50"    // turret damage per bullet
-insbot set turret_burst_time           "0.30"  // turret firing burst length (s)
-insbot set turret_burst_pause          "0.45"  // turret pause between bursts (s)
 insbot set turret_scan_speed           "20"    // turret idle scan speed (deg/s)
 insbot set turret_fire_tolerance_yaw    "5.0"  // turret fire gate: max yaw error (deg)
 insbot set turret_fire_tolerance_pitch  "4.0"  // turret fire gate: max pitch error (deg)
