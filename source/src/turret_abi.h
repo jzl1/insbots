@@ -26,11 +26,19 @@
 #ifdef _LINUX
     #define INS_TURRET_OTD_SLOT            INS_LINUX_TURRET_OTD_SLOT
     #define INS_TURRET_ACCEPTINPUT_SLOT    INS_LINUX_TURRET_ACCEPTINPUT_SLOT
-    #define INS_TURRET_ALLOCPOOLEDSTRING   ((unsigned long)INS_LINUX_TURRET_ALLOCPOOLEDSTRING)
+    // RVA inside server_i486.so, NOT an absolute address. That .so is an ELF
+    // ET_DYN (PIE), so it is loaded at a randomised base and the RVA must be
+    // added to the live module base. See InsTurretAllocPooledString below.
+    #define INS_TURRET_ALLOCPOOLEDSTRING_RVA  INS_LINUX_TURRET_ALLOCPOOLEDSTRING
 #else
     #define INS_TURRET_OTD_SLOT            INSBOTS_WIN_TURRET_OTD_SLOT
     #define INS_TURRET_ACCEPTINPUT_SLOT    INSBOTS_WIN_TURRET_ACCEPTINPUT_SLOT
-    #define INS_TURRET_ALLOCPOOLEDSTRING   INSBOTS_WIN_TURRET_ALLOCPOOLEDSTRING
+    // RVA inside server.dll, NOT an absolute address. The shipped server.dll has
+    // a preferred base of 0x10000000, but a listen server / client process loads
+    // it wherever the loader likes (measured: 0x0EEC0000 on the live install).
+    // The old absolute 0x1007DC10 was unmapped in that process. See
+    // InsTurretAllocPooledString below.
+    #define INS_TURRET_ALLOCPOOLEDSTRING_RVA  INSBOTS_WIN_TURRET_ALLOCPOOLEDSTRING_RVA
 #endif
 
 // ---- CTakeDamageInfo, hand-built to the MEASURED layout --------------------
@@ -80,21 +88,90 @@ COMPILE_TIME_ASSERT( offsetof( InsTurretTakeDamageInfo, m_iAmmoType )           
 typedef char InsTurretTakeDamageInfo_size_must_be_0x48[
     ( sizeof( InsTurretTakeDamageInfo ) == 0x48 ) ? 1 : -1 ];
 
+// ---- variant_t, hand-built to the MEASURED layout ---------------------------
+// sizeof == 20 (0x14). A 12-byte union followed by CHandle<CBaseEntity> then
+// fieldtype_t (dlls/variant_t.h). AcceptInput takes this BY VALUE, so the
+// argument block is 4+4+4+20+4 = 36 = 0x24 - which is the callee's `ret 0x24`.
+//
+// The union is written as three dwords rather than a real union because the
+// only field this plugin ever sets is the pooled string, and a POD-of-dwords
+// keeps the copy semantics trivially identical to the shipped class (it is
+// trivially copyable, so MSVC/Itanium pass it as a plain 20-byte stack copy).
+#pragma pack(push, 4)
+struct InsTurretVariant
+{
+    unsigned long m_union0;   // +0x00  string_t iszVal / int iVal / float flVal
+    unsigned long m_union1;   // +0x04  union tail / padding
+    unsigned long m_union2;   // +0x08  union tail / padding
+    unsigned long m_eVal;     // +0x0C  CHandle<CBaseEntity>, 0 == INVALID
+    int           m_fieldType;// +0x10  fieldtype_t
+};
+#pragma pack(pop)
+
+COMPILE_TIME_ASSERT( sizeof( InsTurretVariant ) == 0x14 );
+COMPILE_TIME_ASSERT( offsetof( InsTurretVariant, m_eVal )      == 0x0C );
+COMPILE_TIME_ASSERT( offsetof( InsTurretVariant, m_fieldType ) == 0x10 );
+
+typedef char InsTurretVariant_size_must_be_0x14[
+    ( sizeof( InsTurretVariant ) == 0x14 ) ? 1 : -1 ];
+
 // ---- calling conventions ----------------------------------------------------
 // On Windows both of these are __thiscall: `this` in ECX and the CALLEE pops
 // the stack arguments. AcceptInput ends in `ret 0x24` (36 bytes =
 // 4+4+4+20+4). Declaring it without __thiscall makes the compiler emit a
 // redundant `add esp,0x24`. Linux has no __thiscall; both are cdecl there.
+//
+// THE `variant_t` ARGUMENT IS PASSED DIFFERENTLY ON THE TWO PLATFORMS. This is
+// not a style choice; it is the ABI, and getting it wrong corrupts the stack.
+//
+//   Windows (MSVC): a 20-byte class with a user-provided copy constructor but
+//   no destructor is still passed INLINE on the stack. The callee's
+//   `ret 0x24` pops 4+4+4+20+4 = 36 bytes, and its body reads all five
+//   variant dwords. Declaring it `const void *` (4 bytes) made the plugin push
+//   4+4+4+4+4 = 20 while the callee popped 36 - a 16-byte ESP shift per shot.
+//   Two shots is 32 bytes and the return address is gone, which is exactly the
+//   observed "fires twice, then the game dies". So on Windows the 20-byte
+//   struct MUST be passed by value.
+//
+//   Linux (Itanium C++ ABI): the same class is NON-trivial
+//   (`__is_trivially_copyable(variant_t) == 0`, because CHandle has
+//   user-declared constructors), so GCC passes it by INVISIBLE REFERENCE - a
+//   4-byte pointer to a caller-made temporary. Verified by compiling the real
+//   class and reading the generated code: the call pushes 6 arguments
+//   (24 bytes), not 9. So on Linux a POINTER is correct and the 20-byte
+//   inline form would be wrong.
+//
+// The old code used the pointer form everywhere: correct on Linux, 16-byte
+// stack corruption on Windows. The fix is per-platform, not global.
 #ifdef _LINUX
     typedef int  (*InsTurretOnTakeDamageFn)( void *, const void * );
     typedef bool (*InsTurretAcceptInputFn)( void *, const char *, void *,
                                             void *, const void *, int );
+    typedef const void *(*InsTurretGetRefEHandleFn)( void * );
 #else
     typedef int  (__thiscall *InsTurretOnTakeDamageFn)( void *, const void * );
     typedef bool (__thiscall *InsTurretAcceptInputFn)( void *, const char *,
                                                        void *, void *,
-                                                       const void *, int );
+                                                       InsTurretVariant, int );
+    typedef const void *(__thiscall *InsTurretGetRefEHandleFn)( void * );
 #endif
+
+// CBaseEntity::GetRefEHandle() is the third virtual this plugin calls through
+// a vtable, and it needs the same __thiscall treatment as the two above.
+//
+// It is the EASIEST of the three to get wrong, because it takes exactly one
+// argument: a cdecl declaration compiles happily and *looks* right, but the
+// callee never reads the pushed argument at all - it reads `this` out of ECX,
+// which still holds the function pointer it was just called through. The
+// handle that comes back is garbage, so the damage is attributed to a null
+// attacker and CINSPlayer::OnTakeDamage discards every shot while the gun
+// still fires, still ejects brass and still plays audio.
+//
+// It also fails in the most confusing direction possible: on Linux `this` IS
+// the first stack argument, so the identical cdecl declaration is CORRECT
+// there. The symptom is therefore "works on Linux, silently does no damage on
+// Windows" - which is exactly what was reported live. Do not "simplify" this
+// back to one shared typedef.
 
 // AllocPooledString returns string_t BY VALUE, and string_t is a struct, so
 // the ABI is a hidden return pointer: the result slot is the FIRST argument.

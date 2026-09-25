@@ -60,6 +60,15 @@ public:
     float  m_nextAcquire;
     float  m_burstUntil;
     float  m_pauseUntil;
+    // Per-shot rate limit (M249 ~800 RPM). Without it the burst loop fires on
+    // every frame the gate is satisfied.
+    float  m_nextShot;
+    // Diagnostic counter: the first few shots per turret are logged so a live
+    // run can distinguish "never fired" from "fired but nothing visible".
+    int    m_shotsLogged;
+    // Diagnostic counter: the first few fire-gate rejections per turret, each
+    // logged with its reason.
+    int    m_rejectsLogged;
     float  m_scanBearing;
     // The random aim offset, re-rolled in Acquire and added to the desired
     // bearing in Aim. This is a TUNING value, not an error measurement.

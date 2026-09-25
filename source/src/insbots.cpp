@@ -815,7 +815,21 @@ public:
         modelinfo = (IVModelInfo *)interfaceFactory(VMODELINFO_SERVER_INTERFACE_VERSION, 0);
         // Optional, like enginesound: a missing IEffects degrades the turret to
         // damage + sound only rather than failing the load.
-        g_pEffects = (IEffects *)interfaceFactory(IEFFECTS_INTERFACE_VERSION, 0);
+        //
+        // IEffects is a GAME-DLL interface, not an engine one: it is exposed by
+        // dlls/EffectsServer.cpp (CEffectsServer), and engine.dll contains no
+        // reference to "IEffects001" at all. Asking the engine factory for it
+        // therefore always returns NULL, which silently disabled every effect
+        // call (muzzle flash, tracer, impact) through the `if (g_pEffects)`
+        // guards - the gun moved and made no visible flash.
+        //
+        // Ask the game factory first, then fall back to the engine factory in
+        // case a different build exposes it there.
+        g_pEffects = (IEffects *)gameServerFactory(IEFFECTS_INTERFACE_VERSION, 0);
+        if (!g_pEffects)
+            g_pEffects = (IEffects *)interfaceFactory(IEFFECTS_INTERFACE_VERSION, 0);
+        Msg("[insbots] IEffects: %p%s\n", g_pEffects,
+            g_pEffects ? "" : "  (absent - no muzzle flash/tracer/impact)");
         playerinfomanager = (IPlayerInfoManager *)gameServerFactory(INTERFACEVERSION_PLAYERINFOMANAGER, 0);
         botmanager = (IBotManager *)gameServerFactory(INTERFACEVERSION_PLAYERBOTMANAGER, 0);
         server = (IServerGameDLL *)gameServerFactory("ServerGameDLL006", 0);

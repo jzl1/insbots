@@ -55,11 +55,17 @@ enum InsBotsLinuxOffset
 //   AcceptInput  slot 34        - derived by walking the CBaseEntity vtable
 //                                 through RTTI, cross-checked against
 //                                 SourceMod's published gamedata.
-//   AllocPooledString 0x1007DC10- derived via the dumpgamestringtable ->
-//                                 CGameStringPool route; see the shell-eject
-//                                 verification doc section 5.1.
+    //   AllocPooledString RVA 0x7DC10 - derived via the dumpgamestringtable ->
+    //                                 CGameStringPool route; see the shell-eject
+    //                                 verification doc section 5.1. NOTE this is
+    //                                 an RVA: server.dll's preferred base is
+    //                                 0x10000000, so the old absolute form was
+    //                                 0x1007DC10. It must be rebased onto the
+    //                                 LIVE module base - a listen server loads
+    //                                 server.dll at 0x0EEC0000, where the
+    //                                 absolute address is unmapped.
 #define INSBOTS_WIN_TURRET_OTD_SLOT          53
 #define INSBOTS_WIN_TURRET_ACCEPTINPUT_SLOT  34
-#define INSBOTS_WIN_TURRET_ALLOCPOOLEDSTRING 0x1007DC10ul
+#define INSBOTS_WIN_TURRET_ALLOCPOOLEDSTRING_RVA 0x7DC10ul
 
 #endif

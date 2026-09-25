@@ -45,6 +45,26 @@
 #include <stdio.h>
 #include <math.h>
 
+#ifdef _LINUX
+#include <link.h>        // dl_iterate_phdr, for the live module base
+#else
+// VirtualQuery is already used by objective.cpp the same way; declare it here
+// rather than pulling in windows.h (which fights the SDK headers).
+extern "C" __declspec(dllimport) unsigned long __stdcall VirtualQuery(
+    const void *lpAddress, void *lpBuffer, unsigned long dwLength);
+struct InsTurretMemBasicInfo
+{
+    void *BaseAddress;
+    void *AllocationBase;
+    unsigned long AllocationProtect;
+    unsigned long RegionSize;
+    unsigned long State;
+    unsigned long Protect;
+    unsigned long Type;
+};
+#define INS_TURRET_MEM_COMMIT 0x1000
+#endif
+
 // ---- engine globals owned by insbots.cpp -----------------------------------
 extern IVEngineServer      *engine;
 extern IVModelInfo         *modelinfo;       // defined in insbots.cpp; optional
@@ -281,6 +301,9 @@ CTurret::CTurret()
     m_nextAcquire = 0.0f;
     m_burstUntil = 0.0f;
     m_pauseUntil = 0.0f;
+    m_nextShot = 0.0f;
+    m_shotsLogged = 0;
+    m_rejectsLogged = 0;
     m_scanBearing = 0.0f;
     m_aimErrorYaw = 0.0f;
     m_aimErrorPitch = 0.0f;
@@ -307,6 +330,9 @@ void CTurret::Reset( int entindex, int team )
     m_nextAcquire = 0.0f;
     m_burstUntil = 0.0f;
     m_pauseUntil = 0.0f;
+    m_nextShot = 0.0f;
+    m_shotsLogged = 0;
+    m_rejectsLogged = 0;
     m_scanBearing = 0.0f;
     m_aimErrorYaw = 0.0f;
     m_aimErrorPitch = 0.0f;
@@ -701,22 +727,256 @@ private:
 static void TurretSound( const Vector &pos, int entIndex )
 {
     if (!enginesound) return;
-    // Emit from the vehicle's own entity index, using the M249's soundscript
-    // path so the turret is identifiable by ear.
+    // Emit from the vehicle's own entity index, using the M249's report so the
+    // turret is identifiable by ear.
     //
     // CPASFilter is NOT usable here: it lives in the game DLL
     // (dlls/recipientfilter.h:125) and a standalone VSP cannot link it. This is
     // the same local IRecipientFilter subclass voice.cpp:80 uses - every
     // connected client, with the engine doing the positional culling.
+    //
+    // THE NAME MUST BE A RAW .wav PATH, NOT A SOUNDSCRIPT NAME.
+    // IEngineSound exposes only PrecacheSound(pSample) - there is no
+    // PrecacheScriptSound on this interface (the SDK's PrecacheScriptSound is a
+    // CBaseEntity static inside the game DLL). Passing the soundscript name
+    // "Weapon_M249.Single" therefore precached nothing, and EmitSound's lookup
+    // of it failed every shot:
+    //
+    //   SV_StartSound: Weapon_M249.Single not precached (0)
+    //   Failed to load sound "weapon_m249.single", file probably missing...
+    //
+    // "Weapon_M249.Single" is a key in scripts/game_sounds_weapons.txt whose
+    // rndwave points at ^weapons/m249/m249-1.wav, so that .wav is what must be
+    // precached and emitted. This mirrors the known-good voice.cpp:117/159,
+    // which precaches and emits the same raw wave path.
+    static const char *kM249Shot = "weapons/m249/m249-1.wav";
+    enginesound->PrecacheSound( kM249Shot, true );
     CTurretSoundFilter filter;
     enginesound->EmitSound( filter, entIndex, CHAN_WEAPON,
-                            "Weapon_M249.Single", 1.0f, ATTN_NORM, 0, PITCH_NORM );
+                            kM249Shot, 1.0f, ATTN_NORM, 0, PITCH_NORM );
 }
 
 // Shell ejection, route C: fire the vehicle's own DispatchEffect input once
 // per shot. The plugin supplies only a string; the game DLL resolves the
 // attachment, builds CEffectData, and sends the temp entity with its own
 // singleton sender. See docs/humvee-turret-shell-eject-verification.md.
+// ---------------------------------------------------------------------------
+// Live module base for the game DLL (server.dll / server_i486.so).
+//
+// INS_TURRET_ALLOCPOOLEDSTRING_RVA is an RVA, not an address. The shipped
+// server.dll has a preferred base of 0x10000000, so the original constant was
+// written as 0x1007DC10 - and that is only correct when the loader happens to
+// honour the preferred base. A dedicated server often does; a listen server
+// does not. Measured on the live install, server.dll loaded at 0x0EEC0000 and
+// 0x1007DC10 was NOT mapped in the process at all, so the eject call would
+// jump into unmapped memory. Linux is worse: server_i486.so is an ELF ET_DYN
+// (PIE) and is always relocated.
+//
+// Resolution is fail-closed: if the base cannot be established, or the target
+// is not committed executable memory, the caller gets 0 and skips the eject
+// rather than jumping somewhere arbitrary.
+// ---------------------------------------------------------------------------
+
+#ifdef _LINUX
+struct InsTurretPhdrSearch
+{
+    unsigned long base;      // relocation base of the game DLL
+    unsigned long execLo;    // RVA range of its executable PT_LOAD segment
+    unsigned long execHi;
+    unsigned long bestSize;  // total PT_LOAD memsz of the best candidate
+    bool          found;
+};
+
+static int InsTurretPhdrCallback( struct dl_phdr_info *info, size_t, void *data )
+{
+    InsTurretPhdrSearch *s = (InsTurretPhdrSearch *)data;
+    const char *name = info->dlpi_name ? info->dlpi_name : "";
+    const char *leaf = strrchr( name, '/' );
+    leaf = leaf ? leaf + 1 : name;
+    if (strcmp( leaf, "server_i486.so" ) != 0) return 0;
+
+    // TWO modules share this filename: the ~9 MB game DLL
+    // (insurgency/bin/server_i486.so) and the ~400 KB MetaMod shim
+    // (addons/metamod/bin/server_i486.so). Matching the first hit could pick
+    // the shim, whose base + 0x44256E is far outside its own image - a jump
+    // into unmapped memory. So score every candidate by total PT_LOAD size and
+    // keep the largest, and remember that image's executable segment so the
+    // caller can prove the target RVA really is code.
+    unsigned long total = 0, lo = 0, hi = 0;
+    for (int i = 0; i < info->dlpi_phnum; i++)
+    {
+        const Elf32_Phdr *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD) continue;
+        total += ph->p_memsz;
+        if (ph->p_flags & PF_X)
+        {
+            if (lo == 0 || ph->p_vaddr < lo) lo = ph->p_vaddr;
+            if ((unsigned long)(ph->p_vaddr + ph->p_memsz) > hi)
+                hi = (unsigned long)(ph->p_vaddr + ph->p_memsz);
+        }
+    }
+    if (total > s->bestSize)
+    {
+        s->bestSize = total;
+        s->base     = (unsigned long)info->dlpi_addr;
+        s->execLo   = lo;
+        s->execHi   = hi;
+        s->found    = true;
+    }
+    return 0;                // keep looking; the biggest wins
+}
+
+static unsigned long InsTurretGameDllBase()
+{
+    InsTurretPhdrSearch s;
+    s.base = 0; s.execLo = 0; s.execHi = 0; s.bestSize = 0; s.found = false;
+    dl_iterate_phdr( InsTurretPhdrCallback, &s );
+    if (!s.found) return 0;
+
+    // Prove the RVA lands inside that image's executable segment before we
+    // ever hand it out as a function pointer. Fail closed.
+    const unsigned long rva = INS_TURRET_ALLOCPOOLEDSTRING_RVA;
+    if (rva < s.execLo || rva >= s.execHi) return 0;
+    return s.base;
+}
+
+static bool InsTurretIsExecutable( unsigned long addr )
+{
+    // The RVA/segment check in InsTurretGameDllBase is the real guard; this is
+    // the final "did the addition wrap or land outside user space" belt.
+    return addr != 0 && addr < 0xC0000000ul;
+}
+#else
+// ---- Windows: walk the loader's own module list out of the PEB ------------
+// We cannot link kernel32's GetModuleHandle here (the DLL deliberately imports
+// only msvcrt + kernel32 with a hand-written import lib, and adding a second
+// import entry risks the load path that has already bitten this project), so
+// read the documented PEB fields directly.
+//
+//   fs:[0x30] -> PEB
+//   PEB+0x0C  -> PEB_LDR_DATA
+//   Ldr+0x0C  -> InLoadOrderModuleList (LIST_ENTRY)
+//   LDR_DATA_TABLE_ENTRY: +0x18 DllBase, +0x2C BaseDllName (UNICODE_STRING),
+//                         +0x30 FullDllName
+// These offsets are fixed for 32-bit Windows XP..10 and are the same ones the
+// repo already relies on indirectly through its SendTable walks.
+struct InsTurretUnicodeString
+{
+    unsigned short Length;
+    unsigned short MaximumLength;
+    unsigned short *Buffer;
+};
+
+struct InsTurretLdrEntry
+{
+    unsigned long       InLoadOrderLinks[2];
+    unsigned long       InMemoryOrderLinks[2];
+    unsigned long       InInitializationOrderLinks[2];
+    unsigned long       DllBase;
+    unsigned long       EntryPoint;
+    unsigned long       SizeOfImage;
+    InsTurretUnicodeString FullDllName;
+    InsTurretUnicodeString BaseDllName;
+};
+
+static bool InsTurretLeafIsServerDll( const unsigned short *buf, unsigned short lenChars )
+{
+    // Compare the leaf name against "server.dll", case-insensitively.
+    const char *want = "server.dll";
+    int wlen = 10;
+
+    // find the last '\' or '/' in the wide name
+    int leaf = 0;
+    for (int i = 0; i < (int)lenChars; i++)
+    {
+        if (buf[i] == '\\' || buf[i] == '/') leaf = i + 1;
+    }
+    int n = (int)lenChars - leaf;
+    if (n != wlen) return false;
+    for (int i = 0; i < wlen; i++)
+    {
+        unsigned short c = buf[leaf + i];
+        if (c >= 'A' && c <= 'Z') c = (unsigned short)(c - 'A' + 'a');
+        if (c != (unsigned short)want[i]) return false;
+    }
+    return true;
+}
+
+static unsigned long InsTurretGameDllBase()
+{
+    unsigned long peb = 0;
+    __asm
+    {
+        mov eax, fs:[0x30]
+        mov peb, eax
+    }
+    if (!peb) return 0;
+
+    // PEB->Ldr at +0x0C, Ldr->InLoadOrderModuleList at +0x0C
+    const unsigned long ldr        = *(const unsigned long *)(peb + 0x0C);
+    if (!ldr) return 0;
+    const unsigned long listHead   = ldr + 0x0C;
+
+    unsigned long link = *(const unsigned long *)listHead;
+    unsigned long bestBase = 0;
+    unsigned long bestSize = 0;
+    // Bound the walk: a corrupt list must not spin forever.
+    for (int guard = 0; guard < 512 && link && link != listHead; guard++)
+    {
+        const InsTurretLdrEntry *e = (const InsTurretLdrEntry *)link;
+        if (e->BaseDllName.Buffer && e->BaseDllName.Length)
+        {
+            unsigned short lenChars = (unsigned short)(e->BaseDllName.Length / 2);
+            if (InsTurretLeafIsServerDll( e->BaseDllName.Buffer, lenChars ))
+            {
+                // Two modules are called server.dll here as well: the ~3 MB
+                // game DLL (insurgency/bin/server.dll) and the ~180 KB MetaMod
+                // shim (addons/metamod/bin/server.dll). Taking the first match
+                // could pick the shim, whose base + 0x7DC10 lands outside its
+                // image. Keep the largest image and check the RVA is inside it.
+                if (e->SizeOfImage > bestSize)
+                {
+                    bestSize = e->SizeOfImage;
+                    bestBase = e->DllBase;
+                }
+            }
+        }
+        link = *(const unsigned long *)link;
+    }
+    // Fail closed: the RVA must lie inside the chosen image.
+    if (bestBase == 0) return 0;
+    if (INS_TURRET_ALLOCPOOLEDSTRING_RVA >= bestSize) return 0;
+    return bestBase;
+}
+
+static bool InsTurretIsExecutable( unsigned long addr )
+{
+    if (addr == 0) return false;
+    InsTurretMemBasicInfo mbi;
+    memset( &mbi, 0, sizeof(mbi) );
+    if (!VirtualQuery( (const void *)addr, &mbi, sizeof(mbi) )) return false;
+    if (mbi.State != INS_TURRET_MEM_COMMIT) return false;
+    return true;
+}
+#endif
+
+static InsTurretAllocPooledStringFn InsTurretAllocPooledString()
+{
+    static InsTurretAllocPooledStringFn cached = 0;
+    static bool resolved = false;
+    if (resolved) return cached;
+    resolved = true;
+
+    unsigned long base = InsTurretGameDllBase();
+    if (base == 0) return 0;
+
+    unsigned long addr = base + INS_TURRET_ALLOCPOOLEDSTRING_RVA;
+    if (!InsTurretIsExecutable( addr )) return 0;
+
+    cached = (InsTurretAllocPooledStringFn)addr;
+    return cached;
+}
+
 static void TurretEjectShell( CTurret *t )
 {
     edict_t *e = engine->PEntityOfEntIndex( t->EntIndex() );
@@ -741,8 +1001,11 @@ static void TurretEjectShell( CTurret *t )
     // the ABI is a hidden return pointer: result slot FIRST. Declaring it as
     // `string_t f(const char*)` writes through the string literal and corrupts
     // memory. See the verification doc section 5.1.1.
-    InsTurretAllocPooledStringFn allocFn =
-        (InsTurretAllocPooledStringFn)INS_TURRET_ALLOCPOOLEDSTRING;
+    //
+    // The address is REBASED off the live game-DLL base every session; the
+    // constant is an RVA, not an absolute address. Fail closed.
+    InsTurretAllocPooledStringFn allocFn = InsTurretAllocPooledString();
+    if (!allocFn) return;
     const char *pooled = 0;
     allocFn( &pooled, spec );
     if (!pooled || !pooled[0]) return;
@@ -750,10 +1013,11 @@ static void TurretEjectShell( CTurret *t )
     // variant_t: 20 bytes, union at +0x00, CHandle at +0x0C, fieldType at
     // +0x10. The zeroed tail is not cosmetic - AcceptInput may copy this into
     // an inputdata_t. FIELD_STRING is 2 (datamap.h:28-31).
-    unsigned char value[20];
-    memset( value, 0, sizeof(value) );
-    *(const char **)(value + 0x00) = pooled;
-    *(int *)(value + 0x10) = INS_TURRET_FIELD_STRING;
+    InsTurretVariant value;
+    memset( &value, 0, sizeof(value) );
+    value.m_union0    = (unsigned long)pooled;
+    value.m_eVal      = 0;                          // CHandle INVALID
+    value.m_fieldType = INS_TURRET_FIELD_STRING;
 
     InsTurretAcceptInputFn fn = (InsTurretAcceptInputFn)
         TurretGetVtableSlot( pVehicle, INS_TURRET_ACCEPTINPUT_SLOT );
@@ -762,10 +1026,18 @@ static void TurretEjectShell( CTurret *t )
     // pActivator is NULL: InputDispatchEffect never reads it. pCaller is the
     // vehicle itself, which only affects the entity-i/o debug line.
     //
-    // On Windows this is __thiscall and the callee pops 0x24 itself, so there
-    // must be NO `add esp` after the call. The typedef in turret_abi.h encodes
-    // that; do not "fix" a stack imbalance here.
+    // PER-PLATFORM ARGUMENT FORM - see the long note in turret_abi.h.
+    //   Linux  : GCC passes the non-trivial variant_t by invisible reference,
+    //            so we hand it a pointer (4-byte argument, 6 args total).
+    //   Windows: MSVC passes it inline (20 bytes, 9 argument dwords) and the
+    //            callee's `ret 0x24` pops all 36 bytes itself, so there must be
+    //            NO `add esp` after the call. The typedef encodes __thiscall;
+    //            do not "fix" a stack imbalance here.
+#ifdef _LINUX
+    fn( pVehicle, "DispatchEffect", 0, pVehicle, &value, 0 );
+#else
     fn( pVehicle, "DispatchEffect", 0, pVehicle, value, 0 );
+#endif
 }
 
 // The firing gate, burst timing, and the whole shot. Ordering is deliberate:
@@ -773,9 +1045,22 @@ static void TurretEjectShell( CTurret *t )
 // sees is the one the trace uses.
 void CTurret::Fire( float now )
 {
+    // One-shot rejection diagnostic. "Never fires" has six distinct causes and
+    // they are indistinguishable from the outside, so the first few rejections
+    // per turret are logged with the reason. Bounded so it cannot flood.
+    #define INS_TURRET_REJECT(why) \
+        do { if (m_rejectsLogged < 6) { m_rejectsLogged++; \
+             Msg( "[insbots] turret %d FIRE-BLOCKED: %s (target=%d res=%.1f/%.1f " \
+                  "tol=%.1f/%.1f dist=%.0f)\n", m_entIndex, why, m_target, \
+                  m_residualYaw, m_residualPitch, \
+                  insbot_turret_fire_tol_yaw.GetFloat(), \
+                  insbot_turret_fire_tol_pitch.GetFloat(), \
+                  (m_targetLastPos - TurretMuzzlePosition(this)).Length() ); } \
+             return; } while (0)
+
     if (!insbot_turret_enabled.GetBool()) return;
     if (!m_target) return;
-    if (TurretHullInverted( this )) return;
+    if (TurretHullInverted( this )) INS_TURRET_REJECT( "hull inverted/collideable null" );
 
     // Burst state machine: 0.30 s firing, 0.45 s pause, reusing the bots'
     // tuned defaults.
@@ -791,6 +1076,12 @@ void CTurret::Fire( float now )
         return;
     }
 
+    // Per-shot rate limit. Without this the burst loop fires once PER FRAME -
+    // 60+ rounds/second, which is neither the M249's real cadence nor kind to
+    // the temp-entity budget. 800 RPM is the M249's sustained rate.
+    if (now < m_nextShot) return;
+    m_nextShot = now + (60.0f / 800.0f);        // 0.075 s between rounds
+
     // Fire gate: aligned to the tolerance AND with a clear line of sight AND
     // within engagement range. The inherited bot gate is +/-18 deg, which is
     // ~400 units of lateral slop at 1500 units - far too loose here.
@@ -798,20 +1089,22 @@ void CTurret::Fire( float now )
     float tolPitch = insbot_turret_fire_tol_pitch.GetFloat();
     tolYaw   = TurretValue( this, "turret_fire_tolerance_yaw",   tolYaw );
     tolPitch = TurretValue( this, "turret_fire_tolerance_pitch", tolPitch );
-    if (!InsTurretAimed( m_residualYaw, m_residualPitch, tolYaw, tolPitch )) return;
-    if (!VerifyLOS()) return;
+    if (!InsTurretAimed( m_residualYaw, m_residualPitch, tolYaw, tolPitch ))
+        INS_TURRET_REJECT( "not aimed" );
+    if (!VerifyLOS()) INS_TURRET_REJECT( "no line of sight from muzzle" );
 
     edict_t *te = engine->PEntityOfEntIndex( m_target );
-    if (!te || te->IsFree()) return;
+    if (!te || te->IsFree()) INS_TURRET_REJECT( "target edict gone" );
     IPlayerInfo *pi = playerinfomanager ? playerinfomanager->GetPlayerInfo( te ) : 0;
     // IsAlive() does not exist on this interface - see TurretIsValidEnemy.
-    if (!pi || pi->IsDead()) return;
+    if (!pi || pi->IsDead()) INS_TURRET_REJECT( "target dead/not a player" );
 
     Vector from = TurretMuzzlePosition( this );
     Vector aim  = m_targetLastPos;
     float  dist = ( aim - from ).Length();
     if (dist > TurretValue( this, "turret_engage_range",
-                            insbot_turret_engage_range.GetFloat() )) return;  // firing gate
+                            insbot_turret_engage_range.GetFloat() ))
+        INS_TURRET_REJECT( "out of engage range" );  // firing gate
 
     // Spread: a small cone, defaulting to the M249's real spread_degrees.
     float spread = TurretValue( this, "turret_spread", insbot_turret_spread.GetFloat() );
@@ -845,6 +1138,19 @@ void CTurret::Fire( float now )
     if (tr.fraction < 1.0f) TurretImpact( tr.endpos, dir );
     TurretSound( from, m_entIndex );
     TurretEjectShell( this );
+
+    // Shot diagnostic. Without this there is no way to tell "the turret never
+    // fired" from "it fired and nothing was visible" - both look identical from
+    // the client. Bounded to the first few shots per turret so a long burst
+    // cannot flood the log.
+    if (m_shotsLogged < 6)
+    {
+        m_shotsLogged++;
+        Msg( "[insbots] turret %d SHOT %d target=%d dist=%.0f hit=%.2f effects=%d\n",
+             m_entIndex, m_shotsLogged, m_target, dist, tr.fraction,
+             g_pEffects ? 1 : 0 );
+    }
+    #undef INS_TURRET_REJECT
 }
 
 // ===========================================================================
@@ -866,6 +1172,12 @@ static const char *TurretInfoGetClassName( void * )
     return "CTakeDamageInfo";
 }
 static void *g_TurretInfoVtable[1] = { (void *)TurretInfoGetClassName };
+
+// Bounded diagnostic counter for the damage path. "No damage" has several
+// distinct causes (no slot, rejected by the gamerules gate, wrong struct
+// offsets) and they are indistinguishable without measuring the target's
+// health across the call.
+static int s_damageLogs = 0;
 
 static void *TurretGetVtableSlot( void *pObject, int slot )
 {
@@ -894,21 +1206,33 @@ static unsigned long TurretMakeHandle( edict_t *e )
 #else
     const int kGetRefEHandleSlot = 2;
 #endif
-    typedef void *(*GetRefEHandleFn)( void * );
-    GetRefEHandleFn fn = (GetRefEHandleFn)TurretGetVtableSlot( pEnt, kGetRefEHandleSlot );
+    // __thiscall on Windows; see InsTurretGetRefEHandleFn in turret_abi.h. A
+    // plain cdecl typedef here compiles fine and returns garbage, because the
+    // callee takes `this` from ECX and ignores the pushed argument entirely.
+    InsTurretGetRefEHandleFn fn =
+        (InsTurretGetRefEHandleFn)TurretGetVtableSlot( pEnt, kGetRefEHandleSlot );
     if (!fn) return 0xFFFFFFFFul;
-    unsigned long *pHandle = (unsigned long *)fn( pEnt );
+    const unsigned long *pHandle = (const unsigned long *)fn( pEnt );
     return pHandle ? *pHandle : 0xFFFFFFFFul;
 }
 
 static void TurretApplyDamage( CTurret *t, int targetIdx, const Vector &dir, float dmg )
 {
+    // Every early return below is a SILENT no-damage path. They are logged
+    // (bounded) because "the gun fires but nothing takes damage" is exactly
+    // what one of them produces, and without a line here there is no way to
+    // tell which one fired.
+    #define INS_TURRET_DMG_BAIL(why) \
+        do { if (s_damageLogs < 8) { s_damageLogs++; \
+             Msg( "[insbots] turret DAMAGE-BLOCKED: %s (target=%d slot=%d)\n", \
+                  why, targetIdx, INS_TURRET_OTD_SLOT ); } return; } while (0)
+
     edict_t *te = engine->PEntityOfEntIndex( targetIdx );
-    if (!te || te->IsFree()) return;
+    if (!te || te->IsFree()) INS_TURRET_DMG_BAIL( "target edict gone" );
     IServerUnknown *unk = te->GetUnknown();
-    if (!unk) return;
+    if (!unk) INS_TURRET_DMG_BAIL( "target has no IServerUnknown" );
     void *pTarget = unk->GetBaseEntity();
-    if (!pTarget) return;
+    if (!pTarget) INS_TURRET_DMG_BAIL( "target has no CBaseEntity" );
 
     // The attacker must be non-null, but it does NOT have to be a player:
     // CINSRules::FPlayerCanTakeDamage consults PlayerRelationship, which
@@ -922,7 +1246,7 @@ static void TurretApplyDamage( CTurret *t, int targetIdx, const Vector &dir, flo
     {
         // Fail closed: a null attacker makes CINSPlayer::OnTakeDamage refuse
         // outright, and on some paths dereference null.
-        return;
+        INS_TURRET_DMG_BAIL( "attacker handle invalid (GetRefEHandle slot wrong?)" );
     }
 
     InsTurretTakeDamageInfo info;
@@ -941,8 +1265,32 @@ static void TurretApplyDamage( CTurret *t, int targetIdx, const Vector &dir, flo
 
     InsTurretOnTakeDamageFn fn =
         (InsTurretOnTakeDamageFn)TurretGetVtableSlot( pTarget, INS_TURRET_OTD_SLOT );
-    if (!fn) return;
-    fn( pTarget, &info );
+    if (!fn)
+    {
+        if (s_damageLogs < 8) { s_damageLogs++;
+            Msg( "[insbots] turret DAMAGE: no OnTakeDamage slot %d on target %d\n",
+                 INS_TURRET_OTD_SLOT, targetIdx ); }
+        return;
+    }
+
+    // Measure the health before/after so "no damage" is a number, not a guess.
+    // IPlayerInfo::GetHealth() is the same accessor bot_perceive.cpp:575 uses.
+    IPlayerInfo *tpi = playerinfomanager ? playerinfomanager->GetPlayerInfo( te ) : 0;
+    int hpBefore = tpi ? tpi->GetHealth() : -1;
+
+    int ret = fn( pTarget, &info );
+
+    int hpAfter = tpi ? tpi->GetHealth() : -1;
+    if (s_damageLogs < 8)
+    {
+        s_damageLogs++;
+        Msg( "[insbots] turret DAMAGE: target=%d dmg=%.1f attacker=0x%08lX "
+             "slot=%d ret=%d hp %d -> %d  %s\n",
+             targetIdx, dmg, attackerHandle, INS_TURRET_OTD_SLOT, ret,
+             hpBefore, hpAfter,
+             (hpAfter >= 0 && hpBefore >= 0 && hpAfter < hpBefore) ? "LANDED" : "NO EFFECT" );
+    }
+    #undef INS_TURRET_DMG_BAIL
 }
 
 // ===========================================================================
