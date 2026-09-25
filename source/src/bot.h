@@ -6,6 +6,7 @@
 #include "eiface.h"
 #include "dlls/iplayerinfo.h"
 #include "vector.h"
+#include <math.h>   // atan2f/fmodf for the inline cover sector helpers below
 
 struct ObjPoint;
 
@@ -64,14 +65,64 @@ enum CoverTier {
     COVER_FULL    = 3    // bunker-grade, blocks most directions
 };
 
+// Number of equal angular sectors a cover point samples. BuildCoverDatabase
+// casts one ray per sector, centred on that sector's bearing; EVERY consumer
+// must bin a threat with CoverSectorFor() so the sampler and the scorers cannot
+// drift apart. Raising this raises mask fidelity at the cost of build rays and
+// bytes per point - see the plan's Measured Basis.
+#define COVER_SECTORS 12
+#define COVER_SECTOR_DEG (360.0f / (float)COVER_SECTORS)
+
+// Minimum sector hits for each tier, held as fractions of COVER_SECTORS
+// (7/8, 4/8, 2/8) so the classification stays meaningful if the sector count
+// changes. The rounding is a ceiling, which reproduces 7/4/2 exactly at 8.
+#define COVER_TIER_FULL_MIN    ((COVER_SECTORS * 7 + 7) / 8)
+#define COVER_TIER_PARTIAL_MIN ((COVER_SECTORS * 4 + 7) / 8)
+#define COVER_TIER_SPOT_MIN    ((COVER_SECTORS * 2 + 7) / 8)
+
 struct CoverPoint {
     Vector        pos;
-    unsigned char blockMask[8];  // standing-eye occlusion per 45-deg sector (N,NE,E,SE,S,SW,W,NW)
-    unsigned char crouchMask[8]; // crouch-eye occlusion per same sectors
+    unsigned char blockMask[COVER_SECTORS];  // standing-eye occlusion per sector
+    unsigned char crouchMask[COVER_SECTORS]; // crouch-eye occlusion per sector
     int           tier;          // CoverTier value at load time
     unsigned char isLowOnly;     // 1 if protection only below crouch height (crates/sandbags)
     short         areaIdx;       // owning nav area
 };
+
+// Bin the bearing from `from` to `to` into the sector whose sampled ray is
+// angularly closest. Ties resolve toward the higher sector index, which is what
+// the previous inline `(yaw + half) / width` arithmetic did.
+inline int CoverSectorFor(const Vector &from, const Vector &to)
+{
+    float yawDeg = atan2f(to.y - from.y, to.x - from.x) * (180.0f / 3.14159265358979f);
+    yawDeg = fmodf(yawDeg + 360.0f, 360.0f);
+    int sec = (int)(fmodf(yawDeg + COVER_SECTOR_DEG * 0.5f, 360.0f) / COVER_SECTOR_DEG);
+    return sec % COVER_SECTORS;
+}
+
+inline int CoverMaskPopcount(const unsigned char *mask)
+{
+    int n = 0;
+    for (int d = 0; d < COVER_SECTORS; d++) if (mask[d]) n++;
+    return n;
+}
+
+inline int CoverTierForPopcount(int popcount)
+{
+    if (popcount >= COVER_TIER_FULL_MIN)    return COVER_FULL;
+    if (popcount >= COVER_TIER_PARTIAL_MIN) return COVER_PARTIAL;
+    if (popcount >= COVER_TIER_SPOT_MIN)    return COVER_SPOT;
+    return COVER_NONE;
+}
+
+// Does this point hide a bot standing at cp.pos from a threat at threatPos?
+// `ducked` selects the crouch-eye mask, which is what makes low cover work.
+inline bool CoverPointBlocks(const CoverPoint &cp, const Vector &threatPos, bool ducked)
+{
+    int sec = CoverSectorFor(cp.pos, threatPos);
+    if (cp.blockMask[sec]) return true;
+    return ducked && cp.crouchMask[sec] != 0;
+}
 
 // ============================================================================
 // Doorway Runway & Sprint State
@@ -617,12 +668,34 @@ bool  ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int &outTier
     float Now() const;
 };
 
+// Cell size of the cover spatial index. Any size is CORRECT - the query
+// derives its cell range from the probe disc itself - so this is purely a
+// tuning value. Twice the 75u probe radius keeps the visited set small
+// without producing a long per-cell list.
+#define COVER_GRID_CELL 150.0f
+
 class CBotRoster
 {
 public:
     CBotRoster() : m_navLoadedForMap(false)
     {
         m_mapname[0] = 0;
+        // The cover database and its index are normally zero-initialised by
+        // being a static global, but initialise them explicitly: FreeCoverGrid
+        // and FreeCoverDatabase run on the first BuildCoverDatabase and must
+        // not read garbage.
+        m_coverPoints = 0;
+        m_coverCount = 0;
+        m_coverCapacity = 0;
+        m_coverOwnerSlot = 0;
+        m_coverOwnedSince = 0;
+        m_coverGridW = m_coverGridH = 0;
+        m_coverGridMinX = m_coverGridMinY = 0.0f;
+        m_coverGridStart = 0;
+        m_coverGridCells = 0;
+        // Test-only override for the cover-point capacity (see Task 4). Zero
+        // means "derive the capacity from the nav mesh" (the production path).
+        m_coverCapacityOverride = 0;
         m_captureUpdateTime[0] = m_captureUpdateTime[1] = m_captureUpdateTime[2] = -999.0f;
         m_captureRefillTime[0] = m_captureRefillTime[1] = m_captureRefillTime[2] = 0.0f;
         m_captureTarget[0] = m_captureTarget[1] = m_captureTarget[2] = -1;
@@ -742,10 +815,44 @@ bool     IsCoverOccupiedByOther(int coverIdx, int myRosterIdx) const;
     void     ReleaseCoverOwnership(int rosterIdx);
 int      CoverOwnerSlot(int coverIdx) const { return (coverIdx >= 0 && coverIdx < m_coverCapacity) ? m_coverOwnerSlot[coverIdx] : -1; }
 struct CoverPoint *m_coverPoints;
-int      m_coverCount;
-int      m_coverCapacity;
-short   *m_coverOwnerSlot;       // roster slot or -1 per cover point (allocated lazily)
+    int      m_coverCount;
+    int      m_coverCapacity;
+    // Test-only override for the cover-point capacity. BuildCoverDatabase
+    // normally sizes the table at areaTotal * 5, which is exactly the largest
+    // possible sample count and therefore unreachable. Setting this to a
+    // smaller positive value lets a test driver exercise the capacity guard.
+    // Zero means "derive the capacity from the nav mesh" (production path).
+    int      m_coverCapacityOverride;
+    short   *m_coverOwnerSlot;       // roster slot or -1 per cover point (allocated lazily)
 float   *m_coverOwnedSince;
+
+    // ---- Cover spatial index ------------------------------------------------
+    // Uniform grid over cover-point positions. IsPositionExposed visits only
+    // the cells its 75u probe disc overlaps instead of scanning every point.
+    // Built by BuildCoverGrid (called from BuildCoverDatabase), freed by
+    // FreeCoverGrid. m_coverGridCells == 0 means "no index"; consumers fall
+    // back to a linear scan.
+    int    m_coverGridW, m_coverGridH;
+    float  m_coverGridMinX, m_coverGridMinY;
+    int   *m_coverGridStart;   // W*H+1 prefix offsets into m_coverGridCells
+    int   *m_coverGridCells;   // cover-point indices, grouped by cell
+    void   BuildCoverGrid();
+    void   FreeCoverGrid();
+    int CoverGridCellX(float x) const
+    {
+        int c = (int)((x - m_coverGridMinX) / COVER_GRID_CELL);
+        if (c < 0) c = 0;
+        if (c >= m_coverGridW) c = m_coverGridW - 1;
+        return c;
+    }
+    int CoverGridCellY(float y) const
+    {
+        int c = (int)((y - m_coverGridMinY) / COVER_GRID_CELL);
+        if (c < 0) c = 0;
+        if (c >= m_coverGridH) c = m_coverGridH - 1;
+        return c;
+    }
+
     CInsBot  m_bots[64];
     char     m_mapname[128];
     bool     m_navLoadedForMap;

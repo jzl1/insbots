@@ -1714,7 +1714,8 @@ void CBotRoster::BuildCoverDatabase()
     int areaTotal = g_NavMesh.Count();
     if (areaTotal <= 0) { Msg("[insbots] cover db: no areas\n"); return; }
 
-    int maxPts = areaTotal * 5;
+    int maxPts = (m_coverCapacityOverride > 0) ? m_coverCapacityOverride
+                                               : areaTotal * 5;
     m_coverPoints = (CoverPoint *)malloc(sizeof(CoverPoint) * maxPts);
     m_coverOwnerSlot = (short *)malloc(sizeof(short) * maxPts);
     m_coverOwnedSince = (float *)malloc(sizeof(float) * maxPts);
@@ -1730,8 +1731,8 @@ void CBotRoster::BuildCoverDatabase()
 
     int spawnSkipped = 0;
     int samplesTried = 0;
-    int popHist[9] = {0};
-    static const float DIR_YAW[8] = { 0.f,45.f,90.f,135.f,180.f,225.f,270.f,315.f };
+    bool capacityHit = false;
+    int popHist[COVER_SECTORS + 1] = {0};
     static const float SAMPLE_FRAC[5][2] =
     {
         { 0.5f, 0.5f },   // centre
@@ -1744,6 +1745,7 @@ void CBotRoster::BuildCoverDatabase()
 
     for (int ai = 0; ai < g_NavMesh.Count(); ++ai)
     {
+        if (capacityHit) break;
         const NavAreaData *A = g_NavMesh.Area(ai);
         if (!A) continue;
         
@@ -1774,15 +1776,14 @@ void CBotRoster::BuildCoverDatabase()
             }
             if (insideSpawnZone) { spawnSkipped++; continue; }
 
-unsigned char blockMask[8] = {0};
-            unsigned char crouchMask[8] = {0};
-            int popcount = 0;
+            unsigned char blockMask[COVER_SECTORS] = {0};
+            unsigned char crouchMask[COVER_SECTORS] = {0};
             bool anyTallBlock = false;
 
             bool sampleInSolid = false;
-            for (int d = 0; d < 8; ++d)
+            for (int d = 0; d < COVER_SECTORS; ++d)
             {
-                float yr = DIR_YAW[d] * (3.14159265358979f / 180.0f);
+                float yr = (float)d * COVER_SECTOR_DEG * (3.14159265358979f / 180.0f);
                 Vector dir(cosf(yr), sinf(yr), 0.0f);
 
                 Vector eyeS = C + Vector(0, 0, 58);
@@ -1802,9 +1803,8 @@ unsigned char blockMask[8] = {0};
             }
             if (sampleInSolid) continue;   // skip to next sample point
 
-            for (int d = 0; d < 8; ++d) if (blockMask[d]) popcount++;
-            int crouchPopcount = 0;
-            for (int d = 0; d < 8; ++d) if (crouchMask[d]) crouchPopcount++;
+            int popcount = CoverMaskPopcount(blockMask);
+            int crouchPopcount = CoverMaskPopcount(crouchMask);
             samplesTried++;
             popHist[popcount]++;
 
@@ -1812,28 +1812,28 @@ unsigned char blockMask[8] = {0};
             // but crouch rays are mostly blocked, this is a sandbag/crate-style
             // low cover point: store it with tier from crouch protection and
             // isLowOnly = 1 so combat prefers standing fire positions.
-            int tier = COVER_NONE;
+            int tier = CoverTierForPopcount(popcount);
             bool lowOnly = false;
-            if (popcount >= 2)
+            if (tier == COVER_NONE)
             {
-                if      (popcount >= 7) tier = COVER_FULL;
-                else if (popcount >= 4) tier = COVER_PARTIAL;
-                else                    tier = COVER_SPOT;
-                lowOnly = false;
-            }
-            else if (crouchPopcount >= 2)
-            {
-                if      (crouchPopcount >= 7) tier = COVER_FULL;
-                else if (crouchPopcount >= 4) tier = COVER_PARTIAL;
-                else                          tier = COVER_SPOT;
+                tier = CoverTierForPopcount(crouchPopcount);
+                if (tier == COVER_NONE) continue;
                 lowOnly = true;
             }
-            else continue;
+
+            // Hard ceiling: maxPts is exactly areaTotal*5, which is the largest
+            // possible sample count rather than a margin, so a future extra
+            // insertion site would overrun the allocation silently.
+            if (m_coverCount >= m_coverCapacity)
+            {
+                capacityHit = true;
+                break;
+            }
 
             CoverPoint &dst = m_coverPoints[m_coverCount];
             dst.pos = C;
-            memcpy(dst.blockMask, blockMask, sizeof(blockMask));
-            memcpy(dst.crouchMask, crouchMask, sizeof(crouchMask));
+            memcpy(dst.blockMask, blockMask, sizeof(dst.blockMask));
+            memcpy(dst.crouchMask, crouchMask, sizeof(dst.crouchMask));
             dst.tier = tier;
             dst.isLowOnly = lowOnly ? 1 : 0;
             dst.areaIdx = (short)ai;
@@ -1841,15 +1841,80 @@ unsigned char blockMask[8] = {0};
         }
     }
 
-Msg("[insbots] cover db built: %d pts / %d areas (%d samples tried, %d spawn-skipped)\n",
-        m_coverCount, areaTotal, samplesTried, spawnSkipped);
-    BotDbg("[insbots] popcount histogram: [0]=%d [1]=%d [2]=%d [3]=%d [4]=%d [5+]=%d\n",
-           popHist[0], popHist[1], popHist[2], popHist[3], popHist[4],
-           popHist[5]+popHist[6]+popHist[7]+popHist[8]);
+Msg("[insbots] cover db built: %d pts / %d areas (%d samples tried, %d spawn-skipped)%s\n",
+        m_coverCount, areaTotal, samplesTried, spawnSkipped,
+        capacityHit ? " [CAPACITY REACHED - points dropped]" : "");
+    BotDbg("[insbots] popcount histogram:");
+    for (int i = 0; i <= COVER_SECTORS; i++) BotDbg(" [%d]=%d", i, popHist[i]);
+    BotDbg("\n");
+
+    // Index the points just stored. Must come after the loop so the grid and
+    // the database always describe the same set.
+    BuildCoverGrid();
+}
+
+// Build the uniform grid over cover-point positions with a counting sort:
+// count per cell, prefix-sum, then scatter. O(points + cells) with no
+// per-point allocation, which matters because this runs on every map load.
+void CBotRoster::BuildCoverGrid()
+{
+    FreeCoverGrid();
+    if (m_coverCount <= 0 || !m_coverPoints) return;
+
+    float minX = 1e30f, maxX = -1e30f, minY = 1e30f, maxY = -1e30f;
+    for (int i = 0; i < m_coverCount; i++)
+    {
+        const CoverPoint *cp = &m_coverPoints[i];
+        if (cp->pos.x < minX) minX = cp->pos.x;
+        if (cp->pos.x > maxX) maxX = cp->pos.x;
+        if (cp->pos.y < minY) minY = cp->pos.y;
+        if (cp->pos.y > maxY) maxY = cp->pos.y;
+    }
+    m_coverGridMinX = minX;
+    m_coverGridMinY = minY;
+    m_coverGridW = (int)((maxX - minX) / COVER_GRID_CELL) + 1;
+    m_coverGridH = (int)((maxY - minY) / COVER_GRID_CELL) + 1;
+    if (m_coverGridW < 1) m_coverGridW = 1;
+    if (m_coverGridH < 1) m_coverGridH = 1;
+
+    int cells = m_coverGridW * m_coverGridH;
+    m_coverGridStart = (int *)malloc(sizeof(int) * (cells + 1));
+    if (!m_coverGridStart) { FreeCoverGrid(); return; }
+    for (int i = 0; i <= cells; i++) m_coverGridStart[i] = 0;
+
+    for (int i = 0; i < m_coverCount; i++)
+    {
+        int c = CoverGridCellY(m_coverPoints[i].pos.y) * m_coverGridW
+              + CoverGridCellX(m_coverPoints[i].pos.x);
+        m_coverGridStart[c + 1]++;
+    }
+    for (int i = 1; i <= cells; i++) m_coverGridStart[i] += m_coverGridStart[i - 1];
+
+    m_coverGridCells = (int *)malloc(sizeof(int) * m_coverCount);
+    if (!m_coverGridCells) { FreeCoverGrid(); return; }
+    int *cursor = (int *)malloc(sizeof(int) * cells);
+    if (!cursor) { FreeCoverGrid(); return; }
+    for (int i = 0; i < cells; i++) cursor[i] = m_coverGridStart[i];
+    for (int i = 0; i < m_coverCount; i++)
+    {
+        int c = CoverGridCellY(m_coverPoints[i].pos.y) * m_coverGridW
+              + CoverGridCellX(m_coverPoints[i].pos.x);
+        m_coverGridCells[cursor[c]++] = i;
+    }
+    free(cursor);
+}
+
+void CBotRoster::FreeCoverGrid()
+{
+    if (m_coverGridStart) { free(m_coverGridStart); m_coverGridStart = 0; }
+    if (m_coverGridCells) { free(m_coverGridCells); m_coverGridCells = 0; }
+    m_coverGridW = m_coverGridH = 0;
+    m_coverGridMinX = m_coverGridMinY = 0.0f;
 }
 
 void CBotRoster::FreeCoverDatabase()
 {
+    FreeCoverGrid();
     if (m_coverPoints) { free(m_coverPoints); m_coverPoints = 0; }
     if (m_coverOwnerSlot) { free(m_coverOwnerSlot); m_coverOwnerSlot = 0; }
     if (m_coverOwnedSince) { free(m_coverOwnedSince); m_coverOwnedSince = 0; }

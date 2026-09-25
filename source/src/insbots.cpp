@@ -517,10 +517,10 @@ static void Cmd_CoverDump(float radius)
         if (!cp) continue;
         Vector d = cp->pos - ref;
         if (d.x*d.x + d.y*d.y + d.z*d.z > rSq) continue;
-        Msg("[cover] idx=%d pos=(%.0f %.0f %.0f) tier=%d low=%u mask=%u%u%u%u%u%u%u%u\n",
-            i, cp->pos.x, cp->pos.y, cp->pos.z, cp->tier, cp->isLowOnly,
-            cp->blockMask[0],cp->blockMask[1],cp->blockMask[2],cp->blockMask[3],
-            cp->blockMask[4],cp->blockMask[5],cp->blockMask[6],cp->blockMask[7]);
+        Msg("[cover] idx=%d pos=(%.0f %.0f %.0f) tier=%d low=%u mask=",
+            i, cp->pos.x, cp->pos.y, cp->pos.z, cp->tier, cp->isLowOnly);
+        for (int d = 0; d < COVER_SECTORS; d++) Msg("%u", cp->blockMask[d]);
+        Msg("\n");
         shown++;
     }
     Msg("[insbots] %d cover points within %.0fu of reference (total DB=%d)\n",
@@ -547,10 +547,10 @@ static void Cmd_CoverEval()
         {
             const CoverPoint *cp = g_Bots.CoverAt(k);
             if (!cp) continue;
-            float yawDeg = atan2f(fakeThreat.y - cp->pos.y,
-                                  fakeThreat.x - cp->pos.x) * (180.0f/3.14159265358979f);
-            yawDeg = fmodf(yawDeg + 360.0f, 360.0f);
-            int sec = ((int)(yawDeg / 45.0f)) & 7;
+            // Was ((int)(yawDeg / 45.0f)) & 7, which is NOT centre-aligned and
+            // disagreed with every other consumer by up to one sector. Use the
+            // shared binning so the diagnostic reports what the bots act on.
+            int sec = CoverSectorFor(cp->pos, fakeThreat);
             float s = 0.0f;
             if (cp->blockMask[sec]) s += 100.0f;
             else if (cp->crouchMask[sec]) s += 55.0f;

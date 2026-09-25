@@ -229,9 +229,7 @@ void CInsBot::UpdateSquadFollow(float now, float &fwd, float &side, int &buttons
                     float dLeaderCand = sqrtf((cp->pos - leaderPos).LengthSqr());
                     if (dLeaderCand > 60.0f) continue;   // must be close to the leader
 
-                    float yawDeg = atan2f(threatPos.y - cp->pos.y, threatPos.x - cp->pos.x) * (180.0f / 3.14159265f);
-                    yawDeg = fmodf(yawDeg + 360.0f, 360.0f);
-                    int sec = ((int)(fmodf(yawDeg + 22.5f, 360.0f) / 45.0f)) & 7;   // Fix H-3: center sectors on ray directions
+                    int sec = CoverSectorFor(cp->pos, threatPos);
                     if (cp->blockMask[sec])
                         inCoverByNav = true;   // a nearby cover point protects from the threat
                 }

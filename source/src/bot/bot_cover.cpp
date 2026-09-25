@@ -41,20 +41,45 @@ bool CInsBot::IsPositionExposed(const Vector &myPos, const Vector &threatPos) co
 {
     if (!g_Bots.m_coverPoints || g_Bots.CoverCount() <= 0) return true;
 
-    float searchR = 75.0f;
+    const float searchR = 75.0f;
+    const bool  ducked = (m_lastButtons & IN_DUCK) != 0;
+
+    // Fast path: only the grid cells the probe disc overlaps. The cell range is
+    // derived from the disc itself, so this visits exactly the candidate set the
+    // linear scan would - just without touching the rest of the database.
+    if (g_Bots.m_coverGridCells)
+    {
+        int cx0 = g_Bots.CoverGridCellX(myPos.x - searchR);
+        int cx1 = g_Bots.CoverGridCellX(myPos.x + searchR);
+        int cy0 = g_Bots.CoverGridCellY(myPos.y - searchR);
+        int cy1 = g_Bots.CoverGridCellY(myPos.y + searchR);
+        for (int cy = cy0; cy <= cy1; cy++)
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int c = cy * g_Bots.m_coverGridW + cx;
+                for (int k = g_Bots.m_coverGridStart[c];
+                     k < g_Bots.m_coverGridStart[c + 1]; k++)
+                {
+                    const CoverPoint *cp = g_Bots.CoverAt(g_Bots.m_coverGridCells[k]);
+                    if (!cp) continue;
+                    if (xyd(cp->pos, myPos) > searchR) continue;
+                    if (CoverPointBlocks(*cp, threatPos, ducked)) return false;
+                }
+            }
+        return true;
+    }
+
+    // Fallback: the index is absent (empty database, or a build that failed to
+    // allocate). Behaviour is identical, only slower.
     for (int ci = 0; ci < g_Bots.CoverCount(); ci++)
     {
         const CoverPoint *cp = g_Bots.CoverAt(ci);
         if (!cp) continue;
         if (xyd(cp->pos, myPos) > searchR) continue;
 
-        float yawDeg = atan2f(threatPos.y - cp->pos.y, threatPos.x - cp->pos.x) * (180.0f / 3.14159265358979f);
-        yawDeg = fmodf(yawDeg + 360.0f, 360.0f);
-        int sec = ((int)(fmodf(yawDeg + 22.5f, 360.0f) / 45.0f)) & 7;
-
         // If a nearby point blocks this bearing while standing, or if it is low
         // cover and the bot is already ducked, the bot is not exposed in the open.
-        if (cp->blockMask[sec] || (cp->crouchMask[sec] && (m_lastButtons & IN_DUCK)))
+        if (CoverPointBlocks(*cp, threatPos, ducked))
             return false;
     }
     return true; // no protective cover point within 75u
@@ -62,10 +87,7 @@ bool CInsBot::IsPositionExposed(const Vector &myPos, const Vector &threatPos) co
 
 float CInsBot::EvaluateCover(const CoverPoint &cp, const Vector &threatPos) const
 {
-    float yawDeg = atan2f(threatPos.y - cp.pos.y,
-                          threatPos.x - cp.pos.x) * (180.0f / 3.14159265358979f);
-    yawDeg = fmodf(yawDeg + 360.0f, 360.0f);
-    int sec = ((int)(fmodf(yawDeg + 22.5f, 360.0f) / 45.0f)) & 7;   // Fix H-3: center sectors on ray directions
+    int sec = CoverSectorFor(cp.pos, threatPos);
 
     float s = 0.0f;
     if (cp.blockMask[sec]) s += 100.0f;         // full standing protection
@@ -174,11 +196,18 @@ bool CInsBot::ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int 
     if (bestIdx < 0) return false;
 
     const CoverPoint *bp = g_Bots.CoverAt(bestIdx);
+    if (!bp) return false;
+
+    // Validate the ownership tables before touching anything, including the
+    // caller's output parameters. (This check already preceded the ownership
+    // writes; what changes here is that a failure no longer leaves outSpot /
+    // outTier half-populated.)
+    if (!g_Bots.m_coverOwnerSlot || !g_Bots.m_coverOwnedSince) return false;
+
     outSpot = bp->pos;
     outTier = bp->tier;
 
     int myRosterIdx = (int)(this - g_Bots.m_bots);
-    if (!g_Bots.m_coverOwnerSlot || !g_Bots.m_coverOwnedSince) return false;
     g_Bots.ReleaseCoverOwnership(myRosterIdx);   // release any previously held spot
     g_Bots.m_coverOwnerSlot[bestIdx] = (short)myRosterIdx;
     g_Bots.m_coverOwnedSince[bestIdx] = now;
