@@ -118,6 +118,9 @@ CTurretRegistry g_Turrets;
 // ---------------------------------------------------------------------------
 static ICollideable   *TurretCollideable( CTurret *t );
 static Vector          TurretMuzzlePosition( CTurret *t );
+static bool            TurretBarrelPose( CTurret *t, Vector &hingeOut,
+                                         Vector &dirOut );
+static edict_t        *EdictFromTraceEnt( CBaseEntity *ent );
 static void            TurretApplyDamage( CTurret *t, int targetIdx,
                                           const Vector &dir, float dmg );
 static void           *TurretGetVtableSlot( void *pObject, int slot );
@@ -312,6 +315,53 @@ CfgVar insbot_turret_fire_tol_yaw   ("turret_fire_tolerance_yaw",   "5.0",   "tu
 CfgVar insbot_turret_fire_tol_pitch ("turret_fire_tolerance_pitch", "4.0",   "turret fire gate: max pitch error (deg)");
 CfgVar insbot_turret_spread         ("turret_spread",               "0.230", "turret bullet spread cone (deg; M249 real value)");
 
+// Re-roll the aim offset on the bots' cadence. Called once per tick from
+// FrameUpdate, before Aim(), so the offset a tick aims with is the one the
+// re-roll for that tick produced.
+//
+// WHY THIS IS NOT IN Acquire(). Acquire() is throttled to 10 Hz and returns
+// early while a target is held, so a roll there is either frozen for a whole
+// engagement or re-rolled at 10 Hz during an LOS flicker. Neither is the bots'
+// behaviour. This function is the only roll site, and it is cadence-gated.
+//
+// The 0.4-0.9 s window and the `rand()/RAND_MAX` shape are the bots' own
+// `frand(0.4f, 0.9f)` at bot_think.cpp:861, written out here rather than
+// calling frand() because that lives in bot/ and bot_internal.h declares itself
+// private to that directory - and the turret deliberately borrows the bots'
+// patterns instead of sharing their code (see the file header). The other
+// random rolls in this file (the spread cone, in Fire) use rand() the same way.
+//
+// DEFINED HERE, BELOW THE CfgVar BLOCK, on purpose: it reads
+// insbot_turret_aim_error, which does not exist above this point.
+static void TurretRefreshAimError( CTurret *t, float now )
+{
+    float err = TurretValue( t, "turret_aim_error",
+                             insbot_turret_aim_error.GetFloat() );
+
+    // A change to the SETTING restarts the bounded SHOT diagnostic, so a live
+    // run that sweeps several values gets a fresh sample budget per value. This
+    // must sit ABOVE the cadence gate: the setting can change on any tick, not
+    // only on a re-roll tick. Without it, the first value tested would spend the
+    // whole budget at 800 RPM (~13 shots/s) and the later values would log
+    // nothing at all.
+    if (err != t->m_lastAimErrSetting)
+    {
+        t->m_lastAimErrSetting = err;
+        t->m_shotsLogged = 0;
+    }
+
+    if (now < t->m_nextAimErrTime) return;
+
+    // Same 0.4-0.9 s window as bot_think.cpp:861.
+    t->m_nextAimErrTime = now + 0.4f
+                        + 0.5f * ((float)rand() / (float)RAND_MAX);
+
+    t->m_aimErrorYaw = InsTurretAimErrorRoll(
+        InsTurretAimOffsetDeg( err, false ), (float)rand() / (float)RAND_MAX );
+    t->m_aimErrorPitch = InsTurretAimErrorRoll(
+        InsTurretAimOffsetDeg( err, true ),  (float)rand() / (float)RAND_MAX );
+}
+
 // ---------------------------------------------------------------------------
 CTurret::CTurret()
 {
@@ -329,12 +379,15 @@ CTurret::CTurret()
     m_nextAcquire = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
+    m_shotHitTarget = false;
     m_shotsFired = 0;
     m_rejectsLogged = 0;
     m_acquiresLogged = 0;
     m_scanBearing = 0.0f;
     m_aimErrorYaw = 0.0f;
     m_aimErrorPitch = 0.0f;
+    m_nextAimErrTime = 0.0f;
+    m_lastAimErrSetting = -1.0f;
     m_residualYaw = 0.0f;
     m_residualPitch = 0.0f;
     m_poseYaw = -1;
@@ -358,12 +411,15 @@ void CTurret::Reset( int entindex, int team )
     m_nextAcquire = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
+    m_shotHitTarget = false;
     m_shotsFired = 0;
     m_rejectsLogged = 0;
     m_acquiresLogged = 0;
     m_scanBearing = 0.0f;
     m_aimErrorYaw = 0.0f;
     m_aimErrorPitch = 0.0f;
+    m_nextAimErrTime = 0.0f;
+    m_lastAimErrSetting = -1.0f;
     m_residualYaw = 0.0f;
     m_residualPitch = 0.0f;
     m_poseYaw = -1;
@@ -488,6 +544,7 @@ void CTurret::FrameUpdate( bool simulating )
 
     if (m_armed)
     {
+        TurretRefreshAimError( this, now ); // 2b - 0.4-0.9 s cadence, before Aim
         Acquire( now );     // 3 - throttled to ~10 Hz
         VerifyLOS();        // 4
         Aim( now );         // 5
@@ -1481,10 +1538,32 @@ void CTurret::Fire( float now )
                             insbot_turret_engage_range.GetFloat() ))
         INS_TURRET_REJECT( "out of engage range" );  // firing gate
 
+    // THE ROUND LEAVES ALONG THE BARREL. This is the whole of the aim error's
+    // mechanical effect: m_curYaw/m_curPitch already carry m_aimErrorYaw/Pitch,
+    // because Aim() added them to the desired angles and Traverse() stepped the
+    // pose onto them. Tracing along that same direction therefore sends the
+    // round where the gun is actually pointing - which is up to `turret_aim_error`
+    // degrees off the truth - instead of at the truth while the barrel shows
+    // something else.
+    //
+    // Before this, `dir` was `aim - from`: the direction to the TARGET. The
+    // barrel visibly pointed elsewhere, the round ignored it, and
+    // `turret_aim_error 0` and `turret_aim_error 20` were identically lethal.
+    //
+    // The miss distance is dist * sin(error): ~56 units at 800 units and 4 deg,
+    // ~166 units at 12 deg - both wider than a player hull.
+    //
+    // `from` is deliberately still TurretMuzzlePosition(), and `dir` comes from
+    // the same TurretBarrelPose() that function uses, so the muzzle and the
+    // round share one direction by construction.
+    Vector hinge, dir;
+    if (!TurretBarrelPose( this, hinge, dir ))
+        INS_TURRET_REJECT( "no collideable for the barrel direction" );
+
     // Spread: a small cone, defaulting to the M249's real spread_degrees.
+    // Applied ON TOP of the barrel direction, so the two error terms compose:
+    // the aim error is a sustained offset, the spread is per-round jitter.
     float spread = TurretValue( this, "turret_spread", insbot_turret_spread.GetFloat() );
-    Vector dir = ( aim - from );
-    InsTurretNormalize( dir.x, dir.y, dir.z );
     if (spread > 0.0f)
     {
         float r  = spread * (3.14159265f / 180.0f);
@@ -1505,9 +1584,24 @@ void CTurret::Fire( float now )
     enginetrace->TraceRay( ray, MASK_SHOT, &fireFilter, &tr );
 
     Vector hitPos = tr.fraction < 1.0f ? tr.endpos : ( from + dir * dist );
-    TurretApplyDamage( this, m_target, dir,
-                       TurretValue( this, "turret_damage",
-                                    insbot_turret_damage.GetFloat() ) );
+    // THE TRACE DECIDES. Before this, damage was applied to m_target whether or
+    // not the round reached it, so a shot into a wall still hurt the player
+    // behind it and the aim error could never produce a miss even in principle.
+    //
+    // The turret's own filter (CTurretTraceFilter + TurretBuildSkipSet) already
+    // excludes the vehicle and any boarded player, so "the trace reached the
+    // target" is the complete hit test - there is no second collision layer to
+    // consult, and a rider still cannot be shot (design section 6.4).
+    edict_t *hitEdict = EdictFromTraceEnt( tr.m_pEnt );
+    bool hitTarget = ( hitEdict != 0 &&
+                       hitEdict == engine->PEntityOfEntIndex( m_target ) );
+    if (hitTarget)
+    {
+        TurretApplyDamage( this, m_target, dir,
+                           TurretValue( this, "turret_damage",
+                                        insbot_turret_damage.GetFloat() ) );
+    }
+    m_shotHitTarget = hitTarget;
     // Real M249 tracer, on the mod's own 1-in-3 cadence. The shot counter is
     // incremented for every round fired, tracer or not, so the pattern does
     // not drift when shots are skipped.
@@ -1520,13 +1614,26 @@ void CTurret::Fire( float now )
 
     // Shot diagnostic. Without this there is no way to tell "the turret never
     // fired" from "it fired and nothing was visible" - both look identical from
-    // the client. Bounded to the first few shots per turret so a long burst
-    // cannot flood the log.
-    if (m_shotsLogged < 6)
+    // the client.
+    //
+    // Bounded to 40 per SETTING VALUE rather than 6 per entity lifetime. The
+    // live probe runs three six-second phases, and at 800 RPM (~13.3 shots/s) a
+    // single phase can produce ~80 shots - so a lifetime budget would be spent
+    // by the first phase and the later ones would log nothing at all.
+    // TurretRefreshAimError resets this counter whenever `turret_aim_error`
+    // changes, so 40 is per value; the bound still holds because a value only
+    // ever gets 40 lines no matter how long it is left in place.
+    if (m_shotsLogged < 40)
     {
         m_shotsLogged++;
-        Msg( "[insbots] turret %d SHOT %d target=%d dist=%.0f hit=%.2f effects=%d\n",
+        // `frac=` is the trace fraction and `hit=` is the VERDICT. They were
+        // both called `hit=` once, which made "the trace stopped at 0.98"
+        // indistinguishable from "the round reached the target".
+        Msg( "[insbots] turret %d SHOT %d target=%d dist=%.0f frac=%.2f "
+             "hit=%s err=%.1f/%.1f effects=%d\n",
              m_entIndex, m_shotsLogged, m_target, dist, tr.fraction,
+             m_shotHitTarget ? "target" : "miss",
+             m_aimErrorYaw, m_aimErrorPitch,
              g_pEffects ? 1 : 0 );
     }
     #undef INS_TURRET_REJECT
@@ -1850,10 +1957,47 @@ static ICollideable *TurretCollideable( CTurret *t )
 #define INS_TURRET_PITCH_PIVOT_LOCAL_Z  (103.80f)
 #define INS_TURRET_MUZZLE_FORWARD       ( 13.93f)
 
-static Vector TurretMuzzlePosition( CTurret *t )
+// The elevation hinge in world space and the barrel's world direction, both
+// from the turret's LIVE pose (m_curYaw / m_curPitch - the angles the pose
+// parameter is actually driving, which include the aim error).
+//
+// These two values are deliberately produced together. The muzzle is the hinge
+// offset along the direction, and the firing trace uses that same direction, so
+// "where the barrel is" and "where the round goes" cannot disagree.
+//
+// CONVENTION - this must match what Aim() produces and what WritePose()
+// stores, because m_flPoseParameter is a LOCAL rotation relative to the hull.
+//
+// Aim() computes `localYaw = worldYaw - hullYaw - 90`, so the barrel's
+// world bearing is `localYaw + hullYaw + 90`. At localYaw = 0 that is
+// bearing 90, i.e. the entity's LOCAL +Y - and that is where this model's
+// barrel actually points at rest: the M249's geometry sits 32 units
+// forward of the turret ring and only 8.6 behind it, and the QC puts the
+// bonnet at model +Y. The FOV test agrees independently:
+// `yawRad = m_curYaw + hullYaw + 90` with `fwd = (cos, sin)`.
+//
+// So, for a plugin yaw of `theta`:
+//   yaw 0     -> (0,+1,0), out over the bonnet
+//   yaw +90   -> (-1,0,0), local -X
+//   yaw -90   -> (+1,0,0), local +X
+//   pitch     -> positive is DOWN: +20 depresses, -55 elevates
+//
+// THIS WAS WRONG ONCE. The direction previously read `(sin, -cos)`, which is the
+// mirror of the above: at yaw 0 it pointed local -Y, i.e. 180 degrees out from
+// both Aim() and the FOV test. The comment justifying it ("the mesh's front is
+// -Y") came from the spawner's facing note, which is about where the ENGINE
+// expects a vehicle's front to sit for steering purposes - not about where
+// this mesh's barrel points. The error put the computed muzzle ~62 units
+// behind the ring, so the tracer, the muzzle flash and the LOS trace origin
+// all sat inside or behind the cab. Damage was unaffected because the
+// firing trace was drawn from the target side.
+//
+// See temp/humvee_turret_rig/yaw_convention.py, which derives this from the
+// gun geometry and the compiled model rather than from prose.
+static bool TurretBarrelPose( CTurret *t, Vector &hingeOut, Vector &dirOut )
 {
     ICollideable *col = TurretCollideable( t );
-    if (!col) return Vector( 0, 0, 0 );
+    if (!col) return false;
 
     // The elevation hinge, NOT the ring: the gun rotates about this point, so it
     // is the fixed origin the muzzle direction is measured from. The lateral
@@ -1875,51 +2019,24 @@ static Vector TurretMuzzlePosition( CTurret *t )
     float px, py, pz;
     InsTurretVectorTransform( pivotLocal.x, pivotLocal.y, pivotLocal.z,
                               vm, px, py, pz );
+    hingeOut = Vector( px, py, pz );
 
-    float yawRad   = t->m_curYaw   * (3.14159265f / 180.0f);
-    float pitchRad = t->m_curPitch * (3.14159265f / 180.0f);
-
-    // Barrel direction in the vehicle's LOCAL frame, then rotated to world by
-    // the vehicle's own transform.
-    //
-    // CONVENTION - this must match what Aim() produces and what WritePose()
-    // stores, because m_flPoseParameter is a LOCAL rotation relative to the
-    // hull.
-    //
-    // Aim() computes `localYaw = worldYaw - hullYaw - 90`, so the barrel's
-    // world bearing is `localYaw + hullYaw + 90`. At localYaw = 0 that is
-    // bearing 90, i.e. the entity's LOCAL +Y - and that is where this model's
-    // barrel actually points at rest: the M249's geometry sits 32 units
-    // forward of the turret ring and only 8.6 behind it, and the QC puts the
-    // bonnet at model +Y. The FOV test agrees independently:
-    // `yawRad = m_curYaw + hullYaw + 90` with `fwd = (cos, sin)`.
-    //
-    // So, for a plugin yaw of `theta`:
-    //   yaw 0     -> (0,+1,0), out over the bonnet
-    //   yaw +90   -> (-1,0,0), local -X
-    //   yaw -90   -> (+1,0,0), local +X
-    //   pitch     -> positive is DOWN: +20 depresses, -55 elevates
-    //
-    // THIS WAS WRONG. It previously read `(sin, -cos)`, which is the mirror of
-    // the above: at yaw 0 it pointed local -Y, i.e. 180 degrees out from both
-    // Aim() and the FOV test. The comment justifying it ("the mesh's front is
-    // -Y") came from the spawner's facing note, which is about where the ENGINE
-    // expects a vehicle's front to sit for steering purposes - not about where
-    // this mesh's barrel points. The error put the computed muzzle ~62 units
-    // behind the ring, so the tracer, the muzzle flash and the LOS trace origin
-    // all sat inside or behind the cab. Damage was unaffected because the
-    // firing trace is drawn from the target side.
-    //
-    // See temp/humvee_turret_rig/yaw_convention.py, which derives this from the
-    // gun geometry and the compiled model rather than from prose.
-    Vector dirLocal( -sinf( yawRad ) * cosf( pitchRad ),
-                      cosf( yawRad ) * cosf( pitchRad ),
-                     -sinf( pitchRad ) );
+    // The barrel direction, local then rotated to world. See
+    // InsTurretBarrelDirLocal for the convention and why it is shared.
+    float lx, ly, lz;
+    InsTurretBarrelDirLocal( t->m_curYaw, t->m_curPitch, lx, ly, lz );
 
     float dx, dy, dz;
-    InsTurretVectorRotate( dirLocal.x, dirLocal.y, dirLocal.z, vm, dx, dy, dz );
+    InsTurretVectorRotate( lx, ly, lz, vm, dx, dy, dz );
+    dirOut = Vector( dx, dy, dz );
+    return true;
+}
 
-    return Vector( px, py, pz ) + Vector( dx, dy, dz ) * INS_TURRET_MUZZLE_FORWARD;
+static Vector TurretMuzzlePosition( CTurret *t )
+{
+    Vector hinge, dir;
+    if (!TurretBarrelPose( t, hinge, dir )) return Vector( 0, 0, 0 );
+    return hinge + dir * INS_TURRET_MUZZLE_FORWARD;
 }
 
 // TurretMuzzleAngles() lived here and fed MuzzleFlash's angles argument. It
@@ -2109,12 +2226,11 @@ void CTurret::Acquire( float now )
         if (e && !e->IsFree() && TurretTargetPoints( e, pts ) > 1)
             m_targetLastPos = pts[1];
         m_state = TURRET_ENGAGING;
-        // Aim error is re-rolled on the bots' 0.4-0.9 s cadence, not per
-        // frame: a per-frame reroll averages out to a laser (design 6.2).
-        float e0 = TurretValue( this, "turret_aim_error",
-                                insbot_turret_aim_error.GetFloat() );
-        m_aimErrorYaw   = ((float)(rand() % 2001) / 1000.0f - 1.0f) * e0;
-        m_aimErrorPitch = ((float)(rand() % 2001) / 1000.0f - 1.0f) * e0;
+        // The aim offset is NOT rolled here. Acquire() is throttled to 10 Hz and
+        // returns early while a target is held, so a roll at this site is either
+        // frozen for a whole engagement or re-rolled at 10 Hz during an LOS
+        // flicker. TurretRefreshAimError() owns the roll and runs on the bots'
+        // 0.4-0.9 s cadence (bot_think.cpp:861).
     }
 }
 

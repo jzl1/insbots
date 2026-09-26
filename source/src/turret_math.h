@@ -66,6 +66,34 @@ inline bool InsTurretAimed( float dYaw, float dPitch,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Aim error. `turret_aim_error` is the half-width of a uniform roll applied to
+// the desired bearing; it is NOT an error measurement (see turret.h's note on
+// why it must stay separate from m_residual*).
+//
+// PITCH IS HALF OF YAW. The bots roll `m_aimErrX = frand(-err, err) * 0.5f` for
+// pitch and full width for yaw (bot_think.cpp:863-864). A vertical miss is more
+// visible than a horizontal one at the same angle, so the bots damp it; the
+// turret mirrors the rule so the two aim models stay comparable.
+// ---------------------------------------------------------------------------
+inline float InsTurretAimOffsetDeg( float errorDeg, bool pitch )
+{
+    if (errorDeg != errorDeg) return 0.0f;         // NaN
+    if (errorDeg < 0.0f) errorDeg = -errorDeg;     // a negative setting is a width
+    return pitch ? errorDeg * 0.5f : errorDeg;
+}
+
+// unit in [0,1] -> [-half, +half]. Out-of-range units are clamped rather than
+// wrapped: a wrapped roll would put a garbage unit back inside the cone.
+inline float InsTurretAimErrorRoll( float halfWidthDeg, float unit )
+{
+    if (halfWidthDeg != halfWidthDeg) return 0.0f; // NaN
+    if (unit != unit) return 0.0f;                 // NaN
+    if (unit < 0.0f) unit = 0.0f;
+    if (unit > 1.0f) unit = 1.0f;
+    return (unit * 2.0f - 1.0f) * halfWidthDeg;
+}
+
 // The acquisition cone's cosine, for the `dot / len < cosFov` rejection in the
 // turret's own search loop.
 //
@@ -122,6 +150,37 @@ inline float InsTurretNormPose( float value, float start, float end )
 // ===========================================================================
 
 #define INS_TURRET_DEG2RAD (3.14159265358979323846f / 180.0f)
+
+// ---------------------------------------------------------------------------
+// The barrel's direction in the VEHICLE'S LOCAL frame, from the turret's own
+// local yaw/pitch. This is the single source of truth for "which way the gun
+// points": TurretMuzzlePosition() offsets the hinge along it, and Fire() traces
+// the round along it. Because both take the same vector, the round can never
+// leave the barrel at an angle the pose does not show - and the aim error, which
+// lives in m_curYaw/m_curPitch by the time this is called, becomes a real miss.
+//
+// CONVENTION (derived from the gun geometry and the compiled model, not from
+// prose - see temp/humvee_turret_rig/yaw_convention.py, quoted in
+// TurretBarrelPose's own comment in turret.cpp):
+//   yaw 0    -> ( 0, +1, 0)  local +Y, out over the bonnet
+//   yaw +90  -> (-1,  0, 0)  local -X
+//   yaw -90  -> (+1,  0, 0)  local +X
+//   pitch    -> positive is DOWN: +20 depresses, -55 elevates
+//
+// `Aim()` produces a matching local yaw as `worldYaw - hullYaw - 90`, so this
+// vector's world bearing is `localYaw + hullYaw + 90` once rotated by the
+// vehicle matrix - the same inverse mapping the acquisition FOV test uses.
+// ---------------------------------------------------------------------------
+inline void InsTurretBarrelDirLocal( float yawDeg, float pitchDeg,
+                                     float &dx, float &dy, float &dz )
+{
+    float y  = yawDeg   * INS_TURRET_DEG2RAD;
+    float p  = pitchDeg * INS_TURRET_DEG2RAD;
+    float cp = cosf( p );
+    dx = -sinf( y ) * cp;
+    dy =  cosf( y ) * cp;
+    dz = -sinf( p );
+}
 
 // QAngle is (pitch, yaw, roll); the caller passes them in that order.
 inline void InsTurretAngleMatrix( float pitch, float yaw, float roll,

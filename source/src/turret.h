@@ -64,6 +64,9 @@ public:
     // Diagnostic counter: the first few shots per turret are logged so a live
     // run can distinguish "never fired" from "fired but nothing visible".
     int    m_shotsLogged;
+    // Whether the last shot's trace reached the intended target. Diagnostic
+    // only; read by the bounded SHOT log line in Fire().
+    bool   m_shotHitTarget;
     // Every round fired, tracer or not. Drives the 1-in-3 tracer cadence that
     // matches the mod's own M249. Distinct from m_shotsLogged, which is a
     // bounded DIAGNOSTIC counter for the first few shots.
@@ -78,10 +81,27 @@ public:
     // m_rejectsLogged already close for the later stages.
     int    m_acquiresLogged;
     float  m_scanBearing;
-    // The random aim offset, re-rolled in Acquire and added to the desired
-    // bearing in Aim. This is a TUNING value, not an error measurement.
+    // The random aim offset, added to the desired bearing in Aim. This is a
+    // TUNING value, not an error measurement.
+    //
+    // Re-rolled on the BOTS' cadence - frand(0.4, 0.9) seconds
+    // (bot_think.cpp:861) - and NOT per acquisition. Rolling per acquisition has
+    // two failure modes and the cadence has neither: during a sustained
+    // engagement the offset would be frozen for the whole fight, and during an
+    // LOS flicker (a target stepping behind a pole and back) it would be
+    // re-rolled at Acquire()'s 10 Hz rate. That 10 Hz flicker re-roll is the
+    // "unexplained jitter" recorded in
+    // temp/humvee_turret_rig/RESULTS.md:486-492.
     float  m_aimErrorYaw;
     float  m_aimErrorPitch;
+    // Deadline for the next re-roll, in gpGlobals->curtime seconds. Compared
+    // against `now` in TurretRefreshAimError(), which is called every tick.
+    float  m_nextAimErrTime;
+    // The `turret_aim_error` SETTING (not the rolled offset) that the current
+    // shot-diagnostic budget belongs to. When the setting changes, the budget is
+    // reset so each value gets its own sample window - see TurretRefreshAimError.
+    // -1.0f is a sentinel that no valid setting equals.
+    float  m_lastAimErrSetting;
     // The live residual between where the gun points and where it wants to
     // point. Recomputed every frame in Traverse and consumed by the fire gate.
     //
