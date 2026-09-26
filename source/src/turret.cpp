@@ -77,8 +77,12 @@ extern int                  FindSendPropOffset( SendTable *, const char * );
 
 // CfgVars that live in insbots.cpp and are read by the turret. Declared here
 // the way bot_perceive.cpp:45-47 declares the ones it borrows.
+//
+// `insbot_fov` used to be borrowed here as the turret's acquisition cone. It is
+// deliberately NOT any more: it is the bots' shared setting (default 120), and
+// the turret has its own `turret_acquire_fov` (default 360). Re-adding the
+// borrow would silently reintroduce a +/-60 degree blind spot behind the gun.
 extern CfgVar insbot_vis_range;
-extern CfgVar insbot_fov;
 
 // Shared smoke-occlusion predicate, defined in bot/bot_perceive.cpp and
 // declared in bot.h. Declared here rather than including bot.h so this TU does
@@ -279,6 +283,13 @@ CfgVar insbot_turret_damage       ("turret_damage",       "50",   "turret damage
 // existed. Do not reintroduce a burst cycle without a reason that comes from
 // the turret's own design rather than from the bots'.
 CfgVar insbot_turret_scan_speed   ("turret_scan_speed",   "20",   "turret idle scan speed (deg/s)");
+// The turret's own acquisition cone, deliberately separate from the bots'
+// `fov` (default 120, `insbots.cpp:136`). The default here is a full circle:
+// the ring can see every direction at once, so the idle sweep only decides
+// where the gun points while nothing is visible, never what it is able to
+// notice. Narrowing this below 360 restores a directional cone without a
+// rebuild.
+CfgVar insbot_turret_acquire_fov  ("turret_acquire_fov",  "360",  "turret acquisition cone (deg; 360=omnidirectional)");
 
 // Fire-gate tolerances and spread. The design calls these tunable but not
 // part of the core eight; they are CfgVars all the same so a playtest can
@@ -305,6 +316,7 @@ CTurret::CTurret()
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
     m_rejectsLogged = 0;
+    m_acquiresLogged = 0;
     m_scanBearing = 0.0f;
     m_aimErrorYaw = 0.0f;
     m_aimErrorPitch = 0.0f;
@@ -332,6 +344,7 @@ void CTurret::Reset( int entindex, int team )
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
     m_rejectsLogged = 0;
+    m_acquiresLogged = 0;
     m_scanBearing = 0.0f;
     m_aimErrorYaw = 0.0f;
     m_aimErrorPitch = 0.0f;
@@ -1688,18 +1701,38 @@ void CTurret::Acquire( float now )
     }
 
     Vector from = TurretRayOrigin( this );
-    float  bestDist = 1.0e12f;
+    float  bestDist = 1.0e12f;      // SCORE: dist^2, with the 0.64 stickiness
+    float  bestRange = 0.0f;        // the winner's true distance, for the log
+    float  bestBearing = 0.0f;      // the winner's WORLD bearing, for the log
+    float  bestWantYaw = 0.0f;      // the LOCAL yaw the gun needs, for the log
     int    best = 0;
     const float spotRange = insbot_vis_range.GetFloat();
 
-    // The FOV cone is measured from the turret's CURRENT aim, not the hull's
-    // heading: a ring-mounted gun engages what it is pointing at (design
-    // section 6.3, mirroring bot_perceive.cpp:588-591).
+    // THE SEARCH IS OMNIDIRECTIONAL. The turret's own `turret_acquire_fov`
+    // defaults to 360, so by default there is no directional gate at all and
+    // every valid, visible, in-range enemy is a candidate no matter where the
+    // gun happens to be pointing.
+    //
+    // WHY THE CONE WAS REMOVED RATHER THAN WIDENED: the old code borrowed the
+    // bots' `insbot_fov` (120 degrees) and measured it from `m_curYaw`, the
+    // gun's live bearing. On a 20 deg/s idle sweep that made detection a
+    // function of how long ago the barrel had passed the target - up to 18
+    // seconds for an enemy directly behind the truck, and the turret could be
+    // shot to pieces from behind while its gun was still coming round. A
+    // mounted ring gun has no eye and no neck; "what is behind me" is a real
+    // question for it and the answer is always "visible if the hull is not in
+    // the way", which is what the LOS trace below already decides.
+    //
+    // The setting is kept (rather than the test being deleted outright) so a
+    // directional turret is still reachable with `insbot set turret_acquire_fov
+    // 120` and no rebuild.
     //
     // m_curYaw is a LOCAL angle, so it is converted back to a world bearing
-    // here using the inverse of Aim()'s mapping. Comparing a local yaw against
-    // a world direction would rotate the cone with the truck instead of with
-    // the gun.
+    // here using the inverse of Aim()'s mapping. This conversion is retained
+    // even though the default cone is a full circle: with a narrowed cone the
+    // comparison must still be against the gun's world bearing, not the hull's,
+    // or the cone would rotate with the truck instead of with the gun
+    // (design section 6.3, mirroring bot_perceive.cpp:588-591).
     float hullYaw = 0.0f;
     {
         ICollideable *col = TurretCollideable( this );
@@ -1707,7 +1740,9 @@ void CTurret::Acquire( float now )
     }
     float yawRad = (m_curYaw + hullYaw + 90.0f) * (3.14159265f / 180.0f);
     Vector fwd( cosf( yawRad ), sinf( yawRad ), 0 );
-    float cosFov = cosf( insbot_fov.GetFloat() * 0.5f * (3.14159265f / 180.0f) );
+    float cosFov = InsTurretConeCos(
+        TurretValue( this, "turret_acquire_fov",
+                     insbot_turret_acquire_fov.GetFloat() ) );
 
     for (int i = 1; i <= gpGlobals->maxClients; i++)
     {
@@ -1720,9 +1755,11 @@ void CTurret::Acquire( float now )
         float dist = d.Length();
         if (dist > spotRange) continue;                 // spot range 2500
 
-        // FOV test, skipped for the target we already hold so a target that
-        // drifts to the cone edge is not dropped mid-track.
-        if (i != m_target)
+        // Directional gate. Skipped entirely for the target we already hold, so
+        // a target that drifts to the cone edge is not dropped mid-track; and
+        // short-circuited at cosFov < 0, which is what `turret_acquire_fov 360`
+        // resolves to and what makes the default search omnidirectional.
+        if (i != m_target && cosFov >= 0.0f)
         {
             Vector flat( d.x, d.y, 0 );
             float flatLen = flat.Length();
@@ -1737,10 +1774,32 @@ void CTurret::Acquire( float now )
         if (scoreDistSq > bestDist) continue;
         bestDist = scoreDistSq;
         best = i;
+        bestRange = dist;
+        bestBearing = InsTurretNormalizeAngle(
+            atan2f( d.y, d.x ) * (180.0f / 3.14159265f ) );
+        bestWantYaw = InsTurretNormalizeAngle(
+            bestBearing - hullYaw - 90.0f );
     }
 
     if (best)
     {
+        // Bounded acquisition diagnostic. This is the evidence a live run needs
+        // for "it is aware of all directions": an ACQUIRE line whose `want`
+        // (the LOCAL yaw the gun must reach) is far from the gun's current
+        // `yaw` proves the directional gate did not apply.
+        //
+        // `yaw` and `want` are both LOCAL and are the pair to compare. `bearing`
+        // is the target's WORLD bearing, printed for orientation only - it is
+        // offset from the local pair by hullYaw + 90, so it must not be
+        // compared against `yaw` directly.
+        if (m_acquiresLogged < 6)
+        {
+            m_acquiresLogged++;
+            Msg( "[insbots] turret %d ACQUIRE %d target=%d dist=%.0f yaw=%.1f "
+                 "want=%.1f bearing=%.1f\n",
+                 m_entIndex, m_acquiresLogged, best, bestRange,
+                 m_curYaw, bestWantYaw, bestBearing );
+        }
         m_target = best;
         m_targetLastSeen = now;
         edict_t *e = engine->PEntityOfEntIndex( best );

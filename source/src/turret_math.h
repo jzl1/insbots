@@ -66,6 +66,29 @@ inline bool InsTurretAimed( float dYaw, float dPitch,
     return true;
 }
 
+// The acquisition cone's cosine, for the `dot / len < cosFov` rejection in the
+// turret's own search loop.
+//
+// THE TURRET DOES NOT USE THE BOTS' `fov`. `insbot_fov` defaults to 120 degrees
+// and is the bots' shared setting (insbots.cpp:136); a turret inheriting it
+// could only see +/-60 degrees from wherever the gun happened to be pointing,
+// so on a 20 deg/s idle sweep an enemy standing behind the truck went unnoticed
+// until the barrel physically swept past them - about 18 seconds on average,
+// and 36 in the worst case. The turret has its own `turret_acquire_fov`,
+// defaulting to 360.
+//
+// cos(180) is -1, and a normalised dot product can never be less than -1, so
+// returning -1 for a full circle makes every candidate pass the test. That is
+// the whole mechanism behind "aware of all directions": the loop, its ordering
+// and its LOS gate are untouched, only this one predicate stops rejecting.
+inline float InsTurretConeCos( float fovDegrees )
+{
+    if (fovDegrees != fovDegrees) return -1.0f;      // NaN -> omnidirectional
+    if (fovDegrees >= 360.0f)     return -1.0f;      // full circle
+    if (fovDegrees < 0.0f)        fovDegrees = 0.0f;
+    return cosf( fovDegrees * 0.5f * (3.14159265358979323846f / 180.0f) );
+}
+
 // value -> 0..1 control, matching Studio_SetPoseParameter's own normalisation
 // (public/bone_setup.cpp:4186-4189) so a value written here is what the bone
 // solver will read back.

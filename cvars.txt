@@ -350,6 +350,7 @@ insbot set turret_aim_error            "4.0"   // turret aim error in degrees (0
 insbot set turret_engage_range         "1500"  // turret firing gate distance (units)
 insbot set turret_damage               "50"    // turret damage per bullet
 insbot set turret_scan_speed           "20"    // turret idle scan speed (deg/s)
+insbot set turret_acquire_fov          "360"   // turret acquisition cone (deg; 360=omnidirectional)
 insbot set turret_fire_tolerance_yaw    "5.0"  // turret fire gate: max yaw error (deg)
 insbot set turret_fire_tolerance_pitch  "4.0"  // turret fire gate: max pitch error (deg)
 insbot set turret_spread               "0.230" // turret bullet spread cone (deg; M249 real value)

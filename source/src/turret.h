@@ -67,6 +67,12 @@ public:
     // Diagnostic counter: the first few fire-gate rejections per turret, each
     // logged with its reason.
     int    m_rejectsLogged;
+    // Diagnostic counter: the first few successful acquisitions per turret.
+    // Without it a live run cannot tell "the turret never noticed the enemy"
+    // from "it noticed, turned, and was blocked by the fire gate" - the two
+    // look identical from the outside, which is the same gap m_shotsLogged and
+    // m_rejectsLogged already close for the later stages.
+    int    m_acquiresLogged;
     float  m_scanBearing;
     // The random aim offset, re-rolled in Acquire and added to the desired
     // bearing in Aim. This is a TUNING value, not an error measurement.
