@@ -64,6 +64,10 @@ public:
     // Diagnostic counter: the first few shots per turret are logged so a live
     // run can distinguish "never fired" from "fired but nothing visible".
     int    m_shotsLogged;
+    // Every round fired, tracer or not. Drives the 1-in-3 tracer cadence that
+    // matches the mod's own M249. Distinct from m_shotsLogged, which is a
+    // bounded DIAGNOSTIC counter for the first few shots.
+    int    m_shotsFired;
     // Diagnostic counter: the first few fire-gate rejections per turret, each
     // logged with its reason.
     int    m_rejectsLogged;

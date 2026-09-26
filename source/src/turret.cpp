@@ -329,6 +329,7 @@ CTurret::CTurret()
     m_nextAcquire = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
+    m_shotsFired = 0;
     m_rejectsLogged = 0;
     m_acquiresLogged = 0;
     m_scanBearing = 0.0f;
@@ -357,6 +358,7 @@ void CTurret::Reset( int entindex, int team )
     m_nextAcquire = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
+    m_shotsFired = 0;
     m_rejectsLogged = 0;
     m_acquiresLogged = 0;
     m_scanBearing = 0.0f;
@@ -875,6 +877,8 @@ bool TurretHandleCommand( int argc )
 // ===========================================================================
 extern IEffects *g_pEffects;   // resolved in insbots.cpp Load()
 
+static InsTurretTEDispatchEffectFn InsTurretTEDispatchEffect();
+
 // A Humvee on its roof tracking and firing at the sky is a visible absurdity.
 // Firing is suppressed while roll exceeds ~60 deg; tracking and pose writing
 // continue, so landing back on the wheels resumes instantly (design 6.2).
@@ -888,82 +892,7 @@ static bool TurretHullInverted( CTurret *t )
     return uz < cosf( 60.0f * (3.14159265f / 180.0f) );
 }
 
-// The visible muzzle signature.
-//
-// WHY THIS IS NOT MuzzleFlash() ANY MORE - measured, not assumed.
-//
-// The plugin used to call g_pEffects->MuzzleFlash(pos, ang, 1.0f, 0). That
-// call is correctly formed and lands on the right vtable slot, but in the
-// SHIPPED CLIENT the method is an empty function:
-//
-//     CEffectsClient::MuzzleFlash   0x1021FB30   ret 0x10   <- 4 args, no body
-//     CEffectsClient::Beam          0x1021FB20   ret 0x40   <- likewise
-//
-// (Resolved through the client's own RTTI: .?AVCEffectsClient@@ ->
-// CompleteObjectLocator -> vtable -> ILT thunk -> body. The argument counts
-// match the declared signatures, which cross-checks the mapping.) The server
-// half is real - CEffectsServer::MuzzleFlash does build and send a
-// TE_MuzzleFlash - but the client's C_TEMuzzleFlash::PostDataUpdate hands it
-// straight to that empty stub, so nothing is ever drawn. No value of `type`
-// or `scale` can change that.
-//
-// Sparks() IS real on both sides: the server emits TE_Sparks, and the client
-// implements it as FX_ElectricSpark - a burst of bright trail particles that
-// respects gravity. Fired along the barrel from the muzzle attachment it is
-// the closest thing to a muzzle flash this client can actually draw, and it
-// is the same call the game DLL itself uses for weapon hits
-// (basecombatcharacter.cpp:2072: g_pEffects->Sparks( pos, 2, 2 )).
-//
-// Particle budget: FX_ElectricSpark creates nMagnitude^2 * [2,4] particles
-// with a lifetime of nMagnitude * [1,2] seconds, and the turret fires at
-// 800 RPM, so magnitude 2 is 8-16 particles living 2-4 s. At 13 shots/second
-// that is a few hundred live particles while a target is held. Magnitude 1
-// would quarter it; drop to 1 here if the particle count ever matters.
-static void TurretMuzzleFlash( const Vector &pos, const Vector &dir )
-{
-    if (!g_pEffects) return;
-    g_pEffects->Sparks( pos, 2, 2, &dir );
-}
-
-// The tracer is DEAD on this client, for the same reason the muzzle flash was.
-//
-// g_pEffects->Beam() is correctly declared and reaches the right slot, but the
-// shipped client's implementation is empty:
-//
-//     CEffectsClient::Beam   0x1021FB20   ret 0x40   <- 16 args, no body
-//
-// So there is nothing to fix on the plugin side: the beam can never be drawn.
-// Rather than keep a call that provably does nothing, the shot now reuses the
-// one path that IS live - a short, tight Sparks burst along the flight line.
-// Sparks' direction argument biases the particle velocity, so a burst at the
-// muzzle already throws material down the barrel; this adds a second, much
-// smaller burst partway along the trace to suggest the round in flight.
-//
-// If a real tracer is ever wanted, it has to come from a client-side change
-// or from an effect the client genuinely implements - see
-// temp/humvee_turret_rig/RESULTS.md.
-static void TurretTracer( const Vector &from, const Vector &to )
-{
-    if (!g_pEffects) return;
-    Vector dir = to - from;
-    // NormalizeInPlace returns the ORIGINAL length, which is the shot
-    // distance - the offset below must be a fraction of that, not of a unit
-    // vector, or the burst lands 0.25 units from the muzzle.
-    float dist = InsTurretNormalize( dir.x, dir.y, dir.z );
-    if (dist < 1.0f) return;                                      // degenerate
-
-    // A quarter of the way down the line: close enough to the muzzle to read
-    // as the same event, far enough to suggest travel.
-    Vector mid = from + dir * (dist * 0.25f);
-    g_pEffects->Sparks( mid, 1, 1, &dir );
-}
-
-static void TurretImpact( const Vector &pos, const Vector &dir )
-{
-    if (g_pEffects) g_pEffects->MetalSparks( pos, dir );
-}
-
-// ---- broadcast recipient filter for the turret's gunshot -------------------
+// ---- broadcast recipient filter for the turret's gunshot and tracer --------
 // Mirrors voice.cpp:80's CVoiceFilter. Kept local rather than reusing that one
 // because that class is file-static there and is named for voice.
 class CTurretSoundFilter : public IRecipientFilter
@@ -993,6 +922,70 @@ private:
     int m_idx[64];
     int m_n;
 };
+
+// Fire a REAL Insurgency M249 red tracer.
+//
+// This is the client's own effect-dispatch path, not a particle imitation.
+// The plugin hands a DispatchEffect temp-entity to the game DLL, which sends
+// it to every client in `filter`; each client runs its registered
+// "Tracer" callback, which calls FX_Tracer, which maps m_nDamageType == 3 to
+// "effects/redflare" - the material player-fired M249 rounds use.
+//
+// Everything here was measured, not assumed. See
+// docs/humvee-turret-muzzle-tracer-feasibility.md:
+//   section 2 - why routes A/B/B2/C/D were rejected and E2 chosen
+//   section 3 - TracerCallback (client.dll 0x100B8A30) and FX_Tracer
+//               (0x100B87D0), including the material table and the 128-unit
+//               distance gate
+//   section 4 - the CEffectData layout, audited against three binaries
+//
+// THREE FIELDS ARE LOAD-BEARING, and getting any of them wrong makes the
+// effect silently invisible rather than failing loudly:
+//
+//   m_vStart != m_vOrigin   FX_Tracer returns early if the two points are
+//                           closer than 128 units. (This is exactly why the
+//                           AcceptInput("DispatchEffect") route cannot work:
+//                           InputDispatchEffect sets m_vStart = m_vOrigin, so
+//                           the distance is always 0.)
+//   m_nDamageType == 3      iTracerType. 0 is TRACERTYPE_NONE, which returns
+//                           before drawing anything at all.
+//   m_nHitBox == 0          leaves GetTracerOrigin using m_vStart verbatim
+//                           instead of overriding it from a weapon attachment.
+static void TurretSendTracer( const Vector &from, const Vector &to,
+                              const Vector &dir, int entIndex )
+{
+    // A short shot is not worth a tracer, and FX_Tracer would drop it anyway.
+    // Check here so we do not pay for a temp-entity the client will discard.
+    Vector delta = to - from;
+    if (InsTurretNormalize( delta.x, delta.y, delta.z ) < 128.0f) return;
+
+    InsTurretTEDispatchEffectFn send = InsTurretTEDispatchEffect();
+    if (!send) return;
+
+    InsTurretEffectData data;
+    memset( &data, 0, sizeof(data) );
+
+    data.m_vOrigin          = *(const InsTurretVector *)&to;
+    data.m_vStart           = *(const InsTurretVector *)&from;
+    data.m_vNormal          = *(const InsTurretVector *)&dir;
+    data.m_nEntIndex        = entIndex;
+    data.m_nDamageType      = INS_TURRET_TRACERTYPE_RED;
+    data.m_bWhiz            = 1;    // near-miss crack for players on the line
+    data.m_flScale          = 0.0f; // let FX_Tracer apply its own 5000 u/s
+
+    // Broadcast to every connected client, not a PAS filter. The impact point
+    // is frequently far from the truck and often occluded; a PAS filter built
+    // from it would drop the tracer for the players most likely to be looking
+    // at the fight. This is the same filter the gunshot already uses, so the
+    // tracer and the report always reach the same audience.
+    CTurretSoundFilter filter;
+    send( filter, 0.0f, from, "Tracer", data );
+}
+
+static void TurretImpact( const Vector &pos, const Vector &dir )
+{
+    if (g_pEffects) g_pEffects->MetalSparks( pos, dir );
+}
 
 static void TurretSound( const Vector &pos, int entIndex )
 {
@@ -1247,6 +1240,107 @@ static InsTurretAllocPooledStringFn InsTurretAllocPooledString()
     return cached;
 }
 
+// Resolve the game DLL's own TE_DispatchEffect.
+//
+// WHY THE GAME DLL AND NOT AN ENGINE INTERFACE:
+// the engine's IEffects is either absent or, where present, its client half is
+// an empty stub (CEffectsClient::Beam 0x1021FB20 = `ret 0x40`). The real
+// tracer lives in the CLIENT's effect-dispatch callback table, which is only
+// reachable by sending a DispatchEffect temp-entity - and the game DLL already
+// owns that send path. See docs/humvee-turret-muzzle-tracer-feasibility.md
+// section 5.1 for why routes A, B, C and D were all rejected.
+//
+// FAIL CLOSED. On Windows this is an RVA, so a mismatched server.dll would
+// make this a jump into unrelated code. The prologue check below is not
+// optional: it is the difference between "no tracer" and a server crash.
+#ifdef _LINUX
+// On Linux the symbol is exported, so resolve it by name. This is strictly
+// better than the RVA: it survives a rebuilt server_i486.so. dlsym with a
+// NULL handle searches the global symbol table, which is where the game DLL's
+// exported symbols live.
+#include <dlfcn.h>
+static void *InsTurretResolveTEDispatchEffectSymbol()
+{
+    return dlsym( (void *)0,
+                  "_Z17TE_DispatchEffectR16IRecipientFilterfRK6VectorPKcRK11CEffectData" );
+}
+#endif
+
+static InsTurretTEDispatchEffectFn InsTurretTEDispatchEffect()
+{
+    static InsTurretTEDispatchEffectFn cached = 0;
+    static bool resolved = false;
+    if (resolved) return cached;
+    resolved = true;
+
+    unsigned long addr = 0;
+
+#ifdef _LINUX
+    addr = (unsigned long)InsTurretResolveTEDispatchEffectSymbol();
+    if (addr == 0) return 0;
+    if (!InsTurretIsExecutable( addr )) return 0;
+#else
+    unsigned long base = InsTurretGameDllBase();
+    if (base == 0) return 0;
+    addr = base + INS_TURRET_TEDISPATCHEFFECT_RVA;
+    if (!InsTurretIsExecutable( addr )) return 0;
+
+    // Prologue check. The audited server.dll (MD5
+    // 7B0CAEA9F6E0B6C52F6D49A808F4C9B6) begins:
+    //   8b 44 24 14   mov eax, [esp+0x14]   <- the `data` argument
+    //   50            push eax
+    //   b9 xx xx xx xx  mov ecx, <static CEffectData it copies into>
+    //
+    // The third instruction's immediate is NOT a stable byte pattern. The
+    // shipped server.dll has a BASE RELOCATION at RVA 0x12C796 covering it
+    // (verified with pefile: IMAGE_REL_BASED_HIGHLOW), so the loader rewrites
+    // the operand to (live_base + 0x2B0F24) whenever the module loads anywhere
+    // other than its 0x10000000 preferred base. A listen server always does:
+    // measured live at 0x0EEC0000, where the on-disk literal 0x102B0F24 is
+    // wrong and a literal comparison fails every time, silently disabling the
+    // tracer. So compare the first two instructions as bytes, then check the
+    // third instruction's opcode and its REBASED operand.
+    //
+    // If those do not match, this is a DIFFERENT server.dll and the RVA does
+    // not describe this function. Refuse to call through it.
+    const unsigned char *p = (const unsigned char *)addr;
+    const unsigned char want[6] = { 0x8b, 0x44, 0x24, 0x14, 0x50, 0xb9 };
+    bool ok = true;
+    for (int i = 0; i < 6; i++)
+        if (p[i] != want[i]) ok = false;
+
+    unsigned long tableAddr = 0;
+    if (ok)
+    {
+        // Unaligned 4-byte load, matching the instruction's own encoding.
+        tableAddr = (unsigned long)p[6]
+                  | ((unsigned long)p[7] << 8)
+                  | ((unsigned long)p[8] << 16)
+                  | ((unsigned long)p[9] << 24);
+
+        const unsigned long wantTable = base + INS_TURRET_TEDISPATCHEFFECT_TABLE_RVA;
+        if (tableAddr != wantTable) ok = false;
+    }
+
+    if (!ok)
+    {
+        Msg( "[insbots] turret: TE_DispatchEffect prologue mismatch at %p "
+             "- server.dll differs from the audited build; tracer disabled\n",
+             (void *)addr );
+        return 0;
+    }
+#endif
+
+    // Log the successful resolution exactly once (the cache above guarantees
+    // that). Without it, "resolver returned 0" and "tracer sent but invisible"
+    // are indistinguishable in the log - the exact ambiguity that let the
+    // prologue bug above hide a working effect behind a silent early return.
+    Msg( "[insbots] turret: TE_DispatchEffect resolved at %p\n", (void *)addr );
+
+    cached = (InsTurretTEDispatchEffectFn)addr;
+    return cached;
+}
+
 static void TurretEjectShell( CTurret *t )
 {
     edict_t *e = engine->PEntityOfEntIndex( t->EntIndex() );
@@ -1414,10 +1508,12 @@ void CTurret::Fire( float now )
     TurretApplyDamage( this, m_target, dir,
                        TurretValue( this, "turret_damage",
                                     insbot_turret_damage.GetFloat() ) );
-    // The shot direction, not the aim angles: Sparks' fourth argument is a
-    // velocity bias, so the sparks must fly down the barrel.
-    TurretMuzzleFlash( from, dir );
-    TurretTracer( from, hitPos );
+    // Real M249 tracer, on the mod's own 1-in-3 cadence. The shot counter is
+    // incremented for every round fired, tracer or not, so the pattern does
+    // not drift when shots are skipped.
+    m_shotsFired++;
+    if ((m_shotsFired % 3) == 0)
+        TurretSendTracer( from, hitPos, dir, m_entIndex );
     if (tr.fraction < 1.0f) TurretImpact( tr.endpos, dir );
     TurretSound( from, m_entIndex );
     TurretEjectShell( this );
