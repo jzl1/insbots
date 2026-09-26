@@ -903,6 +903,15 @@ public:
                         g_TurretOffsetPoseParameter = off;
                         Msg("[insbots] Found m_flPoseParameter at offset %d\n", off);
                     }
+                    // m_flAnimTime: the client-side interpolation clock. See
+                    // CTurretRegistry::DriveAnimTime() for why a plugin has to
+                    // advance it on this engine.
+                    off = FindSendPropOffset(pClass->m_pTable, "m_flAnimTime");
+                    if (off >= 0 && g_TurretOffsetAnimTime == -1)
+                    {
+                        g_TurretOffsetAnimTime = off;
+                        Msg("[insbots] Found m_flAnimTime at offset %d\n", off);
+                    }
                 }
 
                 pClass = pClass->m_pNext;

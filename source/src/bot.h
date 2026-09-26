@@ -919,6 +919,9 @@ extern int s_offset_angEyeAngles1;
 // Humvee auto-turret offsets, resolved by name in insbots.cpp Load().
 extern int g_TurretOffsetDriver;
 extern int g_TurretOffsetPoseParameter;
+// m_flAnimTime is a vehicle-layout fact, not a turret fact: the sweep that
+// advances it runs on every driveable, turret or not. See DriveAnimTime().
+extern int g_TurretOffsetAnimTime;
 
 // learned-bad-link persistence (implemented in bot.cpp)
 void InsBots_SaveLearn();

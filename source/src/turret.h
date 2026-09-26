@@ -122,6 +122,10 @@ public:
 
     void FrameUpdate( bool simulating );
     void Discover( float now );   // find newly-boarded Humvees (design 5.1)
+    // Advance m_flAnimTime on every driveable, turret or not. This is the
+    // client-side interpolation clock the shipped client fails to refresh for
+    // vehicles; see the definition in turret.cpp.
+    void DriveAnimTime( bool simulating );
     void Status();
 
 private:

@@ -91,6 +91,20 @@ extern bool LineGoesThroughSmoke( const Vector &from, const Vector &to );
 
 int g_TurretOffsetDriver        = -1;
 int g_TurretOffsetPoseParameter = -1;
+int g_TurretOffsetAnimTime      = -1;
+
+// CPropVehicleDriveable's ServerClass, cached so the per-frame sweep can test
+// an entity's class with a pointer compare instead of a string walk.
+static ServerClass *s_vehicleClass = 0;
+
+// Which edict slots currently hold a driveable. Rebuilt on a timer by
+// RebuildVehicleIndex(); the per-frame sweep reads it so it does not have to
+// probe every edict on the map. Grown, never shrunk, so the index is always at
+// least as long as the engine's entity count.
+static unsigned char *s_vehicleIdx      = 0;
+static int            s_vehicleIdxCount = 0;
+static float          s_vehicleIdxNext  = 0.0f;
+static int            s_vehicleIdxFound = -1;   // last logged count
 
 CTurretRegistry g_Turrets;
 
@@ -481,14 +495,206 @@ void CTurret::FrameUpdate( bool simulating )
     }
 }
 
+// ---------------------------------------------------------------------------
+// Refresh the set of edict indices that currently hold a driveable.
+//
+// Split out of DriveAnimTime() so the expensive class test (GetUnknown, two
+// virtual calls, one pointer compare) runs twice a second instead of every
+// frame. The map is stable for long stretches, so this is close to free.
+//
+// The buffer is grown but never shrunk: a slot is always reachable, and a
+// shrinking entity count (a level with fewer edicts) simply leaves a tail of
+// stale falses that the per-frame loop never reads because it is bounded by
+// the CURRENT entity count.
+static void RebuildVehicleIndex( int maxEdicts )
+{
+    if (maxEdicts <= 0) return;
+
+    if (s_vehicleIdxCount < maxEdicts)
+    {
+        // Ask for headroom (and round up) rather than an exact fit, so a map
+        // whose entity count creeps up does not realloc on every rebuild.
+        int want = maxEdicts + 256;
+        want &= ~15;                        // round up to a 16-byte multiple
+
+        unsigned char *grown = (unsigned char *)realloc( s_vehicleIdx, (size_t)want );
+        if (!grown) return;                 // keep the old index on OOM
+        s_vehicleIdx      = grown;
+        s_vehicleIdxCount = want;
+    }
+
+    memset( s_vehicleIdx, 0, (size_t)s_vehicleIdxCount );
+
+    int found = 0;
+    for (int i = 1; i < maxEdicts; i++)
+    {
+        edict_t *e = engine->PEntityOfEntIndex( i );
+        if (!e || e->IsFree()) continue;
+
+        IServerUnknown *unk = e->GetUnknown();
+        if (!unk) continue;
+        IServerNetworkable *net = unk->GetNetworkable();
+        if (!net || !net->GetServerClass()) continue;
+
+        // Compare the class POINTER, not the name: GetAllServerClasses() is a
+        // list of unique classes, so an address match is a class test with no
+        // per-entity string walk.
+        if (net->GetServerClass() == s_vehicleClass)
+        {
+            s_vehicleIdx[ i ] = 1;
+            found++;
+        }
+    }
+
+    // Only on change: a map holds a handful of vehicles and they spawn and
+    // despawn rarely, so this is a few lines per round rather than spam. It is
+    // the only evidence that the sweep below has anything to act on.
+    if (found != s_vehicleIdxFound)
+    {
+        s_vehicleIdxFound = found;
+        Msg( "[insbots] vehicle interpolation: tracking %d driveable(s)\n", found );
+    }
+}
+
 void CTurretRegistry::FrameUpdate( bool simulating )
 {
     if (gpGlobals) Discover( gpGlobals->curtime );
+    DriveAnimTime( simulating );
 
     // Iterate BACKWARD: FrameUpdate can remove the current entry (swap-with-
     // last), and a forward loop would then skip the swapped-in turret.
     for (int i = m_count - 1; i >= 0; i--)
         m_turrets[i].FrameUpdate( simulating );
+}
+
+// ---------------------------------------------------------------------------
+// Advance m_flAnimTime on every driveable vehicle.
+//
+// THIS IS A WORKAROUND FOR A SHIPPED-CLIENT BUG, NOT FOR OUR MODEL.
+//
+// The client latches its interpolated variables (and therefore interpolates
+// the pose parameters that drive the wheels, the steering and the turret) only
+// when it sees m_flAnimTime change between packets - see
+// C_BaseEntity::PostDataUpdate, which calls
+// OnLatchInterpolatedVariables(LATCH_ANIMATION_VAR) on
+// `m_flAnimTime != m_flOldAnimTime`.
+//
+// C_BaseEntity::PreDataUpdate normally refreshes that value itself:
+//
+//     if ( !IsSelfAnimating() )
+//         m_flAnimTime = engine->GetLastTimeStamp();
+//
+// ...but the shipped client.dll has that branch INVERTED. Measured from
+// client.dll at VA 0x1019B48E (file offset 0x19A88E), verified byte for byte:
+//
+//     0x1019B48E  8b 13               mov  edx, [ebx]
+//     0x1019B490  8b 82 1c 01 00 00   mov  eax, [edx+0x11C]   ; IsSelfAnimating
+//     0x1019B498  ff d0               call eax
+//     0x1019B49A  5b                  pop  ebx
+//     0x1019B49B  84 c0               test al, al
+//     0x1019B49D  74 10               je   0x1019B4AF        ; skips the store
+//     0x1019B4AC  d9 5e 58            fstp dword [esi+0x58]   ; m_flAnimTime
+//
+// and C_PropVehicleDriveable::IsSelfAnimating() is a constant false
+// (client.dll VA 0x101C8150 = `32 c0 c3`, xor al,al; ret). So for every
+// vehicle the store is skipped on every packet, m_flAnimTime stays pinned at
+// whatever the server sent at spawn, the latch never fires, and
+// m_iv_flPoseParameter is never interpolated.
+//
+// The visible result is the reported wheel defect: uninterpolated 20 Hz pose
+// steps that read as a burnout while stopping, and a steering pose that stays
+// wherever the last packet left it. Nothing here touches the physics - the
+// server's own wheel simulation is correct, which is why the truck drives
+// properly while the model looks wrong.
+//
+// Because the client only ever SKIPS the store, a server-side write is not
+// clobbered: the value we send is the one the client keeps. Writing it here
+// makes the comparison true, which restores the latch and with it normal
+// interpolation for the whole entity - the vehicle's own pose parameters AND
+// the turret's, which ride in the same array.
+//
+// Both values are resolved BY NAME in Load() and this no-ops when either is
+// missing, so a layout change fails closed instead of scribbling on a
+// neighbouring field.
+//
+// ONE write per vehicle per frame, at gpGlobals->curtime, which is exactly
+// what the engine's own CBaseAnimating::StudioFrameAdvance() assigns. The
+// sent value is truncated to TICK_INTERVAL by the 8-bit proxy
+// (SendProxy_AnimTime), so at any tick rate this collapses to a tick count
+// and the client reconstructs tick * TICK_INTERVAL: one distinct value per
+// tick, which is precisely the cadence the interpolator wants.
+//
+// NOT DONE, deliberately:
+//   - No NetworkStateChanged()/edict flags. The animation table is marked
+//     SPROP_CHANGES_OFTEN, and every driveable here is either moving or
+//     having its pose parameters written by CFourWheelVehiclePhysics every
+//     tick, so the entity is already in the packet. Forcing a full update
+//     would ship every property of every vehicle every tick for no gain.
+//   - No "only while driven" gate. A parked truck still has its steering and
+//     wheel poses written by the physics each tick, so it can show the same
+//     unlatched stepping, and the truck you are watching while it rolls to a
+//     stop is the case that was reported.
+void CTurretRegistry::DriveAnimTime( bool simulating )
+{
+    if (!simulating) return;
+    if (!engine || !gpGlobals) return;
+    if (g_TurretOffsetAnimTime < 0) return;
+
+    // Bounded: gpGlobals->frametime is 0 whenever a frame is skipped or the
+    // server is not simulating, and a hitch must not stamp a large jump into
+    // the interpolation clock.
+    float dt = gpGlobals->frametime;
+    if (dt <= 0.0f || dt > 0.25f) return;
+
+    // Resolve the class once, lazily rather than in Load(), so a map with no
+    // vehicles costs nothing and a late interface still resolves. A failed
+    // lookup is NOT latched: it simply retries next frame.
+    if (!s_vehicleClass)
+    {
+        if (!server) return;
+        for (ServerClass *c = server->GetAllServerClasses(); c; c = c->m_pNext)
+            if (IsDriveableClass( c->GetName() ))
+            {
+                s_vehicleClass = c;
+                break;
+            }
+        if (!s_vehicleClass) return;
+    }
+
+    const float now = gpGlobals->curtime;
+    const int maxEdicts = engine->GetEntityCount();
+
+    // Rebuild the vehicle index set on a timer rather than every frame. The
+    // test itself is a class-pointer compare, but reaching it costs a
+    // GetUnknown() plus two virtual calls per edict, and a large map runs
+    // thousands of edicts for a handful of vehicles.
+    if (now >= s_vehicleIdxNext)
+    {
+        s_vehicleIdxNext = now + 0.5f;
+        RebuildVehicleIndex( maxEdicts );
+    }
+    if (!s_vehicleIdx) return;
+
+    // Entity 0 is the world; vehicles are non-client entities, so the upper
+    // bound is the engine's own entity count and not maxClients.
+    for (int i = 1; i < maxEdicts; i++)
+    {
+        if (i >= s_vehicleIdxCount || !s_vehicleIdx[ i ]) continue;
+
+        edict_t *e = engine->PEntityOfEntIndex( i );
+        if (!e || e->IsFree()) continue;
+
+        IServerUnknown *unk = e->GetUnknown();
+        if (!unk) continue;
+        void *pVehicle = unk->GetBaseEntity();
+        if (!pVehicle) continue;
+
+        // The member is a FIELD_TIME float and the SendProxy loads it with
+        // `fld dword ptr [eax+0x28]`, so this has to be written as seconds.
+        // (Writing a tick count here would be reinterpreted as a denormal
+        // float and truncated to 0 by TIME_TO_TICKS.)
+        *(float *)((char *)pVehicle + g_TurretOffsetAnimTime) = now;
+    }
 }
 
 // ---------------------------------------------------------------------------
