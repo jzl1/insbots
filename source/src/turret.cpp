@@ -18,6 +18,7 @@
 // ============================================================================
 #include "turret.h"
 #include "turret_math.h"
+#include "turret_sound.h"
 #include "turret_abi.h"
 #include "cfgvar.h"
 
@@ -1069,11 +1070,36 @@ static void TurretSound( const Vector &pos, int entIndex )
     // rndwave points at ^weapons/m249/m249-1.wav, so that .wav is what must be
     // precached and emitted. This mirrors the known-good voice.cpp:117/159,
     // which precaches and emits the same raw wave path.
-    static const char *kM249Shot = "weapons/m249/m249-1.wav";
-    enginesound->PrecacheSound( kM249Shot, true );
+    //
+    // The '^' is CHAR_DISTVARIANT and is REQUIRED - it is not decoration.
+    // Valve precaches the prefixed name verbatim (SoundEmitterSystem.cpp:385)
+    // and emits that same prefixed name (:536/:589), so the precache key and
+    // the emit key must agree or the shot is silent. See turret_sound.h for the
+    // full argument and the measured left/right channel data.
+    //
+    // The four values below are the four parameters "Weapon_M249.Single"
+    // resolves to (scripts/game_sounds_weapons.txt:410-420):
+    //     soundlevel  SNDLVL_150dB    -> INS_TURRET_M249_SOUNDLEVEL
+    //     wave        ^weapons/...    -> INS_TURRET_M249_WAVE
+    //     pitch       95,105          -> InsTurretSoundPitch( rand() )
+    //     origin      (muzzle)        -> &pos
+    enginesound->PrecacheSound( INS_TURRET_M249_WAVE, true );
+
     CTurretSoundFilter filter;
+    int pitch = InsTurretSoundPitch( rand() );
+
+    // `pos` is the muzzle. Passing &pos as the 9th argument makes the engine
+    // use it directly: a non-NULL pOrigin bypasses the GetCollideable() /
+    // WorldSpaceCenter() fallback entirely and is copied into SoundInfo_t at
+    // call time, so a pointer to this stack-local Vector is safe.
+    //
+    // Rank 1 uses the soundlevel_t overload. The float overload would treat
+    // 150 as an attenuation and re-derive a different level, so the cast is
+    // load-bearing.
     enginesound->EmitSound( filter, entIndex, CHAN_WEAPON,
-                            kM249Shot, 1.0f, ATTN_NORM, 0, PITCH_NORM );
+                            INS_TURRET_M249_WAVE, 1.0f,
+                            (soundlevel_t)INS_TURRET_M249_SOUNDLEVEL,
+                            0, pitch, &pos );
 }
 
 // Shell ejection, route C: fire the vehicle's own DispatchEffect input once
