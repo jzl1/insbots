@@ -68,7 +68,9 @@ public:
     // to the hull arc; this is what the target actually requires. The aim
     // residual is measured against THIS one, so a target outside the arc
     // produces a non-zero residual and the fire gate rejects it instead of
-    // reporting a perfect aim. See InsTurretDemandPitch in turret_math.h.
+    // reporting a perfect aim. The demand is derived in the HULL'S OWN frame by
+    // InsTurretWorldDirToHullLocal + InsTurretBarrelAnglesForLocalDir; see
+    // Aim() in turret.cpp for why that frame is the only correct one.
     float  m_desiredPitchTrue;
     float  m_nextAcquire;
     // Per-shot rate limit (M249 ~800 RPM). This is the ONLY thing pacing the

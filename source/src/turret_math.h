@@ -290,3 +290,72 @@ inline float InsTurretNormalize( float &x, float &y, float &z )
     if (len > 0.0f) { x /= len; y /= len; z /= len; }
     return len;
 }
+
+// ---------------------------------------------------------------------------
+// The INVERSE of InsTurretBarrelDirLocal: given a direction in the VEHICLE'S
+// LOCAL frame, recover the (yaw, pitch) that produce it.
+//
+// This exists because the pose parameter is a rotation RELATIVE TO THE HULL.
+// The engine composes q_track * q_rest (bone_setup.cpp:889), so a demand has to
+// be expressed in the hull's own frame before it is turned into pose angles.
+// Aim() used to solve in WORLD space and subtract the hull's yaw by hand, which
+// left the hull's pitch and roll in the answer: measured live at hull pitch
+// -1.55 / roll 0.60 that put the barrel 1.52 deg high and 40 of 40 rounds
+// missed (F:\claude\temp\turret_aim_error_result.md).
+//
+// Forward:  dx = -sin(yaw)*cos(pitch), dy = cos(yaw)*cos(pitch), dz = -sin(pitch)
+// Inverse:  yaw = atan2(-dx, dy),       pitch = -atan2(dz, horiz)
+//
+// The pitch arc is clamped to [-55, +20] (INS_TURRET_PITCH_MIN/MAX), so
+// cos(pitch) is always positive and atan2(-dx, dy) is the unflipped yaw.
+//
+// NaN and the degenerate no-direction case both map to 0/0, matching the
+// fail-closed convention of every other helper in this file: a bad angle must
+// not reach the network array.
+// ---------------------------------------------------------------------------
+inline void InsTurretBarrelAnglesForLocalDir( float dx, float dy, float dz,
+                                              float &yawOut, float &pitchOut )
+{
+    yawOut = 0.0f;
+    pitchOut = 0.0f;
+
+    if (dx != dx || dy != dy || dz != dz) return;           // NaN
+
+    float horiz = sqrtf( dx * dx + dy * dy );
+    if (horiz < 1.0e-6f && fabsf( dz ) < 1.0e-6f) return;   // no direction
+
+    yawOut   = InsTurretNormalizeAngle( atan2f( -dx, dy ) * INS_TURRET_RAD2DEG );
+    pitchOut = -atan2f( dz, horiz ) * INS_TURRET_RAD2DEG;
+    if (pitchOut != pitchOut) pitchOut = 0.0f;              // NaN cannot poison the aim
+}
+
+// ---------------------------------------------------------------------------
+// Rotate a WORLD direction into the HULL'S LOCAL frame.
+//
+// This is the inverse of the hull rotation InsTurretAngleMatrix builds, and for
+// a pure rotation the inverse is the transpose:
+//
+//     worldDir = M * localDir      =>      localDir = M^T * worldDir
+//
+// The old code approximated this as "subtract the hull yaw and 90 degrees" and
+// dropped pitch and roll. On a hull with zero pitch and roll the two are
+// algebraically identical (verified: maximum difference 0.000000000 deg over
+// 5 hull yaws x 6 target directions x 5 elevations), so this is a strict
+// generalization rather than a behaviour swap.
+//
+// The origin is passed as (0,0,0) because only the rotation matters here: the
+// caller has already subtracted the muzzle position, so the input is a
+// direction, not a point.
+// ---------------------------------------------------------------------------
+inline void InsTurretWorldDirToHullLocal( float wx, float wy, float wz,
+                                          float hullPitch, float hullYaw, float hullRoll,
+                                          float &lx, float &ly, float &lz )
+{
+    float m[3][4];
+    InsTurretAngleMatrix( hullPitch, hullYaw, hullRoll, 0.0f, 0.0f, 0.0f, m );
+
+    // M^T * w:  out[r] = sum_c w[c] * m[c][r]
+    lx = wx * m[0][0] + wy * m[1][0] + wz * m[2][0];
+    ly = wx * m[0][1] + wy * m[1][1] + wz * m[2][1];
+    lz = wx * m[0][2] + wy * m[1][2] + wz * m[2][2];
+}

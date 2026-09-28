@@ -2140,6 +2140,20 @@ void CTurret::Acquire( float now )
     // transform, so calling it once per Acquire (10 Hz) is what we want.
     Vector from = TurretRayOrigin( this );
 
+    // Read once: the hold gate, the candidate gate and the FOV test all need
+    // the hull's attitude, and GetCollisionAngles is a virtual call.
+    float hullPitch = 0.0f, hullYaw = 0.0f, hullRoll = 0.0f;
+    {
+        ICollideable *col = TurretCollideable( this );
+        if (col)
+        {
+            QAngle a = col->GetCollisionAngles();
+            hullPitch = a.x;
+            hullYaw   = a.y;
+            hullRoll  = a.z;
+        }
+    }
+
     // Keep the current target while it stays valid and recent. Memory is
     // ~2 s (design section 6.2), after which we resume scanning.
     if (m_target)
@@ -2158,9 +2172,18 @@ void CTurret::Acquire( float now )
                 // exactly the case that never expires: the gun cannot point
                 // there but the sight line is open, so the 2 s memory window
                 // is refreshed forever and the turret never looks elsewhere.
+                //
+                // The demand MUST be measured in the same frame Aim() solves in,
+                // or the gate and the solver disagree about what the target
+                // requires. See Aim() for why that frame is the hull's own.
                 Vector dHeld = m_targetLastPos - from;
-                float heldDemand = InsTurretDemandPitch(
-                    dHeld.z, sqrtf( dHeld.x * dHeld.x + dHeld.y * dHeld.y ) );
+                float hlx, hly, hlz, heldDemandYaw, heldDemand;
+                InsTurretWorldDirToHullLocal( dHeld.x, dHeld.y, dHeld.z,
+                                              hullPitch, hullYaw, hullRoll,
+                                              hlx, hly, hlz );
+                InsTurretBarrelAnglesForLocalDir( hlx, hly, hlz,
+                                                  heldDemandYaw, heldDemand );
+                (void)heldDemandYaw;
 
                 if (InsTurretPitchReachable( heldDemand ))
                 {
@@ -2229,13 +2252,22 @@ void CTurret::Acquire( float now )
     // comparison must still be against the gun's world bearing, not the hull's,
     // or the cone would rotate with the truck instead of with the gun
     // (design section 6.3, mirroring bot_perceive.cpp:588-591).
-    float hullYaw = 0.0f;
+    // The gun's own WORLD bearing, taken from the barrel pose rather than
+    // reconstructed as m_curYaw + hullYaw + 90. That reconstruction assumes a
+    // level hull; on a pitched or rolled hull the barrel's true bearing is not
+    // the local yaw plus the hull yaw, so the cone would be centred on the
+    // wrong direction. (Inert at the default turret_acquire_fov 360, which
+    // makes cosFov -1 and the test always pass - but wrong the moment the cone
+    // is narrowed, which is the setting's whole purpose.)
+    Vector fwd( 1, 0, 0 );
     {
-        ICollideable *col = TurretCollideable( this );
-        if (col) hullYaw = col->GetCollisionAngles().y;
+        Vector hinge, barrel;
+        if (TurretBarrelPose( this, hinge, barrel ))
+        {
+            float flat = sqrtf( barrel.x * barrel.x + barrel.y * barrel.y );
+            if (flat > 1.0e-3f) fwd = Vector( barrel.x / flat, barrel.y / flat, 0 );
+        }
     }
-    float yawRad = (m_curYaw + hullYaw + 90.0f) * (3.14159265f / 180.0f);
-    Vector fwd( cosf( yawRad ), sinf( yawRad ), 0 );
     float cosFov = InsTurretConeCos(
         TurretValue( this, "turret_acquire_fov",
                      insbot_turret_acquire_fov.GetFloat() ) );
@@ -2259,8 +2291,16 @@ void CTurret::Acquire( float now )
         // Without this gate the search re-acquires the same unreachable enemy
         // the hold logic just released, and the turret sits locked on it
         // forever while ignoring reachable enemies further away.
-        float horiz = sqrtf( d.x * d.x + d.y * d.y );
-        if (!InsTurretPitchReachable( InsTurretDemandPitch( d.z, horiz ) ))
+        //
+        // Same frame as Aim() and the hold gate: the hull attitude read once at
+        // the top of Acquire() is reused here.
+        float clx, cly, clz, candYaw, candPitch;
+        InsTurretWorldDirToHullLocal( d.x, d.y, d.z,
+                                      hullPitch, hullYaw, hullRoll,
+                                      clx, cly, clz );
+        InsTurretBarrelAnglesForLocalDir( clx, cly, clz, candYaw, candPitch );
+        (void)candYaw;
+        if (!InsTurretPitchReachable( candPitch ))
             continue;
 
         // Directional gate. Skipped entirely for the target we already hold, so
@@ -2356,14 +2396,44 @@ bool CTurret::VerifyLOS()
 }
 
 // Desired yaw/pitch from the muzzle to the aim point, plus the aim error.
+//
+// THE SOLVE IS IN THE HULL'S OWN FRAME. m_flPoseParameter drives a rotation
+// RELATIVE TO THE HULL - the engine composes q_track * q_rest
+// (bone_setup.cpp:889) - so the demand must be expressed in that frame.
+//
+// This used to be done in world space, removing the hull's yaw by hand
+// (`worldYaw - hullYaw - 90`) and ignoring its pitch and roll. On a hull with
+// zero pitch and roll the two are algebraically identical, but on any other
+// hull the difference is the hull's attitude: measured live at hull pitch
+// -1.55 / roll 0.60 the barrel sat 1.52 deg high and 40 of 40 rounds missed
+// (F:\claude\temp\turret_aim_error_result.md). Rotating the world direction
+// into the hull frame first removes all three axes at once, and the yaw-only
+// case is pinned by a host test so this cannot regress.
 void CTurret::Aim( float now )
 {
     Vector from = TurretRayOrigin( this );
-    Vector want;
+    float wantYaw   = 0.0f;
+    float wantPitch = 0.0f;
 
     if (m_target)
     {
-        want = m_targetLastPos;
+        Vector d = m_targetLastPos - from;
+
+        float hullPitch = 0.0f, hullYaw = 0.0f, hullRoll = 0.0f;
+        ICollideable *col = TurretCollideable( this );
+        if (col)
+        {
+            QAngle hull = col->GetCollisionAngles();
+            hullPitch = hull.x;
+            hullYaw   = hull.y;
+            hullRoll  = hull.z;
+        }
+
+        float lx, ly, lz;
+        InsTurretWorldDirToHullLocal( d.x, d.y, d.z,
+                                      hullPitch, hullYaw, hullRoll,
+                                      lx, ly, lz );
+        InsTurretBarrelAnglesForLocalDir( lx, ly, lz, wantYaw, wantPitch );
     }
     else
     {
@@ -2376,44 +2446,16 @@ void CTurret::Aim( float now )
         // whenever the hull turned. m_scanBearing is re-seeded from the live aim
         // in Acquire() at the moment a target is lost, which is what gives
         // "continue from the current bearing, no snap back" (design 6.2).
+        //
+        // The sweep is level by construction. The old code built a synthetic
+        // world point at the muzzle's own height and measured the demand to it,
+        // which could only ever produce pitch 0.
         m_scanBearing = InsTurretNormalizeAngle(
             m_scanBearing + TurretValue( this, "turret_scan_speed",
                                          insbot_turret_scan_speed.GetFloat() )
                             * gpGlobals->frametime );
-        float rad = m_scanBearing * (3.14159265f / 180.0f);
-        want = from + Vector( sinf( rad ) * 1000.0f, -cosf( rad ) * 1000.0f, 0.0f );
-    }
-
-    Vector d = want - from;
-    float horiz     = sqrtf( d.x * d.x + d.y * d.y );
-    // One shared definition, so the aim and the reachability gate can never
-    // disagree about what elevation the target demands.
-    float wantPitch = InsTurretDemandPitch( d.z, horiz );
-
-    // WORLD -> LOCAL yaw. m_flPoseParameter drives a rotation RELATIVE TO THE
-    // HULL, and the barrel's local zero points along the mesh's -Y, so a world
-    // bearing must have the hull's own yaw subtracted and then be shifted by
-    // the 90 degrees between "world +X is zero" and "local -Y is zero":
-    //
-    //     localYaw = (worldYaw - hullYaw) - 90
-    //
-    // Without this the turret pointed 90 degrees off, and worse, it tracked in
-    // world space so the whole ring drifted as the truck turned. The bots never
-    // hit this because their eye angles ARE world angles.
-    float wantYaw;
-    if (m_target)
-    {
-        float wantYawWorld = atan2f( d.y, d.x ) * (180.0f / 3.14159265f);
-        float hullYaw = 0.0f;
-        ICollideable *col = TurretCollideable( this );
-        if (col) hullYaw = col->GetCollisionAngles().y;
-        wantYaw = InsTurretNormalizeAngle( wantYawWorld - hullYaw - 90.0f );
-    }
-    else
-    {
-        // The sweep already produced a local bearing; deriving it back from the
-        // synthetic world point would re-introduce the hull yaw we just removed.
-        wantYaw = m_scanBearing;
+        wantYaw   = m_scanBearing;
+        wantPitch = 0.0f;
     }
 
     if (m_target)
