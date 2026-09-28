@@ -314,6 +314,12 @@ CfgVar insbot_turret_acquire_fov  ("turret_acquire_fov",  "360",  "turret acquis
 // adjust them without a rebuild.
 CfgVar insbot_turret_fire_tol_yaw   ("turret_fire_tolerance_yaw",   "5.0",   "turret fire gate: max yaw error (deg)");
 CfgVar insbot_turret_fire_tol_pitch ("turret_fire_tolerance_pitch", "4.0",   "turret fire gate: max pitch error (deg)");
+// How long a target may sit outside the elevation arc before the turret gives
+// up on it and looks for another. Long enough to ride out a ridge crest or a
+// target stepping down a slope, short enough that the turret does not spend an
+// engagement silent. 0 means no grace: the target is dropped on the first
+// unreachable evaluation.
+CfgVar insbot_turret_unreachable_grace ("turret_unreachable_grace", "1.0", "seconds a target may stay outside the turret's elevation arc before it is dropped");
 CfgVar insbot_turret_spread         ("turret_spread",               "0.230", "turret bullet spread cone (deg; M249 real value)");
 
 // Re-roll the aim offset on the bots' cadence. Called once per tick from
@@ -372,11 +378,13 @@ CTurret::CTurret()
     m_validated = false;
     m_target = 0;
     m_targetLastSeen = 0.0f;
+    m_unreachableSince = 0.0f;
     m_targetLastPos.Init();
     m_curYaw = 0.0f;
     m_curPitch = 0.0f;
     m_desiredYaw = 0.0f;
     m_desiredPitch = 0.0f;
+    m_desiredPitchTrue = 0.0f;
     m_nextAcquire = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
@@ -404,11 +412,13 @@ void CTurret::Reset( int entindex, int team )
     m_validated = false;
     m_target = 0;
     m_targetLastSeen = 0.0f;
+    m_unreachableSince = 0.0f;
     m_targetLastPos.Init();
     m_curYaw = 0.0f;
     m_curPitch = 0.0f;
     m_desiredYaw = 0.0f;
     m_desiredPitch = 0.0f;
+    m_desiredPitchTrue = 0.0f;
     m_nextAcquire = 0.0f;
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
@@ -836,10 +846,13 @@ void CTurretRegistry::Status()
     {
         CTurret *t = &m_turrets[i];
         Msg( "[insbots] turret ent=%d team=%d armed=%d state=%s target=%d "
-             "yaw=%.1f pitch=%.1f err=%.1f/%.1f aim=%.1f/%.1f\n",
+             "yaw=%.1f pitch=%.1f want=%.1f reach=%d err=%.1f/%.1f "
+             "aim=%.1f/%.1f\n",
              t->EntIndex(), t->Team(), t->Armed() ? 1 : 0,
              t->m_state == TURRET_ENGAGING ? "ENGAGING" : "IDLE",
              t->m_target, t->m_curYaw, t->m_curPitch,
+             t->m_desiredPitchTrue,
+             InsTurretPitchReachable( t->m_desiredPitchTrue ) ? 1 : 0,
              t->m_residualYaw, t->m_residualPitch,
              t->m_aimErrorYaw, t->m_aimErrorPitch );
     }
@@ -2121,6 +2134,12 @@ void CTurret::Acquire( float now )
     if (now < m_nextAcquire) return;
     m_nextAcquire = now + 0.1f;                 // ~10 Hz (design section 5.3)
 
+    // Computed once, up front: the hold logic below needs the muzzle position
+    // to decide whether the held target is still reachable, and the candidate
+    // search needs it for the same test. TurretRayOrigin() is a matrix
+    // transform, so calling it once per Acquire (10 Hz) is what we want.
+    Vector from = TurretRayOrigin( this );
+
     // Keep the current target while it stays valid and recent. Memory is
     // ~2 s (design section 6.2), after which we resume scanning.
     if (m_target)
@@ -2133,11 +2152,44 @@ void CTurret::Acquire( float now )
             {
                 Vector pts[3];
                 if (TurretTargetPoints( te, pts ) > 1) m_targetLastPos = pts[1];
-                m_state = TURRET_ENGAGING;
-                return;
+
+                // Reachability of the HELD target. VerifyLOS() keeps this
+                // target alive through a clear straight line to it, which is
+                // exactly the case that never expires: the gun cannot point
+                // there but the sight line is open, so the 2 s memory window
+                // is refreshed forever and the turret never looks elsewhere.
+                Vector dHeld = m_targetLastPos - from;
+                float heldDemand = InsTurretDemandPitch(
+                    dHeld.z, sqrtf( dHeld.x * dHeld.x + dHeld.y * dHeld.y ) );
+
+                if (InsTurretPitchReachable( heldDemand ))
+                {
+                    m_unreachableSince = 0.0f;
+                    m_state = TURRET_ENGAGING;
+                    return;
+                }
+
+                // Unreachable. Start (or continue) the grace clock and keep
+                // tracking, so a target that comes back into the arc is not
+                // penalised - but do not fire: the residual test in Fire()
+                // already rejects it.
+                if (m_unreachableSince <= 0.0f) m_unreachableSince = now;
+
+                float grace = TurretValue( this, "turret_unreachable_grace",
+                                           insbot_turret_unreachable_grace.GetFloat() );
+                if (grace > 0.0f && (now - m_unreachableSince) < grace)
+                {
+                    m_state = TURRET_ENGAGING;
+                    return;
+                }
+
+                // Grace expired (or the release is disabled): fall through to
+                // the cleanup below, which clears m_target and re-seeds the
+                // idle sweep from the gun's live bearing.
             }
         }
         m_target = 0;
+        m_unreachableSince = 0.0f;
         m_state = TURRET_IDLE;
         // Resume the idle sweep from where the gun is actually pointing, so a
         // lost target does not snap the ring back to a stale bearing
@@ -2145,7 +2197,6 @@ void CTurret::Acquire( float now )
         m_scanBearing = m_curYaw;
     }
 
-    Vector from = TurretRayOrigin( this );
     float  bestDist = 1.0e12f;      // SCORE: dist^2, with the 0.64 stickiness
     float  bestRange = 0.0f;        // the winner's true distance, for the log
     float  bestBearing = 0.0f;      // the winner's WORLD bearing, for the log
@@ -2199,6 +2250,18 @@ void CTurret::Acquire( float now )
         Vector d = target - from;
         float dist = d.Length();
         if (dist > spotRange) continue;                 // spot range 2500
+
+        // Reachability. A target the elevation arc cannot cover is not a
+        // candidate. This is deliberately BEFORE TurretIsVisible(), which
+        // costs up to three raycasts: rejecting on cheap arithmetic first
+        // skips that work for every unreachable enemy, every 10 Hz.
+        //
+        // Without this gate the search re-acquires the same unreachable enemy
+        // the hold logic just released, and the turret sits locked on it
+        // forever while ignoring reachable enemies further away.
+        float horiz = sqrtf( d.x * d.x + d.y * d.y );
+        if (!InsTurretPitchReachable( InsTurretDemandPitch( d.z, horiz ) ))
+            continue;
 
         // Directional gate. Skipped entirely for the target we already hold, so
         // a target that drifts to the cone edge is not dropped mid-track; and
@@ -2323,7 +2386,9 @@ void CTurret::Aim( float now )
 
     Vector d = want - from;
     float horiz     = sqrtf( d.x * d.x + d.y * d.y );
-    float wantPitch = -atan2f( d.z, horiz ) * (180.0f / 3.14159265f);
+    // One shared definition, so the aim and the reachability gate can never
+    // disagree about what elevation the target demands.
+    float wantPitch = InsTurretDemandPitch( d.z, horiz );
 
     // WORLD -> LOCAL yaw. m_flPoseParameter drives a rotation RELATIVE TO THE
     // HULL, and the barrel's local zero points along the mesh's -Y, so a world
@@ -2358,7 +2423,11 @@ void CTurret::Aim( float now )
     }
 
     m_desiredYaw   = InsTurretNormalizeAngle( wantYaw );
-    m_desiredPitch = InsTurretClampPitch( wantPitch );
+    // The pose target is clamped to the hull arc, but the residual must be
+    // measured against the UNCLAMPED demand - otherwise a target the gun
+    // cannot reach looks perfectly aimed. See m_desiredPitchTrue in turret.h.
+    m_desiredPitchTrue = wantPitch;
+    m_desiredPitch     = InsTurretClampPitch( wantPitch );
     (void)now;
 }
 
@@ -2373,7 +2442,10 @@ void CTurret::Traverse( float dt )
     m_curPitch = InsTurretClampPitch( m_curPitch );
 
     m_residualYaw   = InsTurretAngleDelta( m_curYaw,   m_desiredYaw );
-    m_residualPitch = InsTurretAngleDelta( m_curPitch, m_desiredPitch );
+    // Measured against the TRUE demand, not the clamped pose target. This is
+    // the fix: with the clamped value a +35 demand and a +20 demand were
+    // indistinguishable here, so the fire gate saw 0 error and fired.
+    m_residualPitch = InsTurretAngleDelta( m_curPitch, m_desiredPitchTrue );
 }
 
 // Write the aim into the engine's own pose-parameter network array. The array

@@ -52,11 +52,24 @@ public:
     bool   m_validated;
     int    m_target;
     float  m_targetLastSeen;
+    // When the held target first went outside the elevation arc, or 0 when it
+    // is currently reachable. The hold logic releases the target once this is
+    // older than `turret_unreachable_grace`, so a target that is only
+    // momentarily unreachable (cresting a ridge, stepping down a slope) is
+    // not dropped on the first frame.
+    float  m_unreachableSince;
     Vector m_targetLastPos;
     float  m_curYaw;
     float  m_curPitch;
     float  m_desiredYaw;
     float  m_desiredPitch;
+    // The UNCLAMPED elevation demand, kept separate from m_desiredPitch on
+    // purpose. m_desiredPitch is what the pose is driven toward and is clamped
+    // to the hull arc; this is what the target actually requires. The aim
+    // residual is measured against THIS one, so a target outside the arc
+    // produces a non-zero residual and the fire gate rejects it instead of
+    // reporting a perfect aim. See InsTurretDemandPitch in turret_math.h.
+    float  m_desiredPitchTrue;
     float  m_nextAcquire;
     // Per-shot rate limit (M249 ~800 RPM). This is the ONLY thing pacing the
     // turret's fire: there is no burst/pause cycle any more (see Fire()).

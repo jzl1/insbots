@@ -150,6 +150,49 @@ inline float InsTurretNormPose( float value, float start, float end )
 // ===========================================================================
 
 #define INS_TURRET_DEG2RAD (3.14159265358979323846f / 180.0f)
+#define INS_TURRET_RAD2DEG (180.0f / 3.14159265358979323846f)
+
+// ---------------------------------------------------------------------------
+// Pitch demand and reachability.
+//
+// THE DEMAND IS THE UNCLAMPED ANGLE. This distinction is the whole point of
+// these two helpers. Aim() used to compute the demand, clamp it, and keep only
+// the clamped value - so a target 15 degrees outside the arc produced a
+// residual of 0 and the fire gate reported a perfect aim. The demand must
+// survive separately from the clamped pose target.
+//
+// Three call sites must agree on what the demand is, and they are the reason
+// this lives here rather than inline in turret.cpp:
+//   1. Aim()                 - drives the pose (clamped)
+//   2. the acquisition search - rejects candidates the arc cannot cover
+//   3. the hold logic        - releases a held target that became unreachable
+//
+// Positive is DOWN, matching InsTurretBarrelDirLocal's `dz = -sinf(pitch)`.
+// ---------------------------------------------------------------------------
+inline float InsTurretDemandPitch( float dz, float horiz )
+{
+    float p = -atan2f( dz, horiz ) * INS_TURRET_RAD2DEG;
+    if (p != p) return 0.0f;                 // NaN cannot poison the aim state
+    return p;
+}
+
+// Can the elevation arc cover this demand?
+//
+// The epsilon is deliberate and is NOT slack in the arc: at a demand exactly
+// on the limit, float rounding in the atan2/scale above can land a hair
+// outside, and rejecting that target would drop a legitimately reachable
+// enemy. Half a degree of slack is far below the fire gate's own +/-4 degree
+// tolerance, so a target admitted by it is still gated by the residual test.
+//
+// NaN is unreachable: a bad demand must fail closed rather than lock the gun.
+#define INS_TURRET_PITCH_REACH_EPS (0.5f)
+
+inline bool InsTurretPitchReachable( float pitchDeg )
+{
+    if (pitchDeg != pitchDeg) return false;                  // NaN
+    return (pitchDeg >= INS_TURRET_PITCH_MIN - INS_TURRET_PITCH_REACH_EPS) &&
+           (pitchDeg <= INS_TURRET_PITCH_MAX + INS_TURRET_PITCH_REACH_EPS);
+}
 
 // ---------------------------------------------------------------------------
 // The barrel's direction in the VEHICLE'S LOCAL frame, from the turret's own
