@@ -440,9 +440,11 @@ void CTurret::Reset( int entindex, int team )
 
 // ---------------------------------------------------------------------------
 CTurretRegistry::CTurretRegistry()
+    : m_count( 0 ),
+      m_nextDiscover( 0.0f ),
+      m_condemnedCount( 0 )
 {
-    m_count = 0;
-    m_nextDiscover = 0.0f;
+    memset( m_condemned, 0, sizeof( m_condemned ) );
 }
 
 CTurret *CTurretRegistry::Find( int entindex )
@@ -464,6 +466,14 @@ bool CTurretRegistry::Add( int entindex, int team )
 
 void CTurretRegistry::Remove( int entindex )
 {
+    // Remember that this vehicle was destroyed so a 4 Hz Discover() pass
+    // does not re-arm it while its driver is still aboard or ejecting.
+    // Every removal is permanent. humvee_health.sp and humvee_spawner.sp both
+    // signal destruction through this path (humvee_health.sp:567 and :1047,
+    // humvee_spawner.sp:2093), and the admin `insbot turret remove` should mean
+    // the same thing: the turret does not come back on the next 4 Hz pass.
+    Condemn( entindex );
+
     for (int i = 0; i < m_count; i++)
     {
         if (m_turrets[i].EntIndex() != entindex) continue;
@@ -477,6 +487,73 @@ void CTurretRegistry::Remove( int entindex )
 void CTurretRegistry::RemoveAll()
 {
     m_count = 0;
+    ClearCondemned();
+}
+
+// Read an edict's network serial number, or -1 if the index is invalid or
+// the edict is free. Used to distinguish a recycled edict slot from the
+// entity that was condemned.
+static int EdictSerial( int entindex )
+{
+    if (!engine) return -1;
+    edict_t *e = engine->PEntityOfEntIndex( entindex );
+    if (!e || e->IsFree()) return -1;
+    return e->m_NetworkSerialNumber;
+}
+
+void CTurretRegistry::Condemn( int entindex )
+{
+    int serial = EdictSerial( entindex );
+    if (serial < 0) return;
+
+    // Idempotent: refresh in place if already present. FrameUpdate calls
+    // Remove() every tick until the turret entity is gone, which calls
+    // Condemn() repeatedly for the same entity.
+    for (int i = 0; i < m_condemnedCount; i++)
+    {
+        if (m_condemned[i].entindex == entindex)
+        {
+            m_condemned[i].serial = serial;
+            return;
+        }
+    }
+
+    if (m_condemnedCount < INS_TURRET_MAX)
+    {
+        m_condemned[m_condemnedCount].entindex = entindex;
+        m_condemned[m_condemnedCount].serial   = serial;
+        m_condemnedCount++;
+    }
+    else
+    {
+        // Saturated: replace the oldest slot.
+        memmove( &m_condemned[0], &m_condemned[1],
+                 sizeof( m_condemned[0] ) * (INS_TURRET_MAX - 1) );
+        m_condemned[INS_TURRET_MAX - 1].entindex = entindex;
+        m_condemned[INS_TURRET_MAX - 1].serial   = serial;
+    }
+}
+
+bool CTurretRegistry::IsCondemned( int entindex ) const
+{
+    int serial = EdictSerial( entindex );
+    if (serial < 0) return false;
+
+    for (int i = 0; i < m_condemnedCount; i++)
+    {
+        if (m_condemned[i].entindex == entindex &&
+            m_condemned[i].serial   == serial)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CTurretRegistry::ClearCondemned()
+{
+    m_condemnedCount = 0;
+    memset( m_condemned, 0, sizeof( m_condemned ) );
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +572,12 @@ bool CTurret::Validate()
     IServerNetworkable *net = unk->GetNetworkable();
     const char *cls = (net && net->GetServerClass()) ? net->GetServerClass()->GetName() : 0;
     if (!IsDriveableClass( cls )) return false;
+
+    // Per-frame backstop. The class test above passes for the whole 60 s wreck
+    // lifetime, so without this a condemned hull would keep traversing until
+    // FrameUpdate happened to see a class change that never comes.
+    if (g_Turrets.IsCondemned( m_entIndex )) return false;
+
     return true;
 }
 
@@ -803,6 +886,7 @@ void CTurretRegistry::Discover( float now )
         edict_t *e = engine->PEntityOfEntIndex( i );
         if (!e || e->IsFree()) continue;
         if (Find( i )) continue;                // already a turret
+        if (IsCondemned( i )) continue;         // destroyed: never re-arm
 
         IServerUnknown *unk = e->GetUnknown();
         if (!unk) continue;

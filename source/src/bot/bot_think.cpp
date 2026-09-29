@@ -908,8 +908,26 @@ void CInsBot::ThinkAlive()
             // and the ammo accounting. Ordinary weapons go through the normal
             // IN_ATTACK pipeline. Either way, only fire with a confirmed hull
             // trace and a clear line for teammates.
-            if (vehLos && vAimed && vReactionDone && vTeamClear
-                && m_reloadUntil <= now)
+            bool vCanFire = vehLos && vAimed && vReactionDone && vTeamClear
+                            && m_reloadUntil <= now;
+
+            // Launchers go through RunMove's direct-launch path, which strips
+            // IN_ATTACK and calls primaryAttack() straight through the vtable
+            // (bot_weapons.cpp:904-905) - bypassing the engine's own
+            // m_flNextPrimaryAttack limiter. Without this gate the branch
+            // re-arms IN_ATTACK every tick and the bot empties its rocket
+            // reserve at ~15 ms per shot. The infantry path applies the same
+            // rule at bot_think.cpp:1137-1138.
+            if (vCanFire && IsHoldingRPG())
+            {
+                if (!CanRPGFire() || now < m_nextRpg) vCanFire = false;
+            }
+            else if (vCanFire && IsHoldingM203())
+            {
+                if (!CanM203Fire() || now < m_nextM203) vCanFire = false;
+            }
+
+            if (vCanFire)
             {
                 buttons |= IN_ATTACK;
             }

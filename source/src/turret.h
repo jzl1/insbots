@@ -155,6 +155,16 @@ public:
     bool      Add( int entindex, int team );
     void      Remove( int entindex );
     void      RemoveAll();
+    // ---- condemned vehicles ----------------------------------------------
+    // A vehicle whose turret has been destroyed, remembered so Discover() does
+    // not re-arm it. humvee_health.sp signals destruction with
+    // `insbot turret remove <ent>` and re-sends it for only 10 ticks
+    // (WRECK_RESEND_TICKS, humvee_health.sp:1047) - far shorter than the 0.25 s
+    // Discover() cadence. Keyed on (entindex, serial) so slot reuse on a
+    // freshly spawned vehicle is not suppressed.
+    void        Condemn( int entindex );
+    bool        IsCondemned( int entindex ) const;
+    void        ClearCondemned();
     CTurret  *Find( int entindex );
     int       Count() const { return m_count; }
     CTurret  *At( int i ) { return &m_turrets[i]; }
@@ -193,6 +203,13 @@ private:
     CTurret m_turrets[INS_TURRET_MAX];
     int     m_count;
     float   m_nextDiscover;
+    struct CondemnedSlot
+    {
+        int entindex;
+        int serial;
+    };
+    CondemnedSlot m_condemned[INS_TURRET_MAX];
+    int           m_condemnedCount;
 };
 
 extern CTurretRegistry g_Turrets;
