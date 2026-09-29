@@ -316,12 +316,27 @@ private:
 
     // combat
     int    m_enemyIndex;       // entity index of current enemy, 0 = none
+
+    // ---- anti-vehicle threat channel (SEPARATE from m_enemyIndex) ----------
+    // A vehicle is a non-client edict: its entindex is > maxClients and
+    // playerinfomanager->GetPlayerInfo() returns NULL for it. Passing such an
+    // index into m_enemyIndex crashes at bot_think.cpp:795 (unchecked pi) and
+    // would overflow g_Intel[team].enemy[] (size 66) and
+    // m_leaderSquadThreatEnemy[] (size 65).
+    //
+    // This channel is therefore deliberately parallel and never shares a sink
+    // with the infantry index. It holds a Humvee hull, not a player.
+    int    m_vehicleEnemyIndex;   // entindex of the targeted Humvee, 0 = none
+    float  m_vehicleSeenTime;     // when the current vehicle was acquired
+    float  m_vehicleLastSeen;     // last confirmed line of sight
+    Vector m_vehicleLastPos;      // last known hull origin
     float  m_enemySeenTime;    // when we first saw current enemy (reaction delay)
     float  m_enemyLastSeen;
     Vector   m_vecLastOrigin;     // to detect being stuck
     float    m_flOldNextAttack;   // to spoof RunNullCommand
     Vector m_enemyLastPos;
     float  m_nextEnemyScan;
+    float  m_nextVehicleScan;     // 10 Hz vehicle threat scan
     float  m_fireStateEnd;     // burst/pause timer
     bool   m_firing;
     bool   m_ironsights;
@@ -607,6 +622,14 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     Vector FireEyePos(bool crouched) const;
     int   FindEnemy();
     bool  ValidEnemy(int idx) const;   // strict per-frame target validation
+
+    // Anti-vehicle channel. See the members above for why this is separate.
+    bool  ValidVehicleEnemy(int idx) const;
+    int   FindVehicleEnemy();
+    bool  BuildVehicleTargetPoints(edict_t *vehicle, Vector *points,
+                                   int maxPoints) const;
+    bool  FindShootableVehiclePoint(edict_t *vehicle, bool crouched,
+                                    Vector &out) const;
     void  UpdatePathTo(const Vector &goal, bool force);
     bool  AdvanceWaypoint();
     void  RefreshRouteRank();  // coherent post-think snapshot for queue ordering
@@ -621,6 +644,10 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     const char *SidearmName() const;
     const char *GrenadeName() const;
     bool  HasWeapon(const char *weaponClass) const;
+    // Anti-vehicle trigger policy. Reads insbot_target_vehicles and the held
+    // weapon: only explosives (RPG-7, M203) bypass the 0.05 hull armor scale,
+    // so small arms are not worth the magazine.
+    bool  VehicleEngageWeaponAllowed() const;
     void  StartGrenade(float now, const Vector &target);
     void  StartSmoke(float now, const Vector &target);   // smoke throw (verifies possession)
     void  MaybeSmokeObjective(float now, const struct ObjPoint *op, float dist, int myTeam);

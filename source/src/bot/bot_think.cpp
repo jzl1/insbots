@@ -30,6 +30,8 @@
 #include "voice.h"
 #include "profile.h"
 #include "linux_offsets.h"
+#include "turret.h"
+#include "vehicle_target_math.h"
 
 extern IVEngineServer       *engine;
 extern IEngineTrace         *enginetrace;
@@ -284,6 +286,8 @@ void CInsBot::ThinkDeadReset(float now)
     m_classSetupSent = false;
     m_nextReinforcePulse = 0.0f;
     m_enemyIndex = 0;
+    m_vehicleEnemyIndex = 0;
+    m_vehicleLastSeen = 0.0f;
     ResetDoorwayRunway();
 
     m_pathLen = 0;
@@ -609,6 +613,64 @@ void CInsBot::ThinkAlive()
         }
     }
 
+    // ---------------- vehicle threat scan (same 10 Hz cadence) ------------
+    // Fully parallel to the infantry scan above. The two never share an index
+    // space: m_vehicleEnemyIndex holds an ENTITY index and must never be handed
+    // to ValidEnemy, IntelReport, ReportSquadThreat or GetPlayerInfo.
+    if (!insbot_detect.GetBool() && m_vehicleEnemyIndex)
+        m_vehicleEnemyIndex = 0;   // detection disabled: drop the vehicle too
+
+    if (now >= m_nextVehicleScan)
+    {
+        m_nextVehicleScan = now + 0.1f;
+
+        // Infantry outranks vehicles. Do not even acquire while a live enemy
+        // player is being fought: the vehicle channel exists to make a bot
+        // respond to armour, not to distract it from a firefight.
+        if (m_enemyIndex)
+        {
+            m_vehicleEnemyIndex = 0;
+        }
+        else
+        {
+            int v = FindVehicleEnemy();
+            if (v)
+            {
+                if (v != m_vehicleEnemyIndex)
+                {
+                    m_vehicleEnemyIndex = v;
+                    m_vehicleSeenTime = now;
+                    Say(VOX_ENGAGE);
+                    if (insbot_debug.GetBool())
+                    {
+                        Vector vp = g_Turrets.VehicleOrigin(v);
+                        BotDbg("[insbots] %s targeting vehicle ent %d at (%.0f %.0f %.0f)\n",
+                               m_name, v, vp.x, vp.y, vp.z);
+                    }
+                }
+                m_vehicleLastSeen = now;
+                m_vehicleLastPos = g_Turrets.VehicleOrigin(v);
+            }
+            else if (m_vehicleEnemyIndex
+                     && now - m_vehicleLastSeen > insbot_lose_time.GetFloat())
+            {
+                m_vehicleEnemyIndex = 0;   // lost it: stop aiming at the ghost
+            }
+        }
+    }
+
+    // De-acquire immediately when the hull stops being a valid threat. This is
+    // the wreck discriminator: destruction sends `insbot turret remove`, which
+    // drops the registry entry, so VehicleOwnerTeam reads 0 and
+    // ValidVehicleEnemy fails on the next frame. The bot then drops the charred
+    // hull instead of emptying a magazine into a 60-second wreck that
+    // humvee_health.sp rejects with Plugin_Handled.
+    if (m_vehicleEnemyIndex && !ValidVehicleEnemy(m_vehicleEnemyIndex))
+    {
+        m_vehicleEnemyIndex = 0;
+        m_vehicleLastSeen = 0.0f;
+    }
+
     QAngle view = m_curAngles;
     float fwd = 0, side = 0;
     int buttons = 0;
@@ -772,6 +834,94 @@ void CInsBot::ThinkAlive()
     Vector liveTarget(0, 0, 0);
     edict_t *ee = 0;
     IPlayerInfo *pi = 0;
+
+    // ---------------- vehicle engagement ----------------
+    // Runs only when there is no infantry target and no suppression order:
+    // infantry outranks armour. The branch below deliberately populates the
+    // SAME locals the infantry path uses (livePos, liveTarget, ee, engaging) so
+    // the existing aim/recoil/burst machinery drives the shot unchanged.
+    //
+    // Notice what is NOT touched:
+    //   * m_enemyIndex stays 0.
+    //   * pi stays NULL (no GetPlayerInfo call on a vehicle entindex).
+    //   * g_Intel and m_leaderSquadThreatEnemy are not called.
+    if (!m_enemyIndex && !suppressCombat && m_vehicleEnemyIndex
+        && VehicleEngageWeaponAllowed())
+    {
+        edict_t *ve = engine->PEntityOfEntIndex(m_vehicleEnemyIndex);
+        if (ve && !ve->IsFree())
+        {
+            Vector vehOrigin = g_Turrets.VehicleOrigin(m_vehicleEnemyIndex);
+            Vector vehAim = vehOrigin;
+            vehAim.z += INS_VEHICLE_AIM_HEIGHT;
+
+            livePos = vehOrigin;
+            liveTarget = vehAim;
+            ee = ve;
+            engaging = true;
+
+            bool vehLos = FindShootableVehiclePoint(ve, false, liveTarget);
+            if (vehLos)
+            {
+                m_vehicleLastSeen = now;
+                m_vehicleLastPos = vehOrigin;
+            }
+
+            // Aim at the live hull point while visible; otherwise hold the last
+            // known position, exactly like the infantry ghost-aim rule.
+            Vector vehTarget = vehLos ? liveTarget
+                                      : (m_vehicleLastPos
+                                         + Vector(0, 0, INS_VEHICLE_AIM_HEIGHT));
+
+            Vector eye = EyePos();
+            Vector dv = vehTarget - eye;
+            float vhyp = sqrtf(dv.x * dv.x + dv.y * dv.y);
+            float vdist = sqrtf(dv.x * dv.x + dv.y * dv.y + dv.z * dv.z);
+            float vWantYaw   = atan2f(dv.y, dv.x) * (180.0f / 3.14159265f);
+            float vWantPitch = -atan2f(dv.z, vhyp) * (180.0f / 3.14159265f);
+
+            float vMaxStep = insbot_aim_speed.GetFloat()
+                           * gpGlobals->interval_per_tick;
+            float vdy = fmodf(vWantYaw - m_curAngles.y, 360.0f);
+            if (vdy != vdy) vdy = 0.0f;
+            if (vdy > 180.0f) vdy -= 360.0f;
+            if (vdy < -180.0f) vdy += 360.0f;
+            if (vdy > vMaxStep) vdy = vMaxStep;
+            else if (vdy < -vMaxStep) vdy = -vMaxStep;
+
+            float vdp = vWantPitch - m_curAngles.x;
+            if (vdp > vMaxStep) vdp = vMaxStep;
+            else if (vdp < -vMaxStep) vdp = -vMaxStep;
+
+            view.y = m_curAngles.y + vdy;
+            view.x = m_curAngles.x + vdp;
+            m_curAngles = view;
+
+            bool vAimed = (vdy < 18.0f && vdy > -18.0f
+                           && vdp < 18.0f && vdp > -18.0f);
+            bool vReactionDone =
+                (now - m_vehicleSeenTime) >= insbot_reaction.GetFloat();
+            bool vTeamClear = !IsTeammateInLineOfFire(EyePos(), vehTarget);
+
+            // Explosives are delivered by the existing direct-launch path in
+            // RunMove (bot_squad.cpp:965-981), which owns the launcher cooldowns
+            // and the ammo accounting. Ordinary weapons go through the normal
+            // IN_ATTACK pipeline. Either way, only fire with a confirmed hull
+            // trace and a clear line for teammates.
+            if (vehLos && vAimed && vReactionDone && vTeamClear
+                && m_reloadUntil <= now)
+            {
+                buttons |= IN_ATTACK;
+            }
+
+            RunMove(0.0f, 0.0f, buttons, view);
+            return;
+        }
+        else
+        {
+            m_vehicleEnemyIndex = 0;
+        }
+    }
 
     if (m_enemyIndex || suppressCombat)
     {

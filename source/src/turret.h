@@ -159,6 +159,28 @@ public:
     int       Count() const { return m_count; }
     CTurret  *At( int i ) { return &m_turrets[i]; }
 
+    // ---- read-only vehicle cache, for the bots' anti-vehicle channel ------
+    // The registry already rebuilds a bitmap of every CPropVehicleDriveable
+    // twice a second (RebuildVehicleIndex). The bots need that same set, so it
+    // is exposed rather than re-derived: a second 10 Hz walk of every edict
+    // would be pure waste, and would drift from this one.
+    //
+    // NOTE: this set includes the buggy and the civilian cars, which share the
+    // class. Callers must additionally test VehicleIsHumvee() when they mean
+    // "our Humvee".
+    int    VehicleCount() const;
+    int    VehicleEntIndex( int slot ) const;
+    bool   VehicleIsHumvee( int entindex ) const;
+    Vector VehicleOrigin( int entindex ) const;
+    // The truck's LATCHED owner from the turret registry, or 0 when it is not
+    // registered (never boarded, wrecked, or the turret system is disabled).
+    // This is the value the bots' hostility test uses.
+    int    VehicleOwnerTeam( int entindex ) const;
+    // The live driver's team, or 0 when there is no readable driver. Used only
+    // for the friendly-occupant veto and the friendly-fire check - never for
+    // ownership.
+    int    VehicleDriverTeam( int entindex ) const;
+
     void FrameUpdate( bool simulating );
     void Discover( float now );   // find newly-boarded Humvees (design 5.1)
     // Advance m_flAnimTime on every driveable, turret or not. This is the

@@ -135,6 +135,7 @@ CfgVar insbot_quota_start_interval("quota_start_interval", "0.20", "seconds betw
 CfgVar insbot_quota_add_interval("quota_add_interval", "0.25", "seconds between quota replacement bot creations after startup");
 CfgVar insbot_fov("fov", "120", "bot field of view (degrees)");
 CfgVar insbot_vis_range("vis_range", "2500", "max enemy spotting distance");
+CfgVar insbot_target_vehicles("target_vehicles", "2", "bot anti-vehicle policy: 0=ignore Humvees, 1=anti-armor weapons only (RPG/M203), 2=all weapons when no infantry threat is visible (default)");
 CfgVar insbot_reaction("reaction", "0.6", "reaction delay before firing (s)");
 CfgVar insbot_aim_error("aim_error", "4.0", "aim error in degrees (0=perfect)");
 CfgVar insbot_aim_speed("aim_speed", "260", "max aim turn speed (deg/s)");

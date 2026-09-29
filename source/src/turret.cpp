@@ -839,6 +839,128 @@ void CTurretRegistry::Discover( float now )
 }
 
 // ---------------------------------------------------------------------------
+// Read-only vehicle cache accessors. See turret.h for why these exist.
+// ---------------------------------------------------------------------------
+
+// Number of edict slots currently holding a driveable.
+int CTurretRegistry::VehicleCount() const
+{
+    return s_vehicleIdxCount;
+}
+
+// Entindex of the slot-th driveable, or 0 when the slot is empty/out of range.
+// Slots are dense: this walks the bitmap, so it costs one byte test per skipped
+// slot and is only ever called for a handful of vehicles.
+int CTurretRegistry::VehicleEntIndex( int slot ) const
+{
+    if (slot < 0) return 0;
+    if (!s_vehicleIdx) return 0;
+    if (!engine) return 0;
+
+    int maxEdicts = engine->GetEntityCount();
+    if (maxEdicts > s_vehicleIdxCount) maxEdicts = s_vehicleIdxCount;
+
+    int seen = 0;
+    for (int i = 1; i < maxEdicts; i++)
+    {
+        if (!s_vehicleIdx[i]) continue;
+        if (seen == slot) return i;
+        seen++;
+    }
+    return 0;
+}
+
+// True only for OUR Humvee. The buggy and the civilian cars share the
+// CPropVehicleDriveable class, so the class test alone is not enough.
+bool CTurretRegistry::VehicleIsHumvee( int entindex ) const
+{
+    if (!engine) return false;
+    edict_t *e = engine->PEntityOfEntIndex( entindex );
+    if (!e || e->IsFree()) return false;
+    IServerUnknown *unk = e->GetUnknown();
+    if (!unk) return false;
+    IServerNetworkable *net = unk->GetNetworkable();
+    const char *cls = (net && net->GetServerClass())
+                    ? net->GetServerClass()->GetName() : 0;
+    if (!IsDriveableClass( cls )) return false;
+    return IsHumveeModel( EntityModelName( e ) );
+}
+
+// The vehicle's collision origin, which is what the measured aim point is
+// relative to. Returns (0,0,0) for an unreadable entity so callers can reject
+// it with the same near-origin test ValidEnemy already uses.
+Vector CTurretRegistry::VehicleOrigin( int entindex ) const
+{
+    if (!engine) return Vector( 0, 0, 0 );
+    edict_t *e = engine->PEntityOfEntIndex( entindex );
+    if (!e || e->IsFree()) return Vector( 0, 0, 0 );
+    IServerUnknown *unk = e->GetUnknown();
+    if (!unk) return Vector( 0, 0, 0 );
+    ICollideable *col = unk->GetCollideable();
+    if (!col) return Vector( 0, 0, 0 );
+    return col->GetCollisionOrigin();
+}
+
+// The truck's LATCHED owner team, read from the turret registry.
+//
+// Ownership is set once by CTurret::Arm from the first boarding player and
+// never re-latched (turret.h:4-6), and it deliberately SURVIVES the driver's
+// death: a Humvee stays on its owner's team and its turret keeps defending.
+// That is the agreed model, so this - not the live driver - is what the bots'
+// hostility test consumes.
+//
+// Returns 0 when the truck is not registered. That covers all three
+// non-targets at once: never boarded (no owner), wrecked (humvee_health.sp:567
+// sends `insbot turret remove`), and `turret_enabled 0` (nothing is armed).
+int CTurretRegistry::VehicleOwnerTeam( int entindex ) const
+{
+    // Same lookup CTurretRegistry::Find performs, as a const member so the
+    // bot channel can call it through `g_Turrets`.
+    for (int i = 0; i < m_count; i++)
+        if (m_turrets[i].EntIndex() == entindex)
+            return m_turrets[i].Team();
+    return 0;
+}
+
+// The live driver's team, or 0 when there is no readable driver.
+//
+// Read through the same m_hPlayer handle CTurret::Arm reads (turret.cpp:518),
+// so there is one interpretation of that field in the plugin.
+//
+// This is used ONLY for the friendly-occupant veto and the friendly-fire
+// check. It must never be used for ownership: a truck stolen by the enemy
+// keeps its original owner, and reading the driver here would flip a friendly
+// truck hostile the moment an enemy climbed in.
+int CTurretRegistry::VehicleDriverTeam( int entindex ) const
+{
+    if (g_TurretOffsetDriver < 0) return 0;
+    if (!engine || !gpGlobals || !playerinfomanager) return 0;
+
+    edict_t *e = engine->PEntityOfEntIndex( entindex );
+    if (!e || e->IsFree()) return 0;
+    IServerUnknown *unk = e->GetUnknown();
+    if (!unk) return 0;
+    void *pVehicle = unk->GetBaseEntity();
+    if (!pVehicle) return 0;
+
+    unsigned long hPlayer =
+        *(unsigned long *)((char *)pVehicle + g_TurretOffsetDriver);
+    if (hPlayer == INVALID_EHANDLE_INDEX || hPlayer == 0) return 0;
+
+    int idx = (int)(hPlayer & ENT_ENTRY_MASK);
+    if (idx < 1 || idx > gpGlobals->maxClients) return 0;
+    edict_t *pe = engine->PEntityOfEntIndex( idx );
+    if (!pe || pe->IsFree()) return 0;
+
+    IPlayerInfo *pi = playerinfomanager->GetPlayerInfo( pe );
+    if (!pi || !pi->IsConnected() || pi->IsDead()) return 0;
+
+    int t = pi->GetTeamIndex();
+    if (t <= 0 || t >= 3) return 0;
+    return t;
+}
+
+// ---------------------------------------------------------------------------
 void CTurretRegistry::Status()
 {
     if (m_count == 0) { Msg( "[insbots] no turrets registered\n" ); return; }

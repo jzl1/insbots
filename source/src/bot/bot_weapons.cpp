@@ -42,6 +42,7 @@ extern CfgVar                insbot_grenade_gravity;
 extern CfgVar                insbot_grenade_speed;
 extern CfgVar                insbot_intel_time;
 extern CfgVar                insbot_m203;
+extern CfgVar                insbot_target_vehicles;
 extern CfgVar                insbot_m203_cooldown;
 extern CfgVar                insbot_m203_max_range;
 extern CfgVar                insbot_m203_min_range;
@@ -944,4 +945,33 @@ int CInsBot::GetClipRemaining() const
     if (cls < 0 || cls >= INSBOT_COMBAT_CLASS_COUNT) cls = 0;
     int left = mag - m_roundsFired[cls];
     return (left < 0) ? 0 : left;
+}
+
+// ===========================================================================
+// Anti-vehicle trigger policy.
+//
+// insbot_target_vehicles:
+//   0 = never engage a Humvee
+//   1 = anti-armor only: the RPG-7 and the M203 are the only weapons whose
+//       damage bypasses sm_humvee_armor_scale 0.05 in humvee_health.sp (its
+//       g_ExplosiveNeedles matches "rpg", "missile", "m203", "40mm").
+//   2 = all weapons (DEFAULT): bots shoot trucks with whatever they hold.
+//       Expect the rifle case to be slow - about 230 hits to break one hull -
+//       which is why the arbitration rule keeps it to moments with no visible
+//       infantry threat.
+//
+// The policy is consulted for the WEAPON IN HAND, so a bot holding a rifle
+// does not switch weapons to suit the target - weapon selection stays owned by
+// the existing loadout and ammo machinery.
+// ===========================================================================
+bool CInsBot::VehicleEngageWeaponAllowed() const
+{
+    int policy = insbot_target_vehicles.GetInt();
+    if (policy <= 0) return false;
+    if (policy >= 2) return true;
+
+    // Policy 1: explosives only.
+    if (IsHoldingRPG() && CanRPGFire()) return true;
+    if (IsHoldingM203() && CanM203Fire()) return true;
+    return false;
 }

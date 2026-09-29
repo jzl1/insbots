@@ -1111,6 +1111,7 @@ void CInsBot::Think(bool simulating)
             m_pathLen = 0;
             m_pathResult = BOT_PATH_NONE;
     m_pathContinues = false; m_goalArea = -1; m_enemyIndex = 0;
+    m_vehicleEnemyIndex = 0; m_vehicleLastSeen = 0.0f;
             m_spawnStandTicks = 66;
         }
         break;

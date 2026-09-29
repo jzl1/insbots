@@ -355,6 +355,25 @@ insbot set turret_fire_tolerance_yaw    "5.0"  // turret fire gate: max yaw erro
 insbot set turret_fire_tolerance_pitch  "4.0"  // turret fire gate: max pitch error (deg)
 insbot set turret_spread               "0.230" // turret bullet spread cone (deg; M249 real value)
 
+// =================== BOT ANTI-VEHICLE POLICY ===================
+
+// A Humvee is owned by the team of the FIRST player to board it, and it stays
+// on that team for the rest of its life - including after the driver dies, and
+// even if an enemy later climbs in. Bots engage a truck owned by the other
+// team, except while a teammate is sitting inside it.
+//
+// A seated driver is immune to bullet fire (the engine excludes
+// COLLISION_GROUP_IN_VEHICLE from traces), so the truck's 400 HP hull is the
+// only thing that can actually be damaged. A destroyed wreck is dropped
+// immediately, and an unoccupied or never-boarded truck is never engaged.
+//
+// At sm_humvee_armor_scale 0.05 a rifle round does about 1.75 damage to the
+// hull - roughly 230 hits to break one truck. Only the RPG-7 and M203 bypass
+// that scale. Set 1 to restrict bots to those weapons; the default 2 lets any
+// weapon engage, but only when no infantry threat is visible.
+
+insbot set target_vehicles            "2"     // 0=ignore Humvees, 1=anti-armor weapons only (RPG/M203), 2=all weapons when no infantry threat is visible (default)
+
 // =================== ENGINE OFFSETS (ADVANCED) ===================
 
 // DO NOT COPY THIS SECTION INTO YOUR SERVER CONFIG, AND DO NOT CHANGE THESE

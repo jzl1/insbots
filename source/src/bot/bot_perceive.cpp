@@ -31,6 +31,8 @@
 #include "objective.h"
 #include "profile.h"
 #include "bot_internal.h"
+#include "turret.h"
+#include "vehicle_target_math.h"
 
 // ---- externs this TU needs (same pattern as bot.cpp / objective.cpp) -------
 extern IVEngineServer       *engine;
@@ -45,6 +47,7 @@ extern CfgVar                insbot_hear_cooldown;
 extern CfgVar                insbot_detect;
 extern CfgVar                insbot_fov;
 extern CfgVar                insbot_vis_range;
+extern CfgVar                insbot_target_vehicles;
 extern CfgVar                insbot_debug;
 extern CfgVar                insbot_close_range;
 extern CfgVar                insbot_crouch_eye_height;
@@ -446,25 +449,49 @@ bool CInsBot::IsTeammateInLineOfFire(const Vector &from, const Vector &to) const
     CTraceFilterSkipSelf filter(EdictHandleEntity(m_edict));
     trace_t tr;
     enginetrace->TraceRay(ray, MASK_SHOT, &filter, &tr);
-    if (tr.fraction < 1.0f && tr.m_pEnt)
+    if (tr.fraction >= 1.0f || !tr.m_pEnt)
+        return false;
+
+    IServerUnknown *unk = (IServerUnknown *)tr.m_pEnt;
+    if (!unk) return false;
+    IServerNetworkable *net = unk->GetNetworkable();
+    if (!net) return false;
+    edict_t *e = net->GetEdict();
+    if (!e || e->IsFree()) return false;
+
+    int index = engine->IndexOfEdict(e);
+
+    // ---- friendly player: unchanged ----
+    if (index >= 1 && index <= gpGlobals->maxClients)
     {
-        IServerUnknown *unk = (IServerUnknown *)tr.m_pEnt;
-        if (unk) {
-            IServerNetworkable *net = unk->GetNetworkable();
-            if (net) {
-                edict_t *e = net->GetEdict();
-                if (e && !e->IsFree()) {
-                    int index = engine->IndexOfEdict(e);
-                    if (index >= 1 && index <= gpGlobals->maxClients) {
-                        IPlayerInfo *pi = playerinfomanager->GetPlayerInfo(e);
-                        if (pi && pi->GetTeamIndex() == m_info->GetTeamIndex()) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
+        IPlayerInfo *pi = playerinfomanager->GetPlayerInfo(e);
+        return pi && pi->GetTeamIndex() == m_info->GetTeamIndex();
     }
+
+    // ---- friendly VEHICLE: the case the client-only test missed ----
+    // A Humvee is a non-client edict, so the branch above never saw it and a
+    // bot would fire straight into a teammate's truck.
+    //
+    // The target vehicle itself is NOT a blocker. When this trace lands on the
+    // truck the bot is deliberately engaging, that is the shot, not an abort.
+    if (index == m_vehicleEnemyIndex) return false;
+
+    if (g_Turrets.VehicleIsHumvee(index))
+    {
+        // Ownership is latched: an own-team truck blocks the shot even after
+        // its driver dies, and a truck the enemy hijacked still counts as
+        // ours. This is the same source ValidVehicleEnemy uses, so the two can
+        // never disagree about who owns a truck.
+        int ownerTeam = g_Turrets.VehicleOwnerTeam(index);
+        if (ownerTeam > 0 && ownerTeam < 3
+            && ownerTeam == m_info->GetTeamIndex())
+            return true;
+
+        // An UNOWNED truck (never boarded) is not a teammate's, so it does not
+        // block. It also cannot be a target - ValidVehicleEnemy rejects it -
+        // so a bot shooting past it is fine.
+    }
+
     return false;
 }
 
@@ -707,6 +734,190 @@ int CInsBot::FindEnemy()
             bestDist = distSq;
             best = i;
         }
+    }
+
+    return best;
+}
+
+// ===========================================================================
+// Anti-vehicle threat channel.
+//
+// A Humvee is a non-client edict. It can never satisfy ValidEnemy() (which
+// rejects idx > maxClients outright), and it must never be handed to any
+// client-index sink. This channel is therefore fully parallel to m_enemyIndex.
+//
+// Hostility comes from the truck's LATCHED OWNER TEAM in the turret registry,
+// not from the live driver. CTurret::Arm latches once on first boarding and
+// never re-latches (turret.h:4-6), and that is the intended model: a truck
+// whose driver died stays hostile and keeps being engaged, and a truck the
+// enemy hijacked keeps its original owner rather than flipping hostile.
+//
+// The live driver is consulted for exactly one thing: a teammate sitting in
+// the hull vetoes the shot.
+// ===========================================================================
+
+// Strict per-frame validity for a vehicle target.
+bool CInsBot::ValidVehicleEnemy(int idx) const
+{
+    if (idx <= 0) return false;
+    if (!gpGlobals || !m_info) return false;
+    if (idx <= gpGlobals->maxClients) return false;   // a vehicle is never a client
+
+    edict_t *e = engine->PEntityOfEntIndex(idx);
+    if (!e || e->IsFree() || e == m_edict) return false;
+
+    // Class and model, through the registry's own predicate so the class string
+    // and the model tail live in exactly one place.
+    if (!g_Turrets.VehicleIsHumvee(idx)) return false;
+
+    // Ownership is LATCHED and comes from the turret registry, not the driver.
+    // A truck whose driver died is still hostile and must stay engaged; a truck
+    // hijacked by the enemy keeps its original owner and stays friendly.
+    // VehicleOwnerTeam returns 0 for anything unregistered, which is how the
+    // wreck (turret removed) and never-boarded cases fail closed.
+    int ownerTeam = g_Turrets.VehicleOwnerTeam(idx);
+    if (!ownerTeam) return false;
+
+    // The one live-driver fact that still matters: never shoot into a hull with
+    // a teammate sitting inside it.
+    int driverTeam = g_Turrets.VehicleDriverTeam(idx);
+    bool friendlyAboard = (driverTeam > 0
+                           && driverTeam == m_info->GetTeamIndex());
+
+    // InsVehicleEngageable is the HOST-TESTED rule; this call is what makes it
+    // load-bearing rather than documentation.
+    if (!InsVehicleEngageable(ownerTeam, m_info->GetTeamIndex(), friendlyAboard))
+        return false;
+
+    // Reject a hull sitting at/near the world origin, the same "ghost" guard
+    // ValidEnemy applies to players that connected but never got a squad slot.
+    Vector p = g_Turrets.VehicleOrigin(idx);
+    if (p.x > -48.0f && p.x < 48.0f && p.y > -48.0f && p.y < 48.0f
+        && p.z > -48.0f && p.z < 48.0f)
+        return false;
+
+    return true;
+}
+
+// Candidate aim points for a vehicle, in priority order. Point 0 is the
+// measured hull aim point; see vehicle_target_math.h for why it is NOT the
+// bounding-box center.
+bool CInsBot::BuildVehicleTargetPoints(edict_t *vehicle, Vector *points,
+                                       int maxPoints) const
+{
+    if (!vehicle || !points || maxPoints <= 0) return false;
+    int idx = engine->IndexOfEdict(vehicle);
+    if (idx <= 0) return false;
+
+    Vector origin = g_Turrets.VehicleOrigin(idx);
+    if (origin.x == 0.0f && origin.y == 0.0f && origin.z == 0.0f) return false;
+
+    // Forward = the vehicle's yaw direction, flattened to XY. The hull aim
+    // point is height-only, so the vehicle's pitch and roll must not leak into
+    // the point positions.
+    QAngle angles;
+    IServerUnknown *unk = vehicle->GetUnknown();
+    if (!unk) return false;
+    ICollideable *col = unk->GetCollideable();
+    if (!col) return false;
+    angles = col->GetCollisionAngles();
+
+    float yawRad = angles.y * (3.14159265f / 180.0f);
+    float fx = cosf(yawRad);
+    float fy = sinf(yawRad);
+
+    float raw[3][3];
+    int count = InsVehicleBuildTargetPoints(origin.x, origin.y, origin.z,
+                                            fx, fy, raw);
+    if (count > maxPoints) count = maxPoints;
+    for (int i = 0; i < count; i++)
+        points[i] = Vector(raw[i][0], raw[i][1], raw[i][2]);
+    return count > 0;
+}
+
+// Immediate this-frame shootability gate, the vehicle twin of
+// FindShootableTargetPoint. Tries each candidate point in priority order and
+// returns the first the trace reaches.
+bool CInsBot::FindShootableVehiclePoint(edict_t *vehicle, bool crouched,
+                                        Vector &out) const
+{
+    if (!vehicle) return false;
+
+    Vector points[INS_VEHICLE_TARGET_POINTS];
+    if (!BuildVehicleTargetPoints(vehicle, points, INS_VEHICLE_TARGET_POINTS))
+        return false;
+
+    for (int i = 0; i < INS_VEHICLE_TARGET_POINTS; i++)
+    {
+        if (CanShootNow(vehicle, points[i], crouched))
+        {
+            out = points[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+// Scan the registry's vehicle cache for the closest visible hostile Humvee.
+// Returns an ENTITY index, which callers must keep in m_vehicleEnemyIndex and
+// never hand to a client-index sink.
+int CInsBot::FindVehicleEnemy()
+{
+    if (!insbot_target_vehicles.GetInt()) return 0;
+    if (!engine || !gpGlobals || !m_info) return 0;
+
+    int myTeam = m_info->GetTeamIndex();
+    if (myTeam <= 0 || myTeam >= 3) return 0;
+
+    Vector myEye = EyePos();
+
+    // Range inherits the held weapon class's own engage range, exactly as the
+    // infantry scan does (bot_perceive.cpp:600-601). There is deliberately no
+    // separate vehicle range setting: an RPG gunner engages a truck as far as
+    // the RPG class is configured to engage, a rifleman as far as the rifle is.
+    // That keeps one tuning surface instead of two that can disagree.
+    const WeaponProfile *heldProfile = (const WeaponProfile *)m_wp;
+    if (!heldProfile) heldProfile = &s_wpDefault;
+    CombatProfile *combat = CombatForWeapon(heldProfile);
+    float maxRange = CombatValue(combat->engageRange, insbot_vis_range);
+    if (maxRange <= 0.0f) return 0;
+
+    int best = 0;
+    float bestDistSq = maxRange * maxRange;
+
+    int vehicles = g_Turrets.VehicleCount();
+    for (int slot = 0; slot < vehicles; slot++)
+    {
+        int idx = g_Turrets.VehicleEntIndex(slot);
+        if (!idx) continue;
+        if (!ValidVehicleEnemy(idx)) continue;
+
+        edict_t *e = engine->PEntityOfEntIndex(idx);
+        if (!e || e->IsFree()) continue;
+
+        Vector origin = g_Turrets.VehicleOrigin(idx);
+        Vector aim = origin;
+        aim.z += INS_VEHICLE_AIM_HEIGHT;
+
+        Vector d = aim - myEye;
+        float distSq = d.x * d.x + d.y * d.y + d.z * d.z;
+
+        // Give the currently held vehicle the same 20% distance advantage the
+        // infantry scan gives its current target (bot_perceive.cpp:620), so a
+        // bot does not flip between two trucks every scan.
+        float scoreDistSq = distSq;
+        if (idx == m_vehicleEnemyIndex) scoreDistSq *= 0.64f;
+
+        if (!InsVehicleInRange(scoreDistSq, maxRange)) continue;
+        if (scoreDistSq > bestDistSq) continue;
+
+        // Visibility at the measured hull point, through the same smoke rule
+        // the infantry scan uses.
+        if (!IsVisible(myEye, aim, e)) continue;
+        if (LineGoesThroughSmoke(myEye, aim)) continue;
+
+        bestDistSq = scoreDistSq;
+        best = idx;
     }
 
     return best;

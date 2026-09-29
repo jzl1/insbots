@@ -167,6 +167,11 @@ bool CInsBot::Create(const char *nameOrNull, int teamSlot, int requestedTeamArg,
     m_classSetupSent = false;
     m_nextReinforcePulse = 0.0f;
     m_enemyIndex = 0;
+    m_vehicleEnemyIndex = 0;
+    m_nextVehicleScan = 0.0f;
+    m_vehicleSeenTime = 0.0f;
+    m_vehicleLastSeen = 0.0f;
+    m_vehicleLastPos = Vector(0, 0, 0);
     m_goalArea = -1;
     m_headingYaw = frand(-180.0f, 180.0f);
     m_spawnTime = Now();
