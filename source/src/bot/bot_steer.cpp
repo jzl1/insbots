@@ -42,6 +42,244 @@ extern CfgVar                insbot_streaming;
 extern CfgVar                insbot_doorway_teleport;
 extern CfgVar                insbot_doorway_teleport_time;
 extern CfgVar                insbot_stuck_time;
+extern CfgVar                insbot_debug;
+
+// ---------------------------------------------------------------------------
+// Trace filter for steering obstacle detection.
+//
+// Skips the bot itself, all same-team players, and any seated vehicle riders,
+// while keeping WORLD GEOMETRY, driveable vehicles (CPropVehicleDriveable) and
+// enemy bodies on foot solid, so path steering reacts to vehicle hulls instead
+// of walking into them.
+//
+// Everything else (crates, barrels, sandbags, dropped weapons, ragdolls) is
+// deliberately NOT an obstacle: the steering layer must not deflect around
+// clutter that the engine lets a player hull shove past. CTraceFilter inherits
+// TRACE_EVERYTHING (IEngineTrace.h:54-61), which always traces BSP world
+// geometry and passes each dynamic entity through ShouldHitEntity; the brush
+// case therefore never reaches this filter and needs no test here.
+//
+// NOTE ON SCOPE. "False for everything else" and "an enemy on foot must remain
+// solid" cannot both hold literally for players. The player case below is the
+// resolution: players are the one non-vehicle entity kept solid, because the
+// verified baseline shows bots deflecting around a player entity (verification
+// §7, `blocked by ent=1 cls='player' frac=0.984`), because Change 4 names it as
+// a preservation requirement, and because dropping it would send bots walking
+// into enemy bodies. Delete the final two lines of SteerShouldHitEntity to get
+// the strictly vehicle-only predicate.
+// ---------------------------------------------------------------------------
+#define INS_STEER_SKIP_MAX 70
+
+// The single source of truth for "is this trace entity a driveable Humvee".
+// Same mechanism turret.cpp uses: GetServerClass()->GetName() returns the C++
+// class name "CPropVehicleDriveable", not the map-facing classname. Both live
+// Humvees and destroyed wrecks keep this class (the wreck is the same entity,
+// still physically solid), so wrecks are caught by the same test.
+static bool SteerIsDriveableClass( const char *cls )
+{
+    return cls && strcmp( cls, "CPropVehicleDriveable" ) == 0;
+}
+
+// True only for the dynamic entities steering should treat as obstacles.
+// BSP world geometry never reaches ShouldHitEntity under TRACE_EVERYTHING
+// (IEngineTrace.h:35-38; world hits report the worldspawn edict), so the only
+// entities that need to be admitted here are the ones the map does not carry in
+// the BSP hull:
+//
+//   1. driveable vehicles, by server class (the mechanism turret.cpp uses);
+//   2. map brush entities (func_door, func_brush, func_wall, func_breakable),
+//      which the engine routes through the filter as entities even though they
+//      are architecture. The SDK's own StandardFilterRules treats a brush-model
+//      SOLID_BSP entity as world (util_shared.cpp:226-241), and excluding them
+//      would send bots grinding into closed doors;
+//   3. players on foot, which Change 4 requires to stay solid (see above).
+//
+// Physics props (SOLID_VPHYSICS studio models: crates, barrels, dropped
+// weapons, ragdolls) are deliberately absent, so they stop being obstacles.
+static bool SteerShouldHitEntity( IHandleEntity *pEntity )
+{
+    if (!pEntity) return false;
+    IServerUnknown *unk = (IServerUnknown *)pEntity;
+    IServerNetworkable *net = unk->GetNetworkable();
+    if (!net) return false;
+
+    ServerClass *sc = net->GetServerClass();
+    if (sc && SteerIsDriveableClass( sc->GetName() ))
+        return true;
+
+    ICollideable *col = unk->GetCollideable();
+    if (col && col->GetSolid() == SOLID_BSP)
+        return true;
+
+    // Enemy on foot stays solid; same-team players and any seated riders were
+    // already removed by the skip list in ShouldHitEntity. GetClassName() is
+    // the map-facing name ("player"), which is what the STEER_DEFLECT log
+    // prints, and differs from GetServerClass()->GetName().
+    const char *cls = net->GetClassName();
+    return cls && strcmp( cls, "player" ) == 0;
+}
+
+class CSteerTraceFilter : public CTraceFilter
+{
+public:
+    CSteerTraceFilter() : m_n(0) {}
+
+    void Add( IHandleEntity *h )
+    {
+        if (h && m_n < INS_STEER_SKIP_MAX) m_skip[m_n++] = h;
+    }
+
+    virtual bool ShouldHitEntity( IHandleEntity *pEntity, int /*contentsMask*/ )
+    {
+        if (!pEntity) return false;
+        for (int i = 0; i < m_n; i++)
+            if (pEntity == m_skip[i]) return false;
+        return SteerShouldHitEntity( pEntity );
+    }
+
+private:
+    IHandleEntity *m_skip[INS_STEER_SKIP_MAX];
+    int            m_n;
+};
+
+static void BuildSteerSkipSet( CInsBot *bot, CSteerTraceFilter &filter )
+{
+    if (!bot || !bot->m_edict) return;
+
+    IServerUnknown *selfUnk = bot->m_edict->GetUnknown();
+    if (selfUnk) filter.Add( (IHandleEntity *)selfUnk );
+
+    // Per-frame client classification. The old code walked every client and
+    // called playerinfomanager->GetPlayerInfo() on each one, twice per bot per
+    // frame (SteerRoam + SteerToPoint): ~2,048 GetPlayerInfo calls/frame at 32
+    // bots. The team/seat state it needs changes at most once per frame, so it
+    // is cached here and rebuilt only when gpGlobals->framecount advances.
+    //
+    // The cache is team-relative, so it cannot alias the all-teams
+    // s_tracePlayerHandles list in bot_perceive.cpp. Semantics are preserved
+    // exactly: self + same-team players + any-team seated riders are skipped;
+    // an enemy on foot stays solid.
+    //
+    // Buckets are keyed by team index (0 = unassigned, 1, 2). ALL buckets are
+    // rebuilt in the same pass: bots of both teams call into this function
+    // interleaved within one frame, so a single "current team" cache would
+    // miss and rebuild on nearly every call.
+    static int            s_classFrame = -1;
+    static int            s_classCount[3] = { 0, 0, 0 };
+    static IHandleEntity *s_classSkip[3][66];
+
+    int myTeam = bot->m_info ? bot->m_info->GetTeamIndex() : 0;
+    int frame = gpGlobals ? gpGlobals->framecount : -1;
+    if (frame != s_classFrame)
+    {
+        s_classFrame = frame;
+        s_classCount[0] = s_classCount[1] = s_classCount[2] = 0;
+
+        int maxClients = gpGlobals ? gpGlobals->maxClients : 32;
+        if (maxClients > 66) maxClients = 66;
+
+        for (int i = 1; i <= maxClients; i++)
+        {
+            edict_t *e = engine->PEntityOfEntIndex( i );
+            if (!e || e->IsFree()) continue;
+            IServerUnknown *unk = e->GetUnknown();
+            if (!unk) continue;
+
+            // Seated riders are skipped by every team: the vehicle hull, not
+            // the rider, is what steering should react to.
+            ICollideable *col = unk->GetCollideable();
+            if (col && col->GetCollisionGroup() == COLLISION_GROUP_IN_VEHICLE)
+            {
+                for (int t = 0; t < 3; t++)
+                    if (s_classCount[t] < 66)
+                        s_classSkip[t][s_classCount[t]++] = (IHandleEntity *)unk;
+                continue;
+            }
+
+            if (!playerinfomanager) continue;
+            IPlayerInfo *info = playerinfomanager->GetPlayerInfo( e );
+            if (!info) continue;
+            int t = info->GetTeamIndex();
+            if (t < 0 || t > 2) continue;
+            if (s_classCount[t] < 66)
+                s_classSkip[t][s_classCount[t]++] = (IHandleEntity *)unk;
+        }
+    }
+
+    int bucket = (myTeam >= 0 && myTeam <= 2) ? myTeam : 0;
+    for (int i = 0; i < s_classCount[bucket]; i++)
+        filter.Add( s_classSkip[bucket][i] );
+}
+
+static inline edict_t *EdictFromTraceEnt( CBaseEntity *ent )
+{
+    if (!ent) return 0;
+    IServerUnknown *unk = (IServerUnknown *)(IHandleEntity *)ent;
+    IServerNetworkable *net = unk ? unk->GetNetworkable() : 0;
+    return net ? net->GetEdict() : 0;
+}
+
+static void Cmd_InsBot_Place()
+{
+    // Test scaffolding. insbot_place performs no ground trace, nav-area lookup,
+    // bounds check, or teleport bookkeeping, so it can put a bot inside
+    // geometry or off the map. Server-side only (rcon/server console), but it
+    // must not ship unrestricted: gate it behind the debug switch.
+    if (!insbot_debug.GetBool())
+    {
+        Msg("insbot_place is disabled; enable it with: insbot set debug 1\n");
+        return;
+    }
+
+    int argc = engine->Cmd_Argc();
+    if (argc < 6)
+    {
+        Msg("usage: insbot_place <slot> <x> <y> <z> <yaw>\n");
+        return;
+    }
+    int slot = atoi(engine->Cmd_Argv(1));
+    float x = (float)atof(engine->Cmd_Argv(2));
+    float y = (float)atof(engine->Cmd_Argv(3));
+    float z = (float)atof(engine->Cmd_Argv(4));
+    float yaw = (float)atof(engine->Cmd_Argv(5));
+    if (slot < 0 || slot >= 64 || !g_Bots.m_bots[slot].m_inUse || !g_Bots.m_bots[slot].m_ctrl)
+    {
+        Msg("invalid bot slot %d\n", slot);
+        return;
+    }
+    CInsBot *b = &g_Bots.m_bots[slot];
+    Vector pos(x, y, z);
+    QAngle ang(0, yaw, 0);
+    b->m_ctrl->SetAbsOrigin(pos);
+    b->m_ctrl->SetAbsAngles(ang);
+    Msg("[insbots] placed bot slot %d (%s) at (%.1f %.1f %.1f) yaw=%.1f\n",
+        slot, b->m_name, x, y, z, yaw);
+}
+static ConCommand insbot_place_cmd("insbot_place", Cmd_InsBot_Place, "Place a bot at coordinates: insbot_place <slot> <x> <y> <z> <yaw>");
+
+static void Cmd_InsBot_SteerStatus()
+{
+    // Pure diagnostic output; gated with the same switch so a release server
+    // does not carry steering internals (positions, speeds, team ids).
+    if (!insbot_debug.GetBool())
+    {
+        Msg("insbot_steer_status is disabled; enable it with: insbot set debug 1\n");
+        return;
+    }
+
+    for (int i = 0; i < 64; i++)
+    {
+        CInsBot *b = &g_Bots.m_bots[i];
+        if (!b->m_inUse || !b->m_info || b->m_info->IsDead()) continue;
+        Vector pos = b->m_info->GetAbsOrigin();
+        QAngle ang = b->m_info->GetAbsAngles();
+        int myIdx = b->m_edict ? engine->IndexOfEdict(b->m_edict) : 0;
+        float speed = (myIdx >= 1 && myIdx < 66) ? s_hearSpeed[myIdx] : 0.0f;
+        Msg("[STEER_STAT] slot=%d (%s) team=%d pos=(%.1f %.1f %.1f) yaw=%.1f speed=%.1f\n",
+            i, b->m_name, b->m_info->GetTeamIndex(), pos.x, pos.y, pos.z, ang.y, speed);
+    }
+}
+static ConCommand insbot_steer_status_cmd("insbot_steer_status", Cmd_InsBot_SteerStatus, "Print steering status of all alive bots");
 
 // Turn a non-combat bot toward its movement direction at a finite
 // body-friendly rate. INS multiplies human turn input by cl_anglespeedkey
@@ -105,6 +343,14 @@ static void SmoothNavTurn(float targetYaw, float speed, QAngle &view,
 
 void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
 {
+    if (m_edict)
+    {
+        IServerUnknown *unk = m_edict->GetUnknown();
+        ICollideable *col = unk ? unk->GetCollideable() : 0;
+        if (col && col->GetCollisionGroup() == COLLISION_GROUP_IN_VEHICLE)
+            return;
+    }
+
     Vector pos = m_info->GetAbsOrigin();
     float now = Now();
 
@@ -119,12 +365,13 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
     Vector dir(cosf(yawRad), sinf(yawRad), 0);
     Vector waist = pos; waist.z += 36.0f;
 
-    CTraceFilterWorldOnly worldFilter;
+    CSteerTraceFilter steerFilter;
+    BuildSteerSkipSet(this, steerFilter);
     Ray_t ray; trace_t tr;
 
     Vector ahead = waist + dir * 96.0f;
     ray.Init(waist, ahead);
-    enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &tr);
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &tr);
 
     if (tr.fraction < 1.0f)
     {
@@ -137,9 +384,11 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
             Vector d2(cosf(yr), sinf(yr), 0);
             ray.Init(waist, waist + d2 * 96.0f);
             trace_t t2;
-            enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &t2);
+            enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &t2);
             if (t2.fraction > bestFrac) { bestFrac = t2.fraction; best = y; }
         }
+        while (best > 180.0f) best -= 360.0f;
+        while (best < -180.0f) best += 360.0f;
         m_headingYaw = best;
 
         // low obstacle? try a jump
@@ -147,10 +396,10 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
         Vector head = pos; head.z += 58.0f;
         ray.Init(knee, knee + dir * 48.0f);
         trace_t tKnee;
-        enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &tKnee);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &tKnee);
         ray.Init(head, head + dir * 48.0f);
         trace_t tHead;
-        enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &tHead);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &tHead);
         if (tKnee.fraction < 1.0f && tHead.fraction >= 1.0f)
             buttons |= IN_JUMP;
     }
@@ -158,6 +407,26 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
     SmoothNavTurn(m_headingYaw, insbot_move_speed.GetFloat(), view,
                   fwd, side, m_navTurnAngle, false);
 }
+
+// Escape-episode state for SteerToPoint, one entry per bot slot.
+//
+// The shoulders are always measured from the heading the bot held when the
+// blocked episode BEGAN, never from the heading a previous deflection already
+// moved it to. Measuring from the deflected heading adds another 60 degrees on
+// every re-probe, and that is precisely the 6-value spin cycle the verifier
+// measured (177.4 -> 117.4 -> 57.4 -> -2.6 -> -62.6 -> -122.6 -> 177.4) at
+// speed 0, with 1,516 STEER_DEFLECT lines in ~10 s. Anchoring on the episode
+// base makes the same two escape headings get re-measured every hold, so a
+// wedged bot keeps picking the SAME side instead of rotating, while a bot that
+// has one genuinely open shoulder still follows it and moves on.
+//
+// The episode ends the moment the forward line is clear, so the base is
+// re-captured for the next obstacle. A gap longer than one hold means the bot
+// left this path (nav branch, SteerRoam, teleport), so the base is re-captured
+// rather than reusing a stale heading.
+static float s_steerBaseYaw[64]  = { 0 };
+static float s_steerBaseTime[64] = { 0 };
+static float s_steerLastYaw[64]  = { 0 };
 
 // No-path fallback used by MoveToward when the nav mesh is loaded but no
 // route can be built (off-mesh spawn/goal, or a point that is unreachable
@@ -167,49 +436,118 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
 void CInsBot::SteerToPoint(float destYaw, float speed, float &fwd, float &side,
                            int &buttons, QAngle &view)
 {
+    if (m_edict)
+    {
+        IServerUnknown *unk = m_edict->GetUnknown();
+        ICollideable *col = unk ? unk->GetCollideable() : 0;
+        if (col && col->GetCollisionGroup() == COLLISION_GROUP_IN_VEHICLE)
+            return;
+    }
+
     Vector pos = m_info->GetAbsOrigin();
     float now = Now();
+
+    // Episode bookkeeping for the shoulder probes. baseFresh is true only when
+    // the previous call left the bot holding the same heading within one hold,
+    // i.e. this is a continuation of the SAME blocked episode.
+    int mySlot = (m_ordinal >= 0 && m_ordinal < 64) ? m_ordinal : -1;
+    bool baseFresh = (mySlot >= 0)
+                  && (now - s_steerBaseTime[mySlot]) <= 0.75f
+                  && s_steerLastYaw[mySlot] == m_headingYaw;
 
     float yawRad = m_headingYaw * (3.14159265f / 180.0f);
     Vector dir(cosf(yawRad), sinf(yawRad), 0);
     Vector waist = pos; waist.z += 36.0f;
 
-    CTraceFilterWorldOnly worldFilter;
+    CSteerTraceFilter steerFilter;
+    BuildSteerSkipSet(this, steerFilter);
     Ray_t ray; trace_t tr;
     ray.Init(waist, waist + dir * 96.0f);
-    enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &tr);
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &tr);
     bool blocked = tr.startsolid || tr.allsolid || tr.fraction < 1.0f;
 
     if (blocked)
     {
-        // blocked: test the two 60-degree shoulders and take the more open one
-        float best = m_headingYaw + 120.0f; float bestFrac = -1.0f;
-        for (int s = -1; s <= 1; s += 2)
+        // Re-measure the two shoulders from the episode base heading. Only
+        // re-choose when the previous hold has expired, so the bot actually
+        // holds each committed heading long enough to move or to be sampled as
+        // stuck. The old code rewrote m_headingYaw EVERY frame to whichever
+        // 60-degree shoulder was momentarily least-bad; with both shoulders
+        // blocked that produced the 6-value spin at speed 0 and never let the
+        // no-progress sampler reach insbot_stuck_time.
+        float baseYaw = baseFresh ? s_steerBaseYaw[mySlot] : m_headingYaw;
+        if (!baseFresh)
         {
-            float y = m_headingYaw + 60.0f * s;
-            float yr = y * (3.14159265f / 180.0f);
-            Vector d2(cosf(yr), sinf(yr), 0);
-            ray.Init(waist, waist + d2 * 96.0f);
-            trace_t t2;
-            enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &t2);
-            if (t2.fraction > bestFrac) { bestFrac = t2.fraction; best = y; }
+            if (mySlot >= 0)
+            {
+                s_steerBaseYaw[mySlot]  = m_headingYaw;
+                s_steerLastYaw[mySlot]  = m_headingYaw;
+            }
+            baseYaw = m_headingYaw;
         }
-        m_headingYaw = best;
-        m_nextHeadingChange = now + 0.45f;   // hold the deflection briefly
-    }
-    else if (now >= m_nextHeadingChange)
-    {
-        // current line open: probe the direct line to the destination and
-        // re-bias toward it whenever the wall between them is gone
-        float dy = destYaw * (3.14159265f / 180.0f);
-        Vector dd(cosf(dy), sinf(dy), 0);
-        ray.Init(waist, waist + dd * 96.0f);
-        trace_t td;
-        enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &worldFilter, &td);
-        if (td.fraction >= 1.0f)
+
+        // The FIRST probe of an episode must run immediately: m_nextHeadingChange
+        // may still hold a stale 3-8 s gate set by SteerRoam's roam-heading
+        // randomizer, and honoring it here would let the bot grind into the
+        // obstacle without ever deflecting. Within an episode the gate still
+        // throttles re-probes to one per hold.
+        bool allowProbe = !baseFresh || (now >= m_nextHeadingChange);
+        if (allowProbe)
         {
-            m_headingYaw = destYaw;
-            m_nextHeadingChange = now + 0.45f;
+            // test the two 60-degree shoulders and take the more open one
+            float best = baseYaw + 120.0f; float bestFrac = -1.0f;
+            for (int s = -1; s <= 1; s += 2)
+            {
+                float y = baseYaw + 60.0f * s;
+                float yr = y * (3.14159265f / 180.0f);
+                Vector d2(cosf(yr), sinf(yr), 0);
+                ray.Init(waist, waist + d2 * 96.0f);
+                trace_t t2;
+                enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &t2);
+                if (t2.fraction > bestFrac) { bestFrac = t2.fraction; best = y; }
+            }
+            while (best > 180.0f) best -= 360.0f;
+            while (best < -180.0f) best += 360.0f;
+            if (tr.m_pEnt)
+            {
+                edict_t *hitEdict = EdictFromTraceEnt(tr.m_pEnt);
+                const char *cls = hitEdict ? hitEdict->GetClassName() : "world";
+                int entIdx = hitEdict ? engine->IndexOfEdict(hitEdict) : 0;
+                int myIdx = m_edict ? engine->IndexOfEdict(m_edict) : 0;
+                float curSpeed = (myIdx >= 1 && myIdx < 66) ? s_hearSpeed[myIdx] : 0.0f;
+                BotDbg("[insbots] [STEER_DEFLECT] %s (Point) pos=(%.1f %.1f %.1f) speed=%.1f blocked by ent=%d cls='%s' frac=%.3f -> deflecting to bestYaw=%.1f\n",
+                       m_name, pos.x, pos.y, pos.z, curSpeed, entIdx, cls, tr.fraction, best);
+            }
+            m_headingYaw = best;
+            m_nextHeadingChange = now + 0.45f;   // hold the deflection briefly
+        }
+        if (mySlot >= 0)
+        {
+            s_steerBaseYaw[mySlot]  = baseYaw;
+            s_steerBaseTime[mySlot] = now;
+            s_steerLastYaw[mySlot]  = m_headingYaw;
+        }
+    }
+    else
+    {
+        // Forward line is clear: the blocked episode is over. Invalidate the
+        // base so the next episode re-captures it from the live heading.
+        if (mySlot >= 0) s_steerBaseTime[mySlot] = -1000.0f;
+
+        if (now >= m_nextHeadingChange)
+        {
+            // current line open: probe the direct line to the destination and
+            // re-bias toward it whenever the wall between them is gone
+            float dy = destYaw * (3.14159265f / 180.0f);
+            Vector dd(cosf(dy), sinf(dy), 0);
+            ray.Init(waist, waist + dd * 96.0f);
+            trace_t td;
+            enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &td);
+            if (td.fraction >= 1.0f)
+            {
+                m_headingYaw = destYaw;
+                m_nextHeadingChange = now + 0.45f;
+            }
         }
     }
 
