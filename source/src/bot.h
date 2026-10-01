@@ -328,6 +328,12 @@ private:
     float  m_steerBaseTime;    // when the current episode was last probed
     float  m_steerLastYaw;     // heading after the last deflection
 
+    // vehicle-avoidance episode (bot_steer.cpp)
+    bool   m_vehicleDeflect;      // true while deflecting around a vehicle hull
+    float  m_vehicleDeflectUntil; // hold expiry for the current deflection
+    float  m_vehicleDeflectYaw;   // committed world heading for this hold
+    float  m_vehicleLastProbe;    // next time the forward vehicle probe may run
+
     // combat
     int    m_enemyIndex;       // entity index of current enemy, 0 = none
 
@@ -694,6 +700,11 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     bool  TransferHadithaDoor(float now); // semaphore owner: safe hop over verified 464->3321 gap
     bool  TransferHadithaEastDoor(float now); // stalled leader: safe hop from id3295/3315 into id320
     bool  TeammateBlockingPath(const Vector &pos, int toArea) const;
+    // vehicle-avoidance steering (bot_steer.cpp)
+    bool  SteerAroundVehicle(float moveYaw, float viewYaw,
+                             float &fwd, float &side, int &buttons);
+    // vehicle blocking test for stuck-link reporting (bot_path.cpp)
+    bool  VehicleBlockingRoute(const Vector &pos, float moveYaw) const;
     bool  WorldClear(const Vector &a, const Vector &b) const; // world-only LOS between 2 points
     bool  CanShootMarker(const Vector &marker) const;         // covering-fire probe: eye->marker world trace
     bool  FindCover(const Vector &threat, Vector &out) const; // nearby spot hidden from threat

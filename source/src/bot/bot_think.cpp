@@ -288,6 +288,13 @@ void CInsBot::ThinkDeadReset(float now)
     m_enemyIndex = 0;
     m_vehicleEnemyIndex = 0;
     m_vehicleLastSeen = 0.0f;
+    // A steering episode must not survive into the next life.
+    m_vehicleDeflect      = false;
+    m_vehicleDeflectUntil = 0.0f;
+    m_vehicleDeflectYaw   = 0.0f;
+    m_vehicleLastProbe    = 0.0f;
+    m_steerBaseTime       = -1000.0f;
+    m_steerLastYaw        = 0.0f;
     ResetDoorwayRunway();
 
     m_pathLen = 0;
@@ -2490,11 +2497,22 @@ overwatch_done:
                                   && m_spawnNoCollideExpired);
         bool noRouteBlock = m_pathResult == BOT_PATH_UNREACHABLE
                                 && !m_hasMoveTarget && !m_haveRescueLink;
+        // A vehicle deflection is a lateral manoeuvre, and lateral movement is
+        // explicitly NOT progress toward the waypoint (see the comment at
+        // :2556-2559), so a working deflection would otherwise accumulate
+        // stuck time, trigger the 0.6s wiggle - which overwrites fwd/side -
+        // and cancel itself mid-manoeuvre. Freeze the clock only while the bot
+        // is ACTUALLY moving; a bot wedged between the truck and a wall must
+        // still accumulate stuck time so recovery can run.
+        bool vehicleDeflectWait = m_vehicleDeflect
+                               && (now < m_vehicleDeflectUntil)
+                               && physicallyMoved >= stuckDist;
         // A ladder follower is always an intentional waiter. Unlike doorway
         // drain recovery, it must never promote itself into generic teleport
         // while a different bot owns the shaft.
         bool intentionalWait = noRouteBlock || ladderWait
-                            || ((dropHold || queueFollower) && !collisionDraining);
+                            || ((dropHold || queueFollower) && !collisionDraining)
+                            || vehicleDeflectWait;
         if (intentionalWait)
         {
             if (!m_bodyNoCollideActive && !m_bodyNoCollideEscalating)
@@ -2714,7 +2732,15 @@ overwatch_done:
                         bool transientBlock = (m_doorYieldSlot && now < m_doorYieldUntil)
                                            || DoorAhead(yaw)
                                            || TeammateBlockingPath(pos, next)
-                                           || m_bodyNoCollideAttempted;
+                                           || m_bodyNoCollideAttempted
+                                           // A vehicle is a transient obstacle,
+                                           // exactly like a door or a teammate.
+                                           // Without this the stall is learned
+                                           // as a broken nav connection, and at
+                                           // confidence 3 the edge pays
+                                           // +500000 cost for every bot long
+                                           // after the truck has driven away.
+                                           || VehicleBlockingRoute(pos, yaw);
                         bool reportCooldown = m_haveLastReportedLink
                                            && m_lastReportedFrom == here
                                            && m_lastReportedTo == next

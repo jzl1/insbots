@@ -33,6 +33,7 @@
 #include "objective.h"
 #include "profile.h"
 #include "bot_internal.h"
+#include "turret.h"
 
 // ---- externs this TU needs (same pattern as bot.cpp / objective.cpp) -------
 extern IVEngineServer       *engine;
@@ -686,6 +687,53 @@ bool CInsBot::TeammateBlockingPath(const Vector &pos, int toArea) const
             return true;
     }
     return false;
+}
+
+// True when a driveable vehicle hull is the first thing blocking the bot's
+// route. Used by the stuck-link reporter: a vehicle is a transient obstacle,
+// exactly like a door or a teammate, and must NOT be learned as a broken nav
+// connection. A vehicle-caused stall used to call MarkBadConnection, which
+// increments a squad-wide confidence counter; at confidence 3 the edge pays
+// +500000 cost (nav.cpp:1445-1450) and stays effectively blocked for every
+// bot long after the truck has driven away.
+bool CInsBot::VehicleBlockingRoute(const Vector &pos, float moveYaw) const
+{
+    if (!enginetrace || !m_info) return false;
+
+    // Aim at the next nav area's portal when there is one: that is the
+    // direction the link's validity actually depends on. Fall back to the
+    // movement heading.
+    Vector target;
+    bool haveTarget = false;
+    if (m_pathLen > 0 && m_pathCursor < m_pathLen)
+    {
+        int fromArea = CurrentArea(pos);
+        if (fromArea >= 0 &&
+            g_NavMesh.GetPortal(fromArea, m_path[m_pathCursor], target))
+            haveTarget = true;
+    }
+    float yaw = moveYaw;
+    if (haveTarget)
+        yaw = atan2f(target.y - pos.y, target.x - pos.x) * (180.0f / 3.14159265f);
+
+    float yr = yaw * (3.14159265f / 180.0f);
+    Vector dir(cosf(yr), sinf(yr), 0);
+
+    // Same hull sweep the steering probes use, so the two agree on what
+    // "blocked" means.
+    CTraceFilterSteerObstacles filter( const_cast<CInsBot *>( this ) );
+    Ray_t ray; trace_t tr;
+    Vector from = pos + Vector(0, 0, 36);
+    ray.Init(from, from + dir * 200.0f,
+             Vector(-16.0f, -16.0f, 0.0f), Vector(16.0f, 16.0f, 72.0f));
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+    if (tr.fraction >= 1.0f || !tr.m_pEnt) return false;
+
+    IServerUnknown *unk = (IServerUnknown *)tr.m_pEnt;
+    IServerNetworkable *net = unk ? unk->GetNetworkable() : 0;
+    ServerClass *sc = net ? net->GetServerClass() : 0;
+    if (!sc || !IsDriveableClass( sc->GetName() )) return false;
+    return true;
 }
 
 bool CInsBot::AdvanceWaypoint()

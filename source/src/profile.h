@@ -29,6 +29,7 @@ enum InsProfBucket
     INSPROF_CAPCOMMIT,      // capture detail refill
     INSPROF_THINK,          // per-bot Think
     INSPROF_THINKALIVE,     // per-bot ThinkAlive
+    INSPROF_VEHICLE,        // vehicle-avoidance probe
     INSPROF_BUCKET_COUNT
 };
 

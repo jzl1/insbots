@@ -215,6 +215,11 @@ private:
 
 extern CTurretRegistry g_Turrets;
 
+// True when the server class name is a driveable vehicle hull
+// ("CPropVehicleDriveable"). Shared with the bots' steering obstacle filter so
+// the class test has exactly one definition.
+bool IsDriveableClass( const char *cls );
+
 // Per-turret overrides are keyed by entindex, which is not stable across a
 // level, so they must be dropped alongside the registry.
 void TurretOverridesClear();

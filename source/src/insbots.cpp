@@ -151,6 +151,7 @@ CfgVar insbot_danger_radius("danger_radius", "450", "radius around an actively-e
 CfgVar insbot_stuck_time("stuck_time", "1.0", "no-progress seconds before body-grace or broken-link recovery starts");
 CfgVar insbot_stuck_dist("stuck_dist", "16", "inches of progress toward the next waypoint that counts as moving");
 CfgVar insbot_unstuck_teleport("unstuck_teleport", "1", "NavBot-style last resort: warp a hopelessly-stuck bot onto its next path node (0=off)");
+CfgVar insbot_avoid_vehicles("avoid_vehicles", "1", "bots steer around driveable vehicle hulls (0=off)");
 CfgVar insbot_unstuck_teleport_time("unstuck_teleport_time", "3.0", "continuous-stuck seconds before teleport-unstuck");
 CfgVar insbot_doorway_teleport("doorway_teleport", "1", "warp a stalled front bot past a detected doorway after doorway_teleport_time (0=off)");
 CfgVar insbot_doorway_teleport_time("doorway_teleport_time", "3.0", "continuous doorway no-progress seconds before a full-hull-validated teleport");

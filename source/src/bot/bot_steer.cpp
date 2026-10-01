@@ -30,6 +30,9 @@
 #include "nav.h"
 #include "objective.h"
 #include "bot_internal.h"
+#include "vehicle_steer_math.h"
+#include "turret.h"     // g_Turrets vehicle index, IsDriveableClass
+#include "profile.h"    // INSPROF_VEHICLE bucket for the new probe
 
 // ---- externs this TU needs (same pattern as bot.cpp / objective.cpp) -------
 extern IVEngineServer       *engine;
@@ -37,6 +40,7 @@ extern IEngineTrace         *enginetrace;
 extern IPlayerInfoManager   *playerinfomanager;
 extern CGlobalVars          *gpGlobals;
 extern CfgVar                insbot_move_speed;
+extern CfgVar                insbot_avoid_vehicles;
 extern CfgVar                insbot_sprint;
 extern CfgVar                insbot_streaming;
 extern CfgVar                insbot_doorway_teleport;
@@ -349,11 +353,25 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
 
     if (tr.fraction < 1.0f)
     {
-        // blocked: test left/right 60 degrees, pick the more open one
-        float best = m_headingYaw + 120.0f; float bestFrac = -1.0f;
+        // Blocked: test left/right 60 degrees from the EPISODE base heading.
+        // Measuring from m_headingYaw would add another 60 degrees on every
+        // re-probe, because the previous deflection already rotated it - that
+        // is the 6-value spin cycle fixed in SteerToPoint by 97f2a8a.
+        // SteerRoam carried the same structure on this branch and is fixed
+        // the same way.
+        bool baseFresh = (now - m_steerBaseTime) <= 0.75f
+                      && m_steerLastYaw == m_headingYaw;
+        if (!baseFresh)
+        {
+            m_steerBaseYaw = m_headingYaw;
+            m_steerLastYaw = m_headingYaw;
+        }
+        float baseYaw = m_steerBaseYaw;
+
+        float best = baseYaw + 120.0f; float bestFrac = -1.0f;
         for (int s = -1; s <= 1; s += 2)
         {
-            float y = m_headingYaw + 60.0f * s;
+            float y = baseYaw + 60.0f * s;
             float yr = y * (3.14159265f / 180.0f);
             Vector d2(cosf(yr), sinf(yr), 0);
             ray.Init(waist, waist + d2 * 96.0f);
@@ -363,7 +381,21 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
         }
         while (best > 180.0f) best -= 360.0f;
         while (best < -180.0f) best += 360.0f;
-        m_headingYaw = best;
+        m_headingYaw    = best;
+        m_steerBaseYaw  = baseYaw;
+        m_steerBaseTime = now;
+        m_steerLastYaw  = best;
+
+        if (insbot_debug.GetBool() && tr.m_pEnt)
+        {
+            edict_t *hitEdict = EdictFromTraceEnt(tr.m_pEnt);
+            BotDbg("[insbots] [STEER_DEFLECT] %s (Roam) pos=(%.1f %.1f %.1f) "
+                   "blocked by ent=%d cls='%s' frac=%.3f -> deflecting to bestYaw=%.1f\n",
+                   m_name, pos.x, pos.y, pos.z,
+                   hitEdict ? engine->IndexOfEdict(hitEdict) : 0,
+                   hitEdict ? hitEdict->GetClassName() : "world",
+                   tr.fraction, best);
+        }
 
         // low obstacle? try a jump
         Vector knee = pos; knee.z += 20.0f;
@@ -714,9 +746,196 @@ void CInsBot::ApplyCrowdSteeringClassic(float moveYaw, float viewYaw, float &fwd
         buttons |= IN_JUMP;
 }
 
+// Vehicle-avoidance controller. Returns true when it took ownership of this
+// frame's movement, in which case the caller must return immediately and must
+// NOT run either crowd follower: the doorway runway override downstream
+// rewrites fwd/side and slams the view yaw toward the portal normal, which
+// would steer the bot straight into the truck.
+//
+// Returns false for every "not my problem" case, leaving the normal followers
+// untouched.
+bool CInsBot::SteerAroundVehicle(float moveYaw, float viewYaw,
+                                 float &fwd, float &side, int &buttons)
+{
+    INSPROF_SCOPE(INSPROF_VEHICLE);
+
+    if (!m_info || !m_edict) return false;
+
+    // A vehicle deflection is a lateral manoeuvre, and the drop queue owns
+    // that bot's movement at an elevation edge. Never shove a bot sideways
+    // near a ledge.
+    if (m_dropAhead) return false;
+
+    Vector pos = m_info->GetAbsOrigin();
+    float now = Now();
+
+    // Continue an in-flight hold without re-probing.
+    if (m_vehicleDeflect && now < m_vehicleDeflectUntil)
+    {
+        MoveAtWorldYaw(m_vehicleDeflectYaw, viewYaw,
+                       insbot_move_speed.GetFloat() * INS_VEHICLE_SPEED_SCALE,
+                       fwd, side);
+        // The bits were computed for the ORIGINAL heading. Jumping beside a
+        // hull risks landing on it; duck was earned by a real low-ceiling
+        // trace and is still true, so keep it.
+        buttons &= ~IN_JUMP;
+        // A committed lateral lane from the corridor logic is meaningless
+        // once the bot is diverting; leaving it set lets a stale lane
+        // override the deflection next frame.
+        m_passSide = 0.0f;
+        m_passUntil = 0.0f;
+        return true;
+    }
+
+    // Throttle the probe. A truck at 20 mph moves ~44u in 0.15s, negligible
+    // against a 200u probe.
+    if (now < m_vehicleLastProbe) return false;
+    m_vehicleLastProbe = now + 0.15f;
+
+    float yr = moveYaw * (3.14159265f / 180.0f);
+    Vector dir(cosf(yr), sinf(yr), 0);
+    Vector from = pos + Vector(0, 0, 36);
+
+    // Hull sweep, not a centre ray: a waist ray can clear an obstacle the
+    // bot's body would hit, which is the documented reason SideStepOpen
+    // sweeps (bot_recover.cpp:349-353).
+    CTraceFilterSteerObstacles filter( this );
+    Ray_t ray; trace_t tr;
+    ray.Init(from, from + dir * INS_VEHICLE_PROBE_DIST,
+             Vector(-16.0f, -16.0f, 0.0f), Vector(16.0f, 16.0f, 72.0f));
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+
+    // Only a vehicle is this controller's business. A wall, a closed door or
+    // a player is the existing logic's problem.
+    if (tr.fraction >= 1.0f || !tr.m_pEnt) return false;
+
+    IServerUnknown *unk = (IServerUnknown *)tr.m_pEnt;
+    IServerNetworkable *net = unk ? unk->GetNetworkable() : 0;
+    ServerClass *sc = net ? net->GetServerClass() : 0;
+    if (!sc || !IsDriveableClass( sc->GetName() )) return false;
+
+    // Episode anchoring: the shoulders are measured from the heading held
+    // when the episode BEGAN, never from a heading a previous deflection
+    // already moved the bot to. Measuring from the deflected heading adds
+    // another 60 degrees per re-probe and produced a 6-value spin at speed 0.
+    bool baseFresh = (now - m_steerBaseTime) <= 0.75f
+                  && m_steerLastYaw == m_headingYaw;
+    if (!baseFresh)
+    {
+        m_steerBaseYaw = m_headingYaw;
+        m_steerLastYaw = m_headingYaw;
+    }
+    float baseYaw = m_steerBaseYaw;
+
+    // Measure both shoulders. A shoulder must clear enough of the probe to
+    // actually be walked, and must clear the floor too - the lateral sweep
+    // alone would happily clear a ledge.
+    float fracs[2];
+    for (int s = 0; s < 2; s++)
+    {
+        float y = baseYaw + (s == 0 ? 60.0f : -60.0f);
+        float yrr = y * (3.14159265f / 180.0f);
+        Vector d2(cosf(yrr), sinf(yrr), 0);
+        trace_t t2;
+        ray.Init(from, from + d2 * INS_VEHICLE_PROBE_DIST,
+                 Vector(-16.0f, -16.0f, 0.0f), Vector(16.0f, 16.0f, 72.0f));
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &t2);
+        bool clear = !t2.startsolid && !t2.allsolid && t2.fraction >= 1.0f;
+
+        // Floor check, same contract as SideStepOpen's second trace.
+        if (clear)
+        {
+            Vector probe = pos + d2 * 48.0f;
+            Vector to = probe + Vector(0, 0, 36);
+            trace_t tFloor;
+            ray.Init(to + Vector(0, 0, 24), to - Vector(0, 0, 72));
+            enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tFloor);
+            clear = !tFloor.startsolid && !tFloor.allsolid && tFloor.fraction < 1.0f;
+        }
+        fracs[s] = clear ? 1.0f : 0.0f;
+    }
+
+    // Which side of the waypoint line is the hit on? Positive = left.
+    float hitLateral = InsSteerLateralOffset(pos.x, pos.y, moveYaw,
+                                             tr.endpos.x, tr.endpos.y);
+
+    float chosenYaw = 0.0f;
+    if (!InsSteerPickShoulder(baseYaw, fracs[0], fracs[1],
+                              INS_VEHICLE_MIN_SHOULDER_FRAC, hitLateral,
+                              chosenYaw))
+    {
+        // Neither shoulder is walkable. Do NOT deflect and do NOT stop: keep
+        // the normal forward motion and let stuck recovery handle it. The
+        // truck may be moving away.
+        if (insbot_debug.GetBool())
+        {
+            edict_t *hitEdict = EdictFromTraceEnt(tr.m_pEnt);
+            BotDbg("[insbots] [STEER_VEHICLE] %s pos=(%.1f %.1f %.1f) "
+                   "ent=%d frac=%.3f neither shoulder walkable\n",
+                   m_name, pos.x, pos.y, pos.z,
+                   hitEdict ? engine->IndexOfEdict(hitEdict) : 0,
+                   tr.fraction);
+        }
+        m_steerBaseTime = now;
+        m_steerLastYaw  = m_headingYaw;
+        return false;
+    }
+
+    m_headingYaw          = chosenYaw;
+    m_vehicleDeflect      = true;
+    m_vehicleDeflectYaw   = chosenYaw;
+    m_vehicleDeflectUntil = now + INS_VEHICLE_HOLD_SECONDS;
+    m_steerBaseYaw        = baseYaw;
+    m_steerBaseTime       = now;
+    m_steerLastYaw        = chosenYaw;
+
+    // Stale corridor recovery state: returning early means the follower never
+    // runs, so these keep whatever values they had before the truck arrived.
+    // m_blocked feeds doorway detection (bot_body.cpp:477) and
+    // m_chokeBackoffUntil gates the unstuck wiggle (bot_think.cpp:2798).
+    m_blocked = false;
+    m_chokeBackoffUntil = 0.0f;
+    m_passSide = 0.0f;
+    m_passUntil = 0.0f;
+
+    if (insbot_debug.GetBool())
+    {
+        int myIdx = m_edict ? engine->IndexOfEdict(m_edict) : 0;
+        float curSpeed = (myIdx >= 1 && myIdx < 66) ? s_hearSpeed[myIdx] : 0.0f;
+        edict_t *hitEdict = EdictFromTraceEnt(tr.m_pEnt);
+        BotDbg("[insbots] [STEER_VEHICLE] %s pos=(%.1f %.1f %.1f) speed=%.1f "
+               "ent=%d cls='%s' frac=%.3f baseYaw=%.1f -> shoulder=%.1f "
+               "lateral=%.1f buttons=0x%X\n",
+               m_name, pos.x, pos.y, pos.z, curSpeed,
+               hitEdict ? engine->IndexOfEdict(hitEdict) : 0,
+               hitEdict ? hitEdict->GetClassName() : "world",
+               tr.fraction, baseYaw, chosenYaw, hitLateral, buttons);
+    }
+
+    MoveAtWorldYaw(chosenYaw, viewYaw,
+                   insbot_move_speed.GetFloat() * INS_VEHICLE_SPEED_SCALE,
+                   fwd, side);
+    buttons &= ~IN_JUMP;
+    return true;
+}
+
 void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
                                  float &side, int &buttons)
 {
+    // Vehicle avoidance owns the frame when a truck is on the route. It runs
+    // BEFORE the classic dispatch and BEFORE the !nearTeammate early return,
+    // because that return skips every probe and would otherwise let an
+    // isolated bot walk straight into the hull.
+    {
+        bool moving = (fabsf(fwd) > 50.0f || fabsf(side) > 50.0f);
+        if (InsSteerShouldRunVehicleCheck(g_Turrets.VehicleCount(), moving,
+                                          insbot_avoid_vehicles.GetBool()))
+        {
+            if (SteerAroundVehicle(moveYaw, viewYaw, fwd, side, buttons))
+                return;
+        }
+    }
+
     int streamingMode = insbot_streaming.GetInt();
     Vector pos = m_info->GetAbsOrigin();
     bool physicalPassage = false;

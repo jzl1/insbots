@@ -184,7 +184,7 @@ static void TurretBuildSkipSet( CTurret *t, CTurretTraceFilter &filter );
 // ("prop_vehicle_driveable"). Measured live on the Linux VM: the design spec
 // used the map classname and was wrong. Keep every call site going through
 // this helper so the string is never duplicated again.
-static bool IsDriveableClass( const char *cls )
+bool IsDriveableClass( const char *cls )
 {
     return cls && strcmp( cls, "CPropVehicleDriveable" ) == 0;
 }

@@ -222,6 +222,10 @@ void CInsBot::Adopt(edict_t *e, int teamSlot)
     m_steerBaseYaw  = 0.0f;
     m_steerBaseTime = -1000.0f;
     m_steerLastYaw  = 0.0f;
+    m_vehicleDeflect      = false;
+    m_vehicleDeflectUntil = 0.0f;
+    m_vehicleDeflectYaw   = 0.0f;
+    m_vehicleLastProbe    = 0.0f;
     m_goalArea = -1;
     m_spawnTime = Now();
     static int s_seed = 5000; m_pathSeed = ++s_seed;

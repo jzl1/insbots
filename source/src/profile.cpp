@@ -159,7 +159,8 @@ void InsProf_Tick()
         "dangerzones",
         "capcommit",
         "think",
-        "thinkalive"
+        "thinkalive",
+        "vehicle"
     };
 
     double frames = (double)(s_winFrames ? s_winFrames : 1);

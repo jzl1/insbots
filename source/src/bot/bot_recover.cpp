@@ -30,6 +30,7 @@
 #include "nav.h"
 #include "objective.h"
 #include "bot_internal.h"
+#include "turret.h"
 
 // ---- externs this TU needs (same pattern as bot.cpp / objective.cpp) -------
 extern IVEngineServer       *engine;
@@ -67,7 +68,11 @@ bool CInsBot::SafeStandSpot(const Vector &dest, float minPlayerSep) const
         if (dx * dx + dy * dy < playerClearanceSq) return false;
     }
 
-    CTraceFilterWorldAndPropsOnly filter;
+    // Vehicle-aware: TeleportUnstuck must never warp a bot INTO a Humvee
+    // hull. CTraceFilterWorldAndPropsOnly cannot see the vehicle, so this
+    // check used to answer "safe" for a spot inside the truck - the worst
+    // outcome in the whole recovery flow.
+    CTraceFilterSteerObstacles filter( const_cast<CInsBot *>( this ) );
     Ray_t ray; trace_t tr;
     Vector mins(-16.0f, -16.0f, 0.0f);
     Vector maxs( 16.0f,  16.0f, 72.0f);
@@ -377,6 +382,28 @@ bool CInsBot::ClearBehind(float moveYaw, float minGap) const
     float yr = moveYaw * (3.14159265f / 180.0f);
     Vector fwdDir(cosf(yr), sinf(yr), 0);
     Vector sideDir(-sinf(yr), cosf(yr), 0);
+
+    // Vehicle-aware check FIRST. WorldClear is deliberately world-only (its
+    // other caller, FindCoverSpot, wants a truck in the line to read as "not
+    // exposed"), so the vehicle test belongs here instead of inside it.
+    // Without this, a back-out could report "clear" with the truck directly
+    // behind and reverse straight into it.
+    {
+        CTraceFilterSteerObstacles vf( const_cast<CInsBot *>( this ) );
+        Ray_t vray; trace_t vtr;
+        Vector vFrom = pos + Vector(0, 0, 36);
+        Vector vTo = pos - fwdDir * 64.0f + Vector(0, 0, 36);
+        vray.Init(vFrom, vTo);
+        enginetrace->TraceRay(vray, MASK_PLAYERSOLID, &vf, &vtr);
+        if (vtr.fraction < 1.0f && vtr.m_pEnt)
+        {
+            IServerUnknown *unk = (IServerUnknown *)vtr.m_pEnt;
+            IServerNetworkable *net = unk ? unk->GetNetworkable() : 0;
+            ServerClass *sc = net ? net->GetServerClass() : 0;
+            if (sc && IsDriveableClass( sc->GetName() ))
+                return false;
+        }
+    }
 
     Vector from = pos + Vector(0, 0, 36);
     Vector to = pos - fwdDir * 64.0f;
