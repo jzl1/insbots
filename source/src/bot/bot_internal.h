@@ -78,6 +78,40 @@ private:
     IHandleEntity *m_self;
 };
 
+// Obstacle filter for movement probes: world geometry, driveable vehicle
+// hulls, map brush entities and enemy players on foot are solid; the tracing
+// bot itself, its teammates, and every seated vehicle rider are not.
+//
+// This lives in the shared header because both bot_steer.cpp (forward probes)
+// and bot_recover.cpp (lateral sidestep and teleport landing checks) need the
+// SAME obstacle definition. Two copies would drift, and the divergence is
+// exactly the bug this replaces: SideStepOpen used
+// CTraceFilterWorldAndPropsOnly, whose ShouldHitEntity always returns false,
+// so a Humvee hull was invisible to every lateral move it validated.
+//
+// Physics props (crates, barrels, dropped weapons, ragdolls) are deliberately
+// NOT obstacles here - they were excluded before this change and that
+// behaviour is preserved.
+#define INS_STEER_SKIP_MAX 70
+
+class CInsBot;
+class CTraceFilterSteerObstacles : public CTraceFilter
+{
+public:
+    explicit CTraceFilterSteerObstacles( CInsBot *bot );
+
+    void Add( IHandleEntity *h )
+    {
+        if (h && m_n < INS_STEER_SKIP_MAX) m_skip[m_n++] = h;
+    }
+
+    virtual bool ShouldHitEntity( IHandleEntity *pEntity, int contentsMask );
+
+private:
+    IHandleEntity *m_skip[INS_STEER_SKIP_MAX];
+    int            m_n;
+};
+
 inline IHandleEntity *EdictHandleEntity(edict_t *e)
 {
     if (!e) return 0;

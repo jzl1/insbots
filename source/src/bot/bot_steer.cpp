@@ -68,8 +68,6 @@ extern CfgVar                insbot_debug;
 // into enemy bodies. Delete the final two lines of SteerShouldHitEntity to get
 // the strictly vehicle-only predicate.
 // ---------------------------------------------------------------------------
-#define INS_STEER_SKIP_MAX 70
-
 // The single source of truth for "is this trace entity a driveable Humvee".
 // Same mechanism turret.cpp uses: GetServerClass()->GetName() returns the C++
 // class name "CPropVehicleDriveable", not the map-facing classname. Both live
@@ -81,21 +79,6 @@ static bool SteerIsDriveableClass( const char *cls )
 }
 
 // True only for the dynamic entities steering should treat as obstacles.
-// BSP world geometry never reaches ShouldHitEntity under TRACE_EVERYTHING
-// (IEngineTrace.h:35-38; world hits report the worldspawn edict), so the only
-// entities that need to be admitted here are the ones the map does not carry in
-// the BSP hull:
-//
-//   1. driveable vehicles, by server class (the mechanism turret.cpp uses);
-//   2. map brush entities (func_door, func_brush, func_wall, func_breakable),
-//      which the engine routes through the filter as entities even though they
-//      are architecture. The SDK's own StandardFilterRules treats a brush-model
-//      SOLID_BSP entity as world (util_shared.cpp:226-241), and excluding them
-//      would send bots grinding into closed doors;
-//   3. players on foot, which Change 4 requires to stay solid (see above).
-//
-// Physics props (SOLID_VPHYSICS studio models: crates, barrels, dropped
-// weapons, ragdolls) are deliberately absent, so they stop being obstacles.
 static bool SteerShouldHitEntity( IHandleEntity *pEntity )
 {
     if (!pEntity) return false;
@@ -119,30 +102,7 @@ static bool SteerShouldHitEntity( IHandleEntity *pEntity )
     return cls && strcmp( cls, "player" ) == 0;
 }
 
-class CSteerTraceFilter : public CTraceFilter
-{
-public:
-    CSteerTraceFilter() : m_n(0) {}
-
-    void Add( IHandleEntity *h )
-    {
-        if (h && m_n < INS_STEER_SKIP_MAX) m_skip[m_n++] = h;
-    }
-
-    virtual bool ShouldHitEntity( IHandleEntity *pEntity, int /*contentsMask*/ )
-    {
-        if (!pEntity) return false;
-        for (int i = 0; i < m_n; i++)
-            if (pEntity == m_skip[i]) return false;
-        return SteerShouldHitEntity( pEntity );
-    }
-
-private:
-    IHandleEntity *m_skip[INS_STEER_SKIP_MAX];
-    int            m_n;
-};
-
-static void BuildSteerSkipSet( CInsBot *bot, CSteerTraceFilter &filter )
+static void BuildSteerSkipSet( CInsBot *bot, CTraceFilterSteerObstacles &filter )
 {
     if (!bot || !bot->m_edict) return;
 
@@ -217,6 +177,21 @@ static inline edict_t *EdictFromTraceEnt( CBaseEntity *ent )
     IServerUnknown *unk = (IServerUnknown *)(IHandleEntity *)ent;
     IServerNetworkable *net = unk ? unk->GetNetworkable() : 0;
     return net ? net->GetEdict() : 0;
+}
+
+CTraceFilterSteerObstacles::CTraceFilterSteerObstacles( CInsBot *bot )
+    : m_n(0)
+{
+    BuildSteerSkipSet( bot, *this );
+}
+
+bool CTraceFilterSteerObstacles::ShouldHitEntity( IHandleEntity *pEntity,
+                                                  int /*contentsMask*/ )
+{
+    if (!pEntity) return false;
+    for (int i = 0; i < m_n; i++)
+        if (pEntity == m_skip[i]) return false;
+    return SteerShouldHitEntity( pEntity );
 }
 
 static void Cmd_InsBot_Place()
@@ -365,8 +340,7 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
     Vector dir(cosf(yawRad), sinf(yawRad), 0);
     Vector waist = pos; waist.z += 36.0f;
 
-    CSteerTraceFilter steerFilter;
-    BuildSteerSkipSet(this, steerFilter);
+    CTraceFilterSteerObstacles steerFilter( this );
     Ray_t ray; trace_t tr;
 
     Vector ahead = waist + dir * 96.0f;
@@ -459,8 +433,7 @@ void CInsBot::SteerToPoint(float destYaw, float speed, float &fwd, float &side,
     Vector dir(cosf(yawRad), sinf(yawRad), 0);
     Vector waist = pos; waist.z += 36.0f;
 
-    CSteerTraceFilter steerFilter;
-    BuildSteerSkipSet(this, steerFilter);
+    CTraceFilterSteerObstacles steerFilter( this );
     Ray_t ray; trace_t tr;
     ray.Init(waist, waist + dir * 96.0f);
     enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &steerFilter, &tr);

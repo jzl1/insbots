@@ -341,7 +341,11 @@ bool CInsBot::CanShootMarker(const Vector &marker) const
 bool CInsBot::SideStepOpen(const Vector &probe) const
 {
     if (!enginetrace || !m_info) return false;
-    CTraceFilterWorldAndPropsOnly wf;
+    // Vehicle-aware: a lateral move must not be validated against a filter
+    // that cannot see the Humvee. CTraceFilterWorldAndPropsOnly returns false
+    // from ShouldHitEntity for every entity, so the truck was invisible here
+    // and this function could answer "open" with the hull right there.
+    CTraceFilterSteerObstacles wf( const_cast<CInsBot *>( this ) );
     Ray_t ray; trace_t tr;
     // Sweep the full standing player hull along the sidestep. A point ray at
     // waist height can clear a jamb/prop while the bot's 32u-wide hull clips
@@ -353,6 +357,9 @@ bool CInsBot::SideStepOpen(const Vector &probe) const
     enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &wf, &tr);
     if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f) return false;
 
+    // Floor check is NOT optional: the lateral sweep alone would happily clear
+    // a ledge edge, and a sidestep is the manoeuvre most likely to walk a bot
+    // off one. Keep both traces.
     Vector to = probe + Vector(0, 0, 36);
     ray.Init(to + Vector(0, 0, 24), to - Vector(0, 0, 72));
     enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &wf, &tr);
