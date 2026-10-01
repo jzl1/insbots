@@ -197,6 +197,7 @@ public:
     // client-side interpolation clock the shipped client fails to refresh for
     // vehicles; see the definition in turret.cpp.
     void DriveAnimTime( bool simulating );
+    void UpdateVehicleIndex( bool simulating );
     void Status();
 
 private:

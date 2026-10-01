@@ -913,6 +913,19 @@ public:
                         g_TurretOffsetAnimTime = off;
                         Msg("[insbots] Found m_flAnimTime at offset %d\n", off);
                     }
+                    else if (off < 0)
+                    {
+                        // Silent failure here used to disable the client pose
+                        // interpolation workaround with no diagnostic. Say so
+                        // once per map.
+                        static bool s_loggedAnimTimeMissing = false;
+                        if (!s_loggedAnimTimeMissing)
+                        {
+                            s_loggedAnimTimeMissing = true;
+                            Msg("[insbots] WARNING: m_flAnimTime not found; "
+                                "client pose interpolation workaround disabled\n");
+                        }
+                    }
                 }
 
                 pClass = pClass->m_pNext;

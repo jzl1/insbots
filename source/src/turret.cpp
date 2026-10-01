@@ -713,11 +713,48 @@ void CTurretRegistry::FrameUpdate( bool simulating )
 {
     if (gpGlobals) Discover( gpGlobals->curtime );
     DriveAnimTime( simulating );
+    UpdateVehicleIndex( simulating );
 
     // Iterate BACKWARD: FrameUpdate can remove the current entry (swap-with-
     // last), and a forward loop would then skip the swapped-in turret.
     for (int i = m_count - 1; i >= 0; i--)
         m_turrets[i].FrameUpdate( simulating );
+}
+
+// Maintain the driveable-vehicle index independently of DriveAnimTime().
+//
+// DriveAnimTime() early-returns when g_TurretOffsetAnimTime < 0, and that
+// return sits BEFORE its RebuildVehicleIndex() call. Chaining the bots'
+// vehicle channel to a client-interpolation offset meant a failed offset
+// resolution silently disabled VehicleCount(), VehicleEntIndex(),
+// VehicleOrigin() and VehicleIsHumvee() together - no log, no error.
+//
+// The bots' anti-vehicle channel has nothing to do with pose interpolation,
+// so it owns its own 0.5 s tick here.
+void CTurretRegistry::UpdateVehicleIndex( bool simulating )
+{
+    if (!simulating) return;
+    if (!engine || !gpGlobals) return;
+
+    // Resolve the class once, lazily. A failed lookup is NOT latched: it
+    // simply retries next frame.
+    if (!s_vehicleClass)
+    {
+        if (!server) return;
+        for (ServerClass *c = server->GetAllServerClasses(); c; c = c->m_pNext)
+            if (IsDriveableClass( c->GetName() ))
+            {
+                s_vehicleClass = c;
+                break;
+            }
+        if (!s_vehicleClass) return;
+    }
+
+    const float now = gpGlobals->curtime;
+    if (now < s_vehicleIdxNext) return;
+    s_vehicleIdxNext = now + 0.5f;
+
+    RebuildVehicleIndex( engine->GetEntityCount() );
 }
 
 // ---------------------------------------------------------------------------
@@ -817,15 +854,9 @@ void CTurretRegistry::DriveAnimTime( bool simulating )
     const float now = gpGlobals->curtime;
     const int maxEdicts = engine->GetEntityCount();
 
-    // Rebuild the vehicle index set on a timer rather than every frame. The
-    // test itself is a class-pointer compare, but reaching it costs a
-    // GetUnknown() plus two virtual calls per edict, and a large map runs
-    // thousands of edicts for a handful of vehicles.
-    if (now >= s_vehicleIdxNext)
-    {
-        s_vehicleIdxNext = now + 0.5f;
-        RebuildVehicleIndex( maxEdicts );
-    }
+    // The index is maintained by UpdateVehicleIndex() on its own 0.5 s tick,
+    // not here: this function early-returns above when the interpolation
+    // offset is missing, and the bots' vehicle channel must not inherit that.
     if (!s_vehicleIdx) return;
 
     // Entity 0 is the world; vehicles are non-client entities, so the upper
@@ -929,7 +960,14 @@ void CTurretRegistry::Discover( float now )
 // Number of edict slots currently holding a driveable.
 int CTurretRegistry::VehicleCount() const
 {
-    return s_vehicleIdxCount;
+    // s_vehicleIdxCount is the BITMAP CAPACITY (maxEdicts + 256, rounded up),
+    // not the number of vehicles. Returning it made every caller's
+    // `for (slot = 0; slot < VehicleCount(); slot++) VehicleEntIndex(slot)`
+    // loop walk the whole bitmap once per empty slot - O(capacity x edicts)
+    // per scan, at 10 Hz per bot. s_vehicleIdxFound is the count the rebuild
+    // already computes and logs.
+    if (s_vehicleIdxFound < 0) return 0;
+    return s_vehicleIdxFound;
 }
 
 // Entindex of the slot-th driveable, or 0 when the slot is empty/out of range.
