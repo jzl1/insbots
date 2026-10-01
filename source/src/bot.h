@@ -314,6 +314,20 @@ private:
     float  m_headingYaw;
     float  m_nextHeadingChange;
 
+    // Blocked-episode anchoring for the shoulder probes. The shoulders are
+    // always measured from the heading held when the episode BEGAN, never
+    // from a heading a previous deflection already moved the bot to -
+    // measuring from the deflected heading adds another 60 degrees on every
+    // re-probe, which produced a 6-value spin cycle at speed 0.
+    //
+    // These used to be file-scope statics indexed by m_ordinal and were never
+    // reset on client-slot reuse, so a fast respawn inherited the previous
+    // life's episode. Adopt() memsets the whole object, so members are clean
+    // by construction.
+    float  m_steerBaseYaw;     // heading the current blocked episode started at
+    float  m_steerBaseTime;    // when the current episode was last probed
+    float  m_steerLastYaw;     // heading after the last deflection
+
     // combat
     int    m_enemyIndex;       // entity index of current enemy, 0 = none
 

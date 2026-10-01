@@ -394,14 +394,6 @@ void CInsBot::SteerRoam(float &fwd, float &side, int &buttons, QAngle &view)
 // wedged bot keeps picking the SAME side instead of rotating, while a bot that
 // has one genuinely open shoulder still follows it and moves on.
 //
-// The episode ends the moment the forward line is clear, so the base is
-// re-captured for the next obstacle. A gap longer than one hold means the bot
-// left this path (nav branch, SteerRoam, teleport), so the base is re-captured
-// rather than reusing a stale heading.
-static float s_steerBaseYaw[64]  = { 0 };
-static float s_steerBaseTime[64] = { 0 };
-static float s_steerLastYaw[64]  = { 0 };
-
 // No-path fallback used by MoveToward when the nav mesh is loaded but no
 // route can be built (off-mesh spawn/goal, or a point that is unreachable
 // right now). Heads at the destination, but probes world geometry so the bot
@@ -424,10 +416,8 @@ void CInsBot::SteerToPoint(float destYaw, float speed, float &fwd, float &side,
     // Episode bookkeeping for the shoulder probes. baseFresh is true only when
     // the previous call left the bot holding the same heading within one hold,
     // i.e. this is a continuation of the SAME blocked episode.
-    int mySlot = (m_ordinal >= 0 && m_ordinal < 64) ? m_ordinal : -1;
-    bool baseFresh = (mySlot >= 0)
-                  && (now - s_steerBaseTime[mySlot]) <= 0.75f
-                  && s_steerLastYaw[mySlot] == m_headingYaw;
+    bool baseFresh = (now - m_steerBaseTime) <= 0.75f
+                  && m_steerLastYaw == m_headingYaw;
 
     float yawRad = m_headingYaw * (3.14159265f / 180.0f);
     Vector dir(cosf(yawRad), sinf(yawRad), 0);
@@ -448,14 +438,11 @@ void CInsBot::SteerToPoint(float destYaw, float speed, float &fwd, float &side,
         // 60-degree shoulder was momentarily least-bad; with both shoulders
         // blocked that produced the 6-value spin at speed 0 and never let the
         // no-progress sampler reach insbot_stuck_time.
-        float baseYaw = baseFresh ? s_steerBaseYaw[mySlot] : m_headingYaw;
+        float baseYaw = baseFresh ? m_steerBaseYaw : m_headingYaw;
         if (!baseFresh)
         {
-            if (mySlot >= 0)
-            {
-                s_steerBaseYaw[mySlot]  = m_headingYaw;
-                s_steerLastYaw[mySlot]  = m_headingYaw;
-            }
+            m_steerBaseYaw = m_headingYaw;
+            m_steerLastYaw = m_headingYaw;
             baseYaw = m_headingYaw;
         }
 
@@ -494,18 +481,15 @@ void CInsBot::SteerToPoint(float destYaw, float speed, float &fwd, float &side,
             m_headingYaw = best;
             m_nextHeadingChange = now + 0.45f;   // hold the deflection briefly
         }
-        if (mySlot >= 0)
-        {
-            s_steerBaseYaw[mySlot]  = baseYaw;
-            s_steerBaseTime[mySlot] = now;
-            s_steerLastYaw[mySlot]  = m_headingYaw;
-        }
+        m_steerBaseYaw  = baseYaw;
+        m_steerBaseTime = now;
+        m_steerLastYaw  = m_headingYaw;
     }
     else
     {
         // Forward line is clear: the blocked episode is over. Invalidate the
         // base so the next episode re-captures it from the live heading.
-        if (mySlot >= 0) s_steerBaseTime[mySlot] = -1000.0f;
+        m_steerBaseTime = -1000.0f;
 
         if (now >= m_nextHeadingChange)
         {

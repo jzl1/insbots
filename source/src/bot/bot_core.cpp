@@ -216,6 +216,12 @@ void CInsBot::Adopt(edict_t *e, int teamSlot)
     m_classSetupSent = false;
     m_nextReinforcePulse = 0.0f;
     m_headingYaw = frand(-180.0f, 180.0f);
+    // A steering episode must not survive into a new life. Adopt() memsets
+    // the object, so these are belt-and-braces: the sentinel matters because
+    // 0.0f is a real timestamp.
+    m_steerBaseYaw  = 0.0f;
+    m_steerBaseTime = -1000.0f;
+    m_steerLastYaw  = 0.0f;
     m_goalArea = -1;
     m_spawnTime = Now();
     static int s_seed = 5000; m_pathSeed = ++s_seed;
