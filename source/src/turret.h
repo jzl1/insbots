@@ -31,6 +31,13 @@ public:
     bool Armed()    const { return m_armed; }
     void SetTeam( int t ) { m_team = t; m_armed = (t > 0 && t < 3); }
 
+    // True when this turret was registered explicitly (by a map preset or the
+    // `register` subcommand) rather than armed by a boarding player. Purely
+    // diagnostic - it changes no behavior - but it is the only way a live run
+    // can tell the two arming paths apart in `turret status`.
+    void SetRegistered( bool r ) { m_registered = r; }
+    bool Registered() const { return m_registered; }
+
     // Per-frame work. Defined in turret.cpp; split into stages so the
     // ordering constraint in the spec (traverse before fire) is visible.
     void FrameUpdate( bool simulating );
@@ -50,6 +57,7 @@ public:
     int    m_team;
     bool   m_armed;
     bool   m_validated;
+    bool   m_registered;
     int    m_target;
     float  m_targetLastSeen;
     // When the held target first went outside the elevation arc, or 0 when it

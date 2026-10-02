@@ -355,6 +355,39 @@ insbot set turret_fire_tolerance_yaw    "5.0"  // turret fire gate: max yaw erro
 insbot set turret_fire_tolerance_pitch  "4.0"  // turret fire gate: max pitch error (deg)
 insbot set turret_spread               "0.230" // turret bullet spread cone (deg; M249 real value)
 
+// =================== TURRET FREEZE GATE ===================
+
+// Holds every turret dormant between round_reset and the moment play begins,
+// so a pre-registered truck cannot fire on players who are frozen in their
+// spawn rooms. Dormant is not disarmed: the registration and the latched team
+// both survive, and the turret resumes on the same team when play starts.
+//
+// This does NOT use g_RoundFrozen, which means "the round is over" rather than
+// "freeze time" (it is set on round_end and cleared on round_reset). See
+// round_freeze.h for the full reasoning.
+//
+// The window closes on whichever comes first: the round_unfrozen event, the
+// engine's own IsMoveFrozen bit clearing, or the freezetime timer elapsing.
+// round_unfrozen is NOT reliable on its own - it fires on the first round after
+// a map load and then not again (measured: 3 rounds, 1 event).
+
+insbot set turret_freeze_gate      "1"    // 1 = hold turrets dormant during round freeze time, 0 = off
+insbot set turret_freeze_fallback  "6.0"  // seconds to keep turrets dormant when mp_freezetime is unreadable
+
+// =================== VEHICLE PRESETS ===================
+
+// Preset Humvee spawns live in addons/sourcemod/configs/insvehicles/<map>.cfg
+// under a "VehiclePresets" root. Each block sets x/y/z/yaw/team/label.
+// team 1 and 2 are engine team indices (pre-registered and team-locked);
+// team 0 is neutral and latches to the first player to board.
+//
+// NOTE: team indices are NOT globally stable factions. On ins_baghdad and
+// ins_karam, team 1 is IRAQI and team 2 is USMC; on the other stock maps it is
+// inverted (bot_entry.cpp:94-108). sm_humvee_listpresets prints the resolved
+// name.
+
+sm_humvee_presets        "1"     // 1 = spawn preset Humvees at round start, 0 = off
+
 // =================== BOT ANTI-VEHICLE POLICY ===================
 
 // A Humvee is owned by the team of the FIRST player to board it, and it stays

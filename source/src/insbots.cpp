@@ -33,6 +33,10 @@
 #include "turret.h"
 #include "igameevents.h"
 #include "linux_offsets.h"
+#include "round_freeze.h"
+
+// Defined in turret.cpp; insbots.cpp reads it to drive the freeze window.
+extern CfgVar insbot_turret_freeze_fallback;
 
 #define INSBOTS_VERSION_NUM "0.20.4"
 #ifdef BUILD_TIMESTAMP
@@ -53,6 +57,12 @@ IBotManager          *botmanager = 0;
 IServerGameDLL       *server = 0;
 IGameEventManager2   *gameevents = 0;
 bool                  g_RoundFrozen = false;
+// Deliberately SEPARATE from g_RoundFrozen, which means "the round is over"
+// rather than "freeze time" - see round_freeze.h. Nothing about bot movement
+// reads this; it exists for the turret gate alone.
+bool                  g_RoundFreezeTime = false;
+bool                  g_RoundFreezeBitObservable = false;
+static RoundFreezeWindow s_freezeWindow;
 static bool           s_bRoundFreezeEventsReady = false;
 static int            s_commandClientIndex = 0;   // last human client that issued a command
 int s_offset_flNextAttack = -1;
@@ -1060,10 +1070,29 @@ public:
         const char *name = event->GetName();
         if (!name) return;
 
+        float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+
         if (!strcmp(name, "round_end"))
             g_RoundFrozen = true;
         else if (!strcmp(name, "round_reset") || !strcmp(name, "round_unfrozen"))
             g_RoundFrozen = false;
+
+        // ---- freeze window (turret gate only; see round_freeze.h) ----------
+        if (!strcmp(name, "round_reset"))
+        {
+            s_freezeWindow.Reset( now );
+            g_RoundFreezeBitObservable = false;
+        }
+        else if (!strcmp(name, "round_end"))
+        {
+            s_freezeWindow.OnRoundEnd( now );
+        }
+        else if (!strcmp(name, "round_unfrozen"))
+        {
+            s_freezeWindow.OnUnfrozen( now );
+        }
+        g_RoundFreezeTime = !s_freezeWindow.TurretsLive(
+            now, insbot_turret_freeze_fallback.GetFloat());
 
         // m_iOrderID is assigned during round setup, so refresh it on every
         // round start; the values cached at ServerActivate() are still -1.
@@ -1077,7 +1106,8 @@ public:
         if (insbot_debug.GetBool()
             && (!strcmp(name, "round_reset") || !strcmp(name, "round_end")
                 || !strcmp(name, "round_unfrozen")))
-            Msg("[insbots] round state event: %s (frozen=%d)\n", name, g_RoundFrozen ? 1 : 0);
+            Msg("[insbots] round state event: %s (frozen=%d, turrets_live=%d)\n",
+                name, g_RoundFrozen ? 1 : 0, g_RoundFreezeTime ? 0 : 1);
     }
 
     virtual void LevelInit(char const *pMapName)
@@ -1096,6 +1126,12 @@ public:
         // Only enable this state when both required event hooks registered;
         // otherwise fail open rather than freezing bots for the whole map.
         g_RoundFrozen = s_bRoundFreezeEventsReady;
+        // A newly loaded level starts before any round event. Hold turrets
+        // dormant until the first round_reset arrives and closes the window
+        // properly, so a pre-registered truck cannot fire during map setup.
+        s_freezeWindow.Reset( gpGlobals ? gpGlobals->curtime : 0.0f );
+        g_RoundFreezeBitObservable = false;
+        g_RoundFreezeTime = true;
         g_Bots.LevelInit(pMapName);
         g_Objectives.Reset();
         {
@@ -1243,6 +1279,40 @@ public:
             }
         }
         g_Bots.FrameUpdate(simulating);
+        // Sample CINSPlayer::IsMoveFrozen() from any live player and feed the
+        // window. Bit 1 of m_iPlayerFlags; bit 0 is ADS, which insbots already
+        // reads at s_offset_m_IronsightsState.
+        //
+        // NOT restricted to a vehicle seat, deliberately. The bit is a
+        // player-level flag (CINSPlayer::IsMoveFrozen), so gating the read on
+        // a driver would make it unobservable whenever nobody is in a vehicle
+        // - which is most of freeze time on most maps. A sample that never
+        // reads true is harmless: RoundFreezeWindow::ObserveFrozenBit only
+        // lets the bit CLOSE the window, never open it, so the elapsed-time
+        // fallback still governs. If a live run shows the bit is only ever
+        // set for seated players, report it; do not "fix" it by adding a seat
+        // check, which would silently disable the input.
+        if (simulating && gpGlobals && s_offset_m_IronsightsState >= 0)
+        {
+            bool sampled = false;
+            for (int ci = 1; ci <= gpGlobals->maxClients && !sampled; ci++)
+            {
+                edict_t *pe = engine->PEntityOfEntIndex( ci );
+                if (!pe || pe->IsFree()) continue;
+                IServerUnknown *u = pe->GetUnknown();
+                if (!u || !u->GetBaseEntity()) continue;
+                IPlayerInfo *pi = playerinfomanager ? playerinfomanager->GetPlayerInfo( pe ) : 0;
+                if (!pi || !pi->IsConnected() || pi->IsDead()) continue;
+
+                int flags = *(int *)((char *)u->GetBaseEntity() + s_offset_m_IronsightsState);
+                bool frozen = ((flags >> 1) & 1) != 0;
+                s_freezeWindow.ObserveFrozenBit( frozen, gpGlobals->curtime );
+                if (frozen) g_RoundFreezeBitObservable = true;
+                sampled = true;
+            }
+            g_RoundFreezeTime = !s_freezeWindow.TurretsLive(
+                gpGlobals->curtime, insbot_turret_freeze_fallback.GetFloat());
+        }
         g_Turrets.FrameUpdate(simulating);
         InsProf_FrameEnd();
         InsProf_Tick();
@@ -1252,6 +1322,11 @@ public:
     {
         s_bLevelActive = false;
         g_RoundFrozen = s_bRoundFreezeEventsReady;
+        // The freeze window is separate state from the turret registry below;
+        // reset it here too so the flag cannot survive a level.
+        s_freezeWindow.Reset( gpGlobals ? gpGlobals->curtime : 0.0f );
+        g_RoundFreezeBitObservable = false;
+        g_RoundFreezeTime = true;
         g_HoldQuotaJoins = false;
         // Drop every turret: the entities they reference are about to be freed,
         // and a stale entry would otherwise be purged one-per-frame by

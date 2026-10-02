@@ -90,6 +90,22 @@ extern CfgVar insbot_vis_range;
 // not drag in the whole CInsBot surface.
 extern bool LineGoesThroughSmoke( const Vector &from, const Vector &to );
 
+// The freeze-window flag lives in insbots.cpp; see round_freeze.h for why it
+// is deliberately separate from g_RoundFrozen.
+extern bool g_RoundFreezeTime;
+extern bool g_RoundFreezeBitObservable;
+
+// The one predicate CTurret::FrameUpdate consults. Kept as a named function
+// rather than an inline condition so the diagnostic line in status can report
+// the same value the gate uses.
+extern CfgVar insbot_turret_freeze_gate;
+
+bool TurretFreezeGateBlocks()
+{
+    if (!insbot_turret_freeze_gate.GetBool()) return false;
+    return g_RoundFreezeTime;
+}
+
 int g_TurretOffsetDriver        = -1;
 int g_TurretOffsetPoseParameter = -1;
 int g_TurretOffsetAnimTime      = -1;
@@ -322,6 +338,16 @@ CfgVar insbot_turret_fire_tol_pitch ("turret_fire_tolerance_pitch", "4.0",   "tu
 CfgVar insbot_turret_unreachable_grace ("turret_unreachable_grace", "1.0", "seconds a target may stay outside the turret's elevation arc before it is dropped");
 CfgVar insbot_turret_spread         ("turret_spread",               "0.230", "turret bullet spread cone (deg; M249 real value)");
 
+// ---- freeze-time gate ------------------------------------------------------
+// Keeps every turret dormant between round_reset and the moment play actually
+// begins. Without this, a turret pre-registered at round start acquires and
+// fires on players who are frozen in their spawn rooms.
+//
+// The gate reads RoundFreezeWindow (round_freeze.h), NOT g_RoundFrozen - see
+// that header for why the existing flag is the wrong signal.
+CfgVar insbot_turret_freeze_gate    ("turret_freeze_gate",    "1",  "hold every turret dormant during round freeze time (0=off)");
+CfgVar insbot_turret_freeze_fallback("turret_freeze_fallback","6.0","seconds to keep turrets dormant when mp_freezetime is unreadable");
+
 // Re-roll the aim offset on the bots' cadence. Called once per tick from
 // FrameUpdate, before Aim(), so the offset a tick aims with is the one the
 // re-roll for that tick produced.
@@ -389,6 +415,7 @@ CTurret::CTurret()
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
     m_shotHitTarget = false;
+    m_registered = false;
     m_shotsFired = 0;
     m_rejectsLogged = 0;
     m_acquiresLogged = 0;
@@ -423,6 +450,7 @@ void CTurret::Reset( int entindex, int team )
     m_nextShot = 0.0f;
     m_shotsLogged = 0;
     m_shotHitTarget = false;
+    m_registered = false;
     m_shotsFired = 0;
     m_rejectsLogged = 0;
     m_acquiresLogged = 0;
@@ -615,6 +643,8 @@ void CTurret::Arm()
     if (t <= 0 || t >= 3) return;
 
     SetTeam( t );
+    // Armed by a boarding player, not by a preset.
+    m_registered = false;
     Msg( "[insbots] turret %d armed, team %d (driver %d)\n", m_entIndex, t, idx );
 }
 
@@ -624,6 +654,29 @@ void CTurret::FrameUpdate( bool simulating )
     if (!insbot_turret_enabled.GetBool()) return;
     if (!simulating) return;
     if (!gpGlobals) return;
+
+    if (TurretFreezeGateBlocks())
+    {
+        // Dormant, not disarmed: the registration and the latched team both
+        // survive the freeze, so the turret resumes on the same team the
+        // instant play begins. Validate() still runs so a recycled slot is
+        // dropped rather than left registered.
+        if (!Validate())
+        {
+            g_Turrets.Remove( m_entIndex );
+            return;
+        }
+        m_target = 0;
+        m_targetLastSeen = 0.0f;
+        m_unreachableSince = 0.0f;
+        m_curYaw = 0.0f;
+        m_curPitch = 0.0f;
+        m_desiredYaw = 0.0f;
+        m_desiredPitch = 0.0f;
+        m_desiredPitchTrue = 0.0f;
+        m_state = TURRET_IDLE;
+        return;
+    }
 
     if (!Validate())
     {
@@ -1085,15 +1138,20 @@ int CTurretRegistry::VehicleDriverTeam( int entindex ) const
 // ---------------------------------------------------------------------------
 void CTurretRegistry::Status()
 {
+    Msg( "[insbots] turrets: %d registered; freeze_gate=%d; round_freeze=%d; bit_observable=%d\n",
+         m_count, insbot_turret_freeze_gate.GetBool() ? 1 : 0,
+         g_RoundFreezeTime ? 1 : 0, g_RoundFreezeBitObservable ? 1 : 0 );
     if (m_count == 0) { Msg( "[insbots] no turrets registered\n" ); return; }
     for (int i = 0; i < m_count; i++)
     {
         CTurret *t = &m_turrets[i];
-        Msg( "[insbots] turret ent=%d team=%d armed=%d state=%s target=%d "
+        Msg( "[insbots] turret ent=%d team=%d armed=%d registered=%d state=%s "
+             "freeze_blocked=%d target=%d "
              "yaw=%.1f pitch=%.1f want=%.1f reach=%d err=%.1f/%.1f "
              "aim=%.1f/%.1f\n",
-             t->EntIndex(), t->Team(), t->Armed() ? 1 : 0,
+             t->EntIndex(), t->Team(), t->Armed() ? 1 : 0, t->Registered() ? 1 : 0,
              t->m_state == TURRET_ENGAGING ? "ENGAGING" : "IDLE",
+             TurretFreezeGateBlocks() ? 1 : 0,
              t->m_target, t->m_curYaw, t->m_curPitch,
              t->m_desiredPitchTrue,
              InsTurretPitchReachable( t->m_desiredPitchTrue ) ? 1 : 0,
@@ -1107,7 +1165,7 @@ void CTurretRegistry::Status()
 bool TurretHandleCommand( int argc )
 {
     const char *a1 = (argc > 2) ? engine->Cmd_Argv( 2 ) : 0;
-    if (!a1) { Msg( "[insbots] usage: insbot turret <add|remove|status|set>\n" ); return true; }
+    if (!a1) { Msg( "[insbots] usage: insbot turret <add|register|remove|status|set>\n" ); return true; }
 
     if (!_stricmp( a1, "add" ))
     {
@@ -1130,6 +1188,76 @@ bool TurretHandleCommand( int argc )
         }
         if (g_Turrets.Add( idx, team )) Msg( "[insbots] turret %d registered (team %d)\n", idx, team );
         else                           Msg( "[insbots] turret %d not registered\n", idx );
+        return true;
+    }
+
+    if (!_stricmp( a1, "register" ))
+    {
+        // Pre-registration path. Identical to `add` except that the turret is
+        // marked as explicitly registered, so `turret status` can distinguish
+        // a map preset from a player who climbed in. The freeze gate is NOT
+        // consulted here: registration and arming are separate, and a
+        // pre-registered truck must survive the freeze with its team intact.
+        if (argc < 5) { Msg( "[insbots] usage: insbot turret register <entindex> <team>\n" ); return true; }
+        int idx  = atoi( engine->Cmd_Argv( 3 ) );
+        int team = atoi( engine->Cmd_Argv( 4 ) );
+        if (team <= 0 || team >= 3)
+        {
+            Msg( "[insbots] turret register: team %d is not a play team\n", team );
+            return true;
+        }
+        edict_t *e = engine->PEntityOfEntIndex( idx );
+        if (!e || e->IsFree()) { Msg( "[insbots] turret register: no entity %d\n", idx ); return true; }
+        IServerUnknown *unk = e->GetUnknown();
+        IServerNetworkable *net = unk ? unk->GetNetworkable() : 0;
+        const char *cls = (net && net->GetServerClass()) ? net->GetServerClass()->GetName() : 0;
+        if (!IsDriveableClass( cls ))
+        {
+            Msg( "[insbots] turret register: entity %d is '%s', not CPropVehicleDriveable\n",
+                 idx, cls ? cls : "?" );
+            return true;
+        }
+        // IDEMPOTENT ON PURPOSE. `register` is a declaration of intent ("this
+        // truck is on team N"), not a one-shot construction. Two independent
+        // paths can race to make the same declaration:
+        //
+        //   * humvee_presets.sp registers a team preset at round_reset, and
+        //   * CTurretRegistry::Discover() (:904) independently registers any
+        //     Humvee the moment a play-team driver is seated, at 4 Hz.
+        //
+        // For a NEUTRAL preset, Discover() legitimately wins: a player boards,
+        // Discover() adds the turret with the driver's team, and
+        // TryClaimNeutral (Task 7) then sends `register` for the same entindex
+        // a moment later. A non-idempotent register would log a spurious
+        // failure and, worse, would leave `m_registered` unset - making the
+        // truck look first-boarder-armed in `turret status` when it was in
+        // fact explicitly claimed. Re-assert the team and the marker instead.
+        //
+        // Re-asserting the TEAM is safe and is the point: for a neutral claim
+        // the two values are equal by construction (both come from the boarding
+        // player's GetTeamIndex). It is not a hijack vector - see the ownership
+        // latch in turret.h:4-6 and CTurret::Arm (:587), which never re-latches
+        // from a later driver.
+        CTurret *existing = g_Turrets.Find( idx );
+        if (existing)
+        {
+            existing->SetTeam( team );
+            existing->SetRegistered( true );
+            Msg( "[insbots] turret %d already registered; re-asserted team %d, "
+                 "marked pre-registered (freeze=%d)\n",
+                 idx, team, g_RoundFreezeTime ? 1 : 0 );
+        }
+        else if (g_Turrets.Add( idx, team ))
+        {
+            CTurret *t = g_Turrets.Find( idx );
+            if (t) t->SetRegistered( true );
+            Msg( "[insbots] turret %d pre-registered (team %d, freeze=%d)\n",
+                 idx, team, g_RoundFreezeTime ? 1 : 0 );
+        }
+        else
+        {
+            Msg( "[insbots] turret %d not registered (registry full)\n", idx );
+        }
         return true;
     }
 
