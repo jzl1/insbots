@@ -2,28 +2,13 @@
 
 AI bot players and vehicle combat systems for *Insurgency: Modern Infantry Combat* (Source 2006 / Episode 1 Engine, SRCDS build 4044).
 
----
+## Quickstart
 
-### Highlights
-* **Tactical Bot AI:** Threat perception (vision and hearing), dynamic Cover System V2 with 12-sector threat blocking, cyclic fire control, stance mimicry, and push-order objective targeting.
-* **Vehicle Systems & Auto-Turret:** Autonomous roof-mounted M249 Humvee turret with hull-frame aiming and round-freeze gating; bot anti-vehicle combat and obstacle steering around hulls and wrecks.
-* **Squad Orders & Companion:** Interactive radio orders menu (F3 / `!orders`), wedge formations, covering-fire suppression (`!mark`), 3D HUD waypoint markers, and class slot requesting (`!request`).
-
----
-
-## Installation
-
-1. **Windows Dedicated Server (`srcds.exe`):** Copy `insbots.dll` and `insbots.vdf` into `insurgency/addons/`.
-2. **Linux Dedicated Server (`srcds_run`):** Copy `insbots_i486.so` and `insbots.vdf` into `insurgency/addons/`.
-3. **SourceMod Companion (Optional):** Copy `insbots_companion.smx` into `insurgency/addons/sourcemod/plugins/` to enable squad commands, the F3 orders menu, and tactical world markers.
-4. **Navigation Meshes:** Place corresponding `.nav` files (e.g. `ins_sinjar.nav`) into `insurgency/addons/insbots_nav/` or `insurgency/maps/`.
-5. **Start or Restart Server:** The engine loads the plugin automatically on startup (`[insbots] loaded`).
-
----
-
-## Quick Start (`server.cfg`)
-
-Add these settings to your `insurgency/cfg/server.cfg`:
+1. Download the latest release [here](https://github.com/jzl1/insbots/releases/latest)
+2. Open the downloaded archive (`.zip` for Windows, `.tar.gz` for Linux).
+3. Copy or drag the `addons` folder directly into `Source SDK Base/insurgency/` (merge folders when prompted).
+4. Place navmeshes (`.nav` files) under Source SDK Base\insurgency\addons\insbots_nav (Grab them [here](https://github.com/jzl1/ins_navmeshes)) or build it by yourself with nav_generate.
+5. Add these recommended settings to your `insurgency/cfg/server.cfg`:
 
 ```cfg
 // Maintain 16 bots with 2 reserved slots for incoming human players
@@ -33,7 +18,7 @@ insbot set reserve 2
 // Randomized appearances and tactical weapon AI
 insbot set randomize_customization 1
 insbot set randomize_loadout 1
-insbot set grenades 1
+insbot set grenades 1     // opt-in: frag grenades are OFF by default
 insbot set smoke 1
 insbot set m203 1
 
@@ -42,8 +27,6 @@ insbot set turret_enabled 1
 insbot set turret_freeze_gate 1
 insbot set target_vehicles 2
 ```
-
----
 
 ## Essential Commands
 
@@ -56,12 +39,10 @@ insbot set target_vehicles 2
 | `insbot set <cvar> <value>` | Change any bot or turret setting live during gameplay. |
 | `insbot turret status` | View registered vehicle turrets, team claims, and targets. |
 | `insbot navreload` | Reload the navigation mesh for the active map. |
-| `F3` / `!orders` | *(In-game)* Open the interactive squad orders radio menu. |
-| `!request` | *(In-game)* Request a class slot currently occupied by an AI bot. |
+| `F3` / `!orders` | *(In-game)* Open the interactive squad orders radio menu. (Sourcemod required) |
+| `F2` / `!request` | *(In-game)* Request a class slot currently occupied by an AI bot. (Sourcemod required) |
 
-For the complete ConVar reference, see [`cvars.txt`](cvars.txt).
-
----
+For detailed technical guides, advanced configurations, and the complete ConVar reference, see the [Documentation Index](docs/README.md).
 
 ## License
 

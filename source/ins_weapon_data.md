@@ -21,7 +21,7 @@ cross-referenced with `clipdata.ctx`, `ammodata.ctx`, and `weapondata.ctx`.
 | weapon_rpk    | 75 | 4 | 7.62×39 | Semi / Auto | 600 | 0.230 | 3.5 | 0.3 |
 | weapon_m249   | 200 | 4 | 5.56 NATO | Auto | 725 | 0.230 | 3.5 | 0.2 |
 | weapon_svd    | 10 | 6 | .303 | Semi | 170 | 0.095 | 2.5 | 1.0 |
-| weapon_l42a1  | 10 | 6 | .303 | Semi (bolt) | ~55⁵ | 0.095 | 2.5 | 0.5 |
+| weapon_l42a1  | 10 | 6 | .303 | Semi (bolt) | ~55⁴ | 0.095 | 2.5 | 0.5 |
 | weapon_m1014  | 7 | 6 | 12ga buck | Semi | 200 | 1.60 | 5.0 | 0.5 |
 | weapon_toz    | 6 | 6 | 12ga buck | Semi (pump) | 200 | 1.60 | 5.0 | 0.5 |
 
@@ -45,14 +45,15 @@ max cap; real rate is trigger-limited.*
 
 ### Notes
 1. **Burst / M16**: firemodes bitfield is Semi=1, Burst=2, Auto=4. M16A4/M203 =
-   3 (Semi | 3-round-burst); the burst uses `burst_cycle_time` 700 ms. Every
-   Auto weapon = 5 (Semi|Auto) except the M249 = 4 (Auto only).
+   3 (Semi | 3-round-burst); the burst uses `burst_cycle_time` 700, the same
+   rounds/min units as `cycle_time` (700 rpm ≈ 86 ms between rounds in the
+   burst). Every Auto weapon = 5 (Semi|Auto) except the M249 = 4 (Auto only).
 2. **carry "—"**: not present in any of the 14 stock class kits, so bots never
    spawn with it in normal play (AK-74 ≈ AK-47 platform; 1911 ≈ 2 like other
    pistols if ever kitted).
 3. **AKS-74U caliber**: the game data points its `clip_type` at `CLIP_AK47`
    (7.62×39, 30 rnd) — that's the mod's actual value, not a typo on my side.
-5. **Bolt (L42A1)**: no cycle field in the script; the ~55 rpm is a practical
+4. **Bolt (L42A1)**: no cycle field in the script; the ~55 rpm is a practical
    bolt-cycling estimate, not a game value. Pistols likewise have no cycle field
    (semi, click-limited) so no RPM is listed for them.
 

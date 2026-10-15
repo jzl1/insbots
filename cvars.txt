@@ -38,6 +38,7 @@ insbot set avoid_crouch              "2500" // A* penalty for nav areas flagged 
 insbot set avoid_jump                "4000" // A* penalty for nav areas flagged JUMP - bots route around jumps when a flat path exists (0=don't avoid)
 insbot set avoid_ladder              "3000" // A* penalty for ladder edges - bots route around ladders when a flat path exists (0=don't avoid)
 insbot set avoid_marked              "3000" // A* penalty for nav areas flagged AVOID (jump/crouch areas are marked AVOID by the generator) - 0=don't avoid
+insbot set avoid_vehicles            "1" // bots steer around driveable vehicle hulls (0=off)
 insbot set doorway_sprint           "1" // accurate doorway sprint alignment and kinematic modulation (0=off)
 insbot set doorway_teleport          "1" // warp a stalled front bot past a detected doorway after doorway_teleport_time (0=off)
 insbot set doorway_teleport_time     "3.0" // continuous doorway no-progress seconds before a full-hull-validated teleport
@@ -219,7 +220,7 @@ insbot set reload_safe_pct_m9          "0.60" // Safe reload threshold (pct ammo
 insbot set reload_safe_pct_makarov     "0.60" // Safe reload threshold (pct ammo remaining) for weapon
 insbot set reload_safe_pct_rpg7        "0.60" // Safe reload threshold (pct ammo remaining) for weapon
 insbot set reload_safe_pct_rpk         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
-insbot set reload_safe_pct_sks         "1" // Safe reload threshold (pct ammo remaining) for weapon
+insbot set reload_safe_pct_sks         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
 insbot set reload_safe_pct_svd         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
 insbot set reload_safe_pct_toz         "0.60" // Safe reload threshold (pct ammo remaining) for weapon
 
@@ -354,6 +355,7 @@ insbot set turret_acquire_fov          "360"   // turret acquisition cone (deg; 
 insbot set turret_fire_tolerance_yaw    "5.0"  // turret fire gate: max yaw error (deg)
 insbot set turret_fire_tolerance_pitch  "4.0"  // turret fire gate: max pitch error (deg)
 insbot set turret_spread               "0.230" // turret bullet spread cone (deg; M249 real value)
+insbot set turret_unreachable_grace    "1.0" // seconds a target may stay outside the turret's elevation arc before it is dropped
 
 // =================== TURRET FREEZE GATE ===================
 
