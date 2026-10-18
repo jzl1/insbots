@@ -14,9 +14,9 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (default: v0.20.4)'
+        description: 'Release Tag (default: v0.21.0)'
         required: false
-        default: 'v0.20.4'
+        default: 'v0.21.0'
         type: string
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then
             TAG="${{ inputs.release_tag }}"
           else
-            TAG="v0.20.4_${TIMESTAMP}"
+            TAG="v0.21.0_${TIMESTAMP}"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
@@ -220,15 +220,14 @@ jobs:
           prerelease: ${{ inputs.is_prerelease }}
           make_latest: true
           body: |
-            ### What's New in v0.20.4:
-            * **F2 Slot Request Menu:** Players can take a bot-occupied slot from an F2 menu (or `!slotrequest`). Slots are grouped by role, so one "Sniper" entry covers every sniper slot in the squad instead of a single hard-coded index, and empty slots are preferred over displacing a live bot.
-            * **Deferred Slot Reservation:** A slot request no longer races the engine's own squad update. The reservation is queued and applied on the player's next respawn wave, and the target slot is protected from being re-filled by a bot in the meantime.
-            * **Bot Ironsights (ADS) Fixed:** Bots now actually shoulder their weapons. INS:MIC raises the sights on a button-18 *release* edge, so the old continuous hold left bots firing from the hip. `ads_mode` (default 1) drives the edge pulse and verifies the resulting state; `ironsights` raises sights when engaging beyond 300u.
-            * **Proactive Cover On Engage:** Bots engaging in the open now break contact and move to nearby cover instead of standing exposed (`cover_on_engage`). Stationed snipers at a validated perch are excluded so they keep their overwatch vantage.
-            * **Cover System V2 Ownership Fixes:** Cover spots are released deterministically on death, respawn, state change, and abandoned pathing, so spots no longer leak or stay claimed by a bot that has walked away.
-            * **Ladder Dismount Tolerance:** Bots now finish a climb and step onto the landing instead of thrashing at the top. `ladder_lip_tol` (default 4.0, clamped to 0..6) absorbs the measured 2.4u-3.1u gap between the navmesh lip and the floor the player hull can actually occupy.
-            * **English & Russian Localization:** Companion menus, notifications, and orders are translated through `translations/insbots_companion.phrases.txt`; the client's `cl_language` picks the language. Class names stay English to match the game's own UI.
-            * **Packaging & Reference:** Release tags are now created annotated rather than lightweight, both release archives ship the translation file, and the repository's `cvars.txt` reference now covers the full `insbot set` surface.
+            ### What's New in v0.21.0:
+            * **Humvee M249 Auto-Turrets:** Roof-mounted Humvees now carry an autonomous M249 that scans 360 degrees, acquires visible enemies, and fires at the M249's full 800 RPM with the player weapon's gunshot sound, spread, and red tracers. The turret arms for the team of the first player to sit in the driver seat, keeps defending after the driver dies, and shuts down when the truck is destroyed. Full admin control: `insbot turret status / add / register / remove / set`.
+            * **Round-Freeze Gate & Team Pre-Registration:** Turrets can be pre-registered to a team before anyone boards (`insbot turret register`), and stay dormant through the pre-round freeze window so a preset truck can never fire on players still locked in spawn (`turret_freeze_gate`).
+            * **Bot Anti-Vehicle Combat & Steering:** Bots now treat hostile Humvees as targets (`target_vehicles`: 0=ignore, 1=anti-armor only, 2=any weapon when no infantry threat is visible) and steer around driveable hulls and wrecks instead of walking into them or poisoning nav links (`avoid_vehicles`).
+            * **Vehicle Pose Interpolation Fix:** The server now advances `m_flAnimTime` on driveable vehicles so clients interpolate wheel spin and steering poses. This fixes the stuttering wheels, the stuck front-wheel steering angle, and the "burnout" look on stopped Humvees.
+            * **Push-Order Objective Targeting:** On Push maps, bots attack objectives in the engine's capture sequence instead of the nearest-to-home point (`push_order`).
+            * **Cover System Performance:** Exposure checks are spatially indexed (22.04us to 0.20us per call) and the threat mask widened from 8 to 12 sectors, cutting the false "protected" rate from 11.10% to 3.88%.
+            * **Source, Builds & Docs:** `bot.cpp` is split into 17 focused translation units (parallel MSVC builds, header-aware Linux builds), the repository ships a new `docs/` guide set and expanded unit tests, and the project is now licensed under GPL v3.0.
 
           files: |
             release_assets/insbots-windows-x86.zip

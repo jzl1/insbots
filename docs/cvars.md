@@ -6,7 +6,7 @@ insbot set <cvar> <value>
 insbot get <cvar>
 ```
 
-As of v0.20.4 the plugin exposes **260 settings**. This guide covers the
+As of v0.21.0 the plugin exposes **260 settings**. This guide covers the
 commonly tuned ones; the complete list is printed in-console by `insbot list`
 and mirrored in `cvars.txt` at the repository root.
 
