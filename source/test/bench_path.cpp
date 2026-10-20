@@ -160,12 +160,12 @@ static void RunBuildPath(CNavMesh &m, int iters, int kind, bool danger, const ch
         if (n > 0) ok++; else fail++;
 
         // count expansions (closedMark) and heap pushes (openMark) from the last search
-        unsigned mark = m.m_mark;
+        unsigned mark = m.m_searchContext.mark;
         double ec = 0, pc = 0;
         for (int k = 0; k < m.m_count; k++)
         {
-            if (m.m_areas[k].closedMark == mark) ec++;
-            if (m.m_areas[k].openMark == mark) pc++;
+            if (m.m_searchContext.nodes[k].closedMark == mark) ec++;
+            if (m.m_searchContext.nodes[k].openMark == mark) pc++;
         }
         ms.push_back(dt);
         exp.push_back(ec);
@@ -388,12 +388,12 @@ int main(int argc, char **argv)
             int n = m.BuildPath(s, g, route, 512, seed);
             double dt = NowMs() - t;
             if (n > 0) ok++; else fail++;
-            unsigned mark = m.m_mark;
+            unsigned mark = m.m_searchContext.mark;
             double ec = 0, pc = 0;
             for (int k = 0; k < m.m_count; k++)
             {
-                if (m.m_areas[k].closedMark == mark) ec++;
-                if (m.m_areas[k].openMark == mark) pc++;
+                if (m.m_searchContext.nodes[k].closedMark == mark) ec++;
+                if (m.m_searchContext.nodes[k].openMark == mark) pc++;
             }
             ms.push_back(dt); exp.push_back(ec); push.push_back(pc); len.push_back(n > 0 ? n : 0);
         }

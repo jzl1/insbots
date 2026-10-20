@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <vector>
+#include <type_traits>
 struct Vector { float x,y,z; Vector(){} Vector(float a,float b,float c):x(a),y(b),z(c){}
   Vector operator-(const Vector&o)const{return Vector(x-o.x,y-o.y,z-o.z);}
   float Length()const{return sqrtf(x*x+y*y+z*z);} };
@@ -14,6 +15,11 @@ struct Vector { float x,y,z; Vector(){} Vector(float a,float b,float c):x(a),y(b
 #include "../src/nav.cpp"
 #undef private
 #undef protected
+
+static_assert(!std::is_copy_constructible<CNavMesh>::value,
+              "CNavMesh must not be copy-constructible");
+static_assert(!std::is_copy_assignable<CNavMesh>::value,
+              "CNavMesh must not be copy-assignable");
 
 static void put32(FILE*f,unsigned v){fwrite(&v,4,1,f);} 
 static void put16(FILE*f,unsigned short v){fwrite(&v,2,1,f);} 
@@ -426,6 +432,40 @@ int main(){
   int path[64]; int n=m.BuildPath(s,g,path,64);
   printf("path len=%d:",n); for(int i=0;i<n;i++)printf(" %d(id=%u)",path[i],m.Area(path[i])->id); printf("\n");
   if(n<5){printf("FAIL: path\n");return 1;}
+  {
+      CNavMesh mOther;
+      if (!mOther.Load(navPath)) { printf("FAIL: second mesh load\n"); return 1; }
+      int otherPath[64];
+      for (int i = 0; i < 100; i++)
+      {
+          int aLen = m.BuildPath(s, g, path, 64);
+          int bLen = mOther.BuildPath(s, g, otherPath, 64);
+          if (aLen != bLen || aLen <= 0) { printf("FAIL: independent search lengths\n"); return 1; }
+          for (int k = 0; k < aLen; k++)
+              if (path[k] != otherPath[k])
+              { printf("FAIL: independent search path\n"); return 1; }
+      }
+      if (m.m_searchContext.nodes == mOther.m_searchContext.nodes
+          || m.m_searchContext.nodeCapacity == 0
+          || mOther.m_searchContext.nodeCapacity == 0)
+      { printf("FAIL: search context ownership\n"); return 1; }
+      const int nodeCap = m.m_searchContext.nodeCapacity;
+      const int heapCap = m.m_searchContext.heapCapacity;
+      const int frontierCap = m.m_searchContext.frontierCapacity;
+      for (int i = 0; i < 100; i++)
+          if (m.BuildPath(s, g, path, 64) <= 0)
+          { printf("FAIL: repeated search\n"); return 1; }
+      if (m.m_searchContext.nodeCapacity != nodeCap
+          || m.m_searchContext.heapCapacity != heapCap
+          || m.m_searchContext.frontierCapacity != frontierCap)
+      { printf("FAIL: search scratch grew after warm-up\n"); return 1; }
+      const unsigned int markBefore = m.m_searchContext.mark;
+      m.m_searchBusy = true;
+      int nestedLen = m.BuildPath(s, g, path, 64);
+      m.m_searchBusy = false;
+      if (nestedLen != n || m.m_searchContext.mark != markBefore)
+      { printf("FAIL: nested search used shared scratch\n"); return 1; }
+  }
 
   // Ladder records become typed directed A* edges without masquerading as
   // ordinary shared-edge portals.
@@ -622,19 +662,19 @@ int main(){
   CNavMesh mDisc;
   if (!mDisc.Load(discPath)) { printf("FAIL: disconnected load\n"); return 1; }
   {
-      unsigned int markBefore = mDisc.m_mark;
+      unsigned int markBefore = mDisc.m_searchContext.mark;
       int discRoute[8];
       if (mDisc.BuildPath(0, 1, discRoute, 8) != 0)
       { printf("FAIL: disconnected path returned a route\n"); return 1; }
       if (mDisc.LastSearchStatus() != NAV_SEARCH_COMPONENT_MISMATCH)
       { printf("FAIL: component-mismatch path status\n"); return 1; }
-      if (mDisc.m_mark != markBefore)
+      if (mDisc.m_searchContext.mark != markBefore)
       { printf("FAIL: disconnected BuildPath entered A*\n"); return 1; }
       if (mDisc.GetPathCost(0, 1, 0) >= 0.0f)
       { printf("FAIL: disconnected cost was reachable\n"); return 1; }
       if (mDisc.LastSearchStatus() != NAV_SEARCH_COMPONENT_MISMATCH)
       { printf("FAIL: component-mismatch cost status\n"); return 1; }
-      if (mDisc.m_mark != markBefore)
+      if (mDisc.m_searchContext.mark != markBefore)
       { printf("FAIL: disconnected GetPathCost entered A*\n"); return 1; }
       if (mDisc.FindClosestReachableArea(0, mDisc.Area(1)->center) != 0)
       { printf("FAIL: disconnected reachable proxy crossed components\n"); return 1; }

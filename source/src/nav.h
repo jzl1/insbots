@@ -111,11 +111,6 @@ struct NavAreaData
     // hiding & sniper spots (Phase 1 Overwatch AI)
     HidingSpot    *hidingSpots;
     int            hidingSpotCount;
-
-    // scratch for A*
-    float          g, f;
-    int            parent;
-    unsigned int   openMark, closedMark;
 };
 
 struct NavCostParams
@@ -155,14 +150,45 @@ struct NavSearchResult
     bool            truncated;
 };
 
+struct NavSearchNode
+{
+    float          g, f;
+    int            parent;
+    unsigned int   openMark, closedMark;
+};
+
+// Reusable per-mesh search scratch. A nested search gets its own local
+// context, so reentrant callers cannot corrupt an in-flight search.
+struct NavSearchContext
+{
+    NavSearchNode *nodes;
+    int            nodeCapacity;
+    int           *heap;
+    int            heapCapacity;
+    int           *frontier;
+    int            frontierCapacity;
+    unsigned int   mark;
+
+    NavSearchContext()
+        : nodes(0), nodeCapacity(0), heap(0), heapCapacity(0),
+          frontier(0), frontierCapacity(0), mark(0)
+    {
+    }
+
+private:
+    NavSearchContext(const NavSearchContext &);
+    NavSearchContext &operator=(const NavSearchContext &);
+};
+
 class CNavMesh
 {
 public:
-    CNavMesh() : m_areas(0), m_count(0), m_mark(0), m_ladders(0), m_ladderCount(0), m_sniperSpots(0), m_sniperSpotCount(0),
+    CNavMesh() : m_areas(0), m_count(0), m_ladders(0), m_ladderCount(0), m_sniperSpots(0), m_sniperSpotCount(0),
                  m_connIdx(0), m_connBad(0), m_connLadder(0), m_connMeta(0), m_connCount(0),
                  m_areaIdTable(0), m_areaIdTableSize(0),
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
                  m_sccCount(0), m_sccReachWords(0), m_sccReach(0),
+                 m_searchContext(), m_searchBusy(false),
                  m_costStamp(0), m_costSeq(0), m_costParams(), m_lastSearchStatus(NAV_SEARCH_OK)
     {
         for (int i = 0; i < 64; i++)
@@ -182,6 +208,9 @@ public:
         }
     }
     ~CNavMesh() { Free(); }
+
+    CNavMesh(const CNavMesh &) = delete;
+    CNavMesh &operator=(const CNavMesh &) = delete;
 
     bool  Load(const char *path);       // absolute or game-relative path
     void  Free();
@@ -297,7 +326,6 @@ public:
 private:
     NavAreaData *m_areas;
     int          m_count;
-    unsigned int m_mark;
     NavLadderData *m_ladders;
     int            m_ladderCount;
     HidingSpot  *m_sniperSpots;
@@ -329,6 +357,9 @@ private:
     int            m_sccReachWords;
     unsigned int  *m_sccReach;
 
+    NavSearchContext m_searchContext;
+    bool             m_searchBusy;
+
     // Off-mesh fallback result cache (FindArea). Positions are quantized
     // to ~64u so repeated queries from the same spot (stuck retries,
     // several subsystems per frame) reuse the validated tile without
@@ -356,6 +387,11 @@ private:
     void TakeState(CNavMesh &source);
     float EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const;
     bool SccReachable(int fromScc, int toScc) const;
+    NavSearchResult SearchWithContext(int startIdx, int goalIdx, int seed,
+                                      int *path, int maxLen, bool wantPath,
+                                      bool *truncated, NavSearchContext &ctx);
+    int FindClosestReachableAreaWithContext(int startIdx, const Vector &desired,
+                                            NavSearchContext &ctx);
     NavSearchResult Search(int startIdx, int goalIdx, int seed,
                            int *path, int maxLen, bool wantPath,
                            bool *truncated);

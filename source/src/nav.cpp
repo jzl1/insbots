@@ -133,6 +133,69 @@ static bool CheckedRealloc(void **target, size_t bytes)
     return true;
 }
 
+static void FreeNavSearchContext(NavSearchContext &ctx)
+{
+    if (ctx.nodes) free(ctx.nodes);
+    if (ctx.heap) free(ctx.heap);
+    if (ctx.frontier) free(ctx.frontier);
+    ctx.nodes = 0; ctx.nodeCapacity = 0;
+    ctx.heap = 0; ctx.heapCapacity = 0;
+    ctx.frontier = 0; ctx.frontierCapacity = 0;
+    ctx.mark = 0;
+}
+
+static bool EnsureSearchNodes(NavSearchContext &ctx, int count)
+{
+    if (ctx.nodeCapacity >= count) return true;
+    int capacity = ctx.nodeCapacity ? ctx.nodeCapacity : 256;
+    while (capacity < count)
+    {
+        if (capacity > 0x3FFFFFFF) { capacity = count; break; }
+        capacity *= 2;
+    }
+    NavSearchNode *nodes = (NavSearchNode *)realloc(
+        ctx.nodes, (size_t)capacity * sizeof(NavSearchNode));
+    if (!nodes) return false;
+    if (capacity > ctx.nodeCapacity)
+        memset(nodes + ctx.nodeCapacity, 0,
+               (size_t)(capacity - ctx.nodeCapacity) * sizeof(NavSearchNode));
+    ctx.nodes = nodes;
+    ctx.nodeCapacity = capacity;
+    return true;
+}
+
+static bool EnsureSearchHeap(NavSearchContext &ctx, int count)
+{
+    if (ctx.heapCapacity >= count) return true;
+    int capacity = ctx.heapCapacity ? ctx.heapCapacity : 256;
+    while (capacity < count)
+    {
+        if (capacity > 0x3FFFFFFF) { capacity = count; break; }
+        capacity *= 2;
+    }
+    int *heap = (int *)realloc(ctx.heap, (size_t)capacity * sizeof(int));
+    if (!heap) return false;
+    ctx.heap = heap;
+    ctx.heapCapacity = capacity;
+    return true;
+}
+
+static bool EnsureSearchFrontier(NavSearchContext &ctx, int count)
+{
+    if (ctx.frontierCapacity >= count) return true;
+    int capacity = ctx.frontierCapacity ? ctx.frontierCapacity : 256;
+    while (capacity < count)
+    {
+        if (capacity > 0x3FFFFFFF) { capacity = count; break; }
+        capacity *= 2;
+    }
+    int *frontier = (int *)realloc(ctx.frontier, (size_t)capacity * sizeof(int));
+    if (!frontier) return false;
+    ctx.frontier = frontier;
+    ctx.frontierCapacity = capacity;
+    return true;
+}
+
 // Every temporary allocation owned by CNavMesh::Load lives here so every
 // failure path frees the same set exactly once. All members start zeroed.
 struct NavLoadScratch
@@ -187,6 +250,8 @@ static void FreeNavLoadScratch(NavLoadScratch &s, unsigned int areaCount)
 void CNavMesh::Free()
 {
     InvalidateCostCache();
+    FreeNavSearchContext(m_searchContext);
+    m_searchBusy = false;
     if (m_areas)
     {
         for (int i = 0; i < m_count; i++)
@@ -402,7 +467,6 @@ void CNavMesh::TakeState(CNavMesh &source)
 {
     m_areas = source.m_areas;
     m_count = source.m_count;
-    m_mark = source.m_mark;
     m_ladders = source.m_ladders;
     m_ladderCount = source.m_ladderCount;
     m_sniperSpots = source.m_sniperSpots;
@@ -433,7 +497,6 @@ void CNavMesh::TakeState(CNavMesh &source)
 
     source.m_areas = 0;
     source.m_count = 0;
-    source.m_mark = 0;
     source.m_ladders = 0;
     source.m_ladderCount = 0;
     source.m_sniperSpots = 0;
@@ -2241,6 +2304,21 @@ NavSearchResult CNavMesh::Search(int startIdx, int goalIdx, int seed,
                                  int *path, int maxLen, bool wantPath,
                                  bool *truncated)
 {
+    const bool ownsContext = !m_searchBusy;
+    NavSearchContext localContext;
+    NavSearchContext &ctx = ownsContext ? m_searchContext : localContext;
+    if (ownsContext) m_searchBusy = true;
+    NavSearchResult result = SearchWithContext(
+        startIdx, goalIdx, seed, path, maxLen, wantPath, truncated, ctx);
+    if (ownsContext) m_searchBusy = false;
+    else FreeNavSearchContext(localContext);
+    return result;
+}
+
+NavSearchResult CNavMesh::SearchWithContext(int startIdx, int goalIdx, int seed,
+                                            int *path, int maxLen, bool wantPath,
+                                            bool *truncated, NavSearchContext &ctx)
+{
     NavSearchResult result;
     result.status = NAV_SEARCH_INVALID_INPUT;
     result.cost = -1.0f;
@@ -2266,35 +2344,31 @@ NavSearchResult CNavMesh::Search(int startIdx, int goalIdx, int seed,
         return result;
     }
 
-    m_mark++;
-    if (m_mark == 0) m_mark = 1;
+    ctx.mark++;
+    if (ctx.mark == 0) ctx.mark = 1;
     const Vector &goalPos = m_areas[goalIdx].center;
 
     // Binary min-heap open list with lazy deletion. Improved nodes are
     // re-pushed; stale duplicates are skipped when popped.
-    static int *open = 0;
-    static int openCap = 0;
     if ((size_t)m_count > ((size_t)0x7FFFFFFF / 2 - 16))
     {
         result.status = NAV_SEARCH_ALLOC_FAILURE;
         return result;
     }
     int need = m_count * 2 + 16;
-    if (openCap < need)
+    if (!EnsureSearchNodes(ctx, m_count) || !EnsureSearchHeap(ctx, need))
     {
-        if (!CheckedRealloc((void **)&open, (size_t)need * sizeof(int)))
-        {
-            result.status = NAV_SEARCH_ALLOC_FAILURE;
-            return result;
-        }
-        openCap = need;
+        result.status = NAV_SEARCH_ALLOC_FAILURE;
+        return result;
     }
     int openCount = 0;
     NavAreaData *A = m_areas;
-    A[startIdx].g = 0.0f;
-    A[startIdx].f = (goalPos - A[startIdx].center).Length();
-    A[startIdx].parent = -1;
-    A[startIdx].openMark = m_mark;
+    NavSearchNode *S = ctx.nodes;
+    int *open = ctx.heap;
+    S[startIdx].g = 0.0f;
+    S[startIdx].f = (goalPos - A[startIdx].center).Length();
+    S[startIdx].parent = -1;
+    S[startIdx].openMark = ctx.mark;
     open[openCount++] = startIdx;
 
     const int maxExpansions = 2000000;
@@ -2315,24 +2389,24 @@ NavSearchResult CNavMesh::Search(int startIdx, int goalIdx, int seed,
             int l = pi * 2 + 1;
             int r = l + 1;
             int smallest = pi;
-            if (l < openCount && A[open[l]].f < A[open[smallest]].f) smallest = l;
-            if (r < openCount && A[open[r]].f < A[open[smallest]].f) smallest = r;
+            if (l < openCount && S[open[l]].f < S[open[smallest]].f) smallest = l;
+            if (r < openCount && S[open[r]].f < S[open[smallest]].f) smallest = r;
             if (smallest == pi) break;
             int t = open[smallest];
             open[smallest] = open[pi];
             open[pi] = t;
             pi = smallest;
         }
-        if (A[cur].closedMark == m_mark) continue;
+        if (S[cur].closedMark == ctx.mark) continue;
 
         if (cur == goalIdx)
         {
             result.status = NAV_SEARCH_OK;
-            result.cost = A[cur].g;
+            result.cost = S[cur].g;
             if (wantPath)
             {
                 int totalNodes = 0;
-                for (int c = cur; c != -1; c = A[c].parent)
+                for (int c = cur; c != -1; c = S[c].parent)
                 {
                     if (++totalNodes > m_count)
                     {
@@ -2346,11 +2420,11 @@ NavSearchResult CNavMesh::Search(int startIdx, int goalIdx, int seed,
                 if (truncated) *truncated = result.truncated;
                 int skip = totalNodes - emitCount;
                 int c = cur;
-                for (int i = 0; i < skip; i++) c = A[c].parent;
+                for (int i = 0; i < skip; i++) c = S[c].parent;
                 for (int i = 0; i < emitCount; i++)
                 {
                     path[i] = c;
-                    c = A[c].parent;
+                    c = S[c].parent;
                 }
                 for (int i = 0; i < emitCount / 2; i++)
                 {
@@ -2363,36 +2437,35 @@ NavSearchResult CNavMesh::Search(int startIdx, int goalIdx, int seed,
             return result;
         }
 
-        A[cur].closedMark = m_mark;
+        S[cur].closedMark = ctx.mark;
         for (int k = 0; k < A[cur].connCount; k++)
         {
             int nb = A[cur].connIdx[k];
-            if (A[nb].closedMark == m_mark) continue;
+            if (S[nb].closedMark == ctx.mark) continue;
             float cost = EdgeCost(cur, nb, k, seed);
-            float g = A[cur].g + cost;
-            if (A[nb].openMark == m_mark && g >= A[nb].g) continue;
-            A[nb].g = g;
-            A[nb].f = g + (goalPos - A[nb].center).Length();
-            A[nb].parent = cur;
-            A[nb].openMark = m_mark;
+            float g = S[cur].g + cost;
+            if (S[nb].openMark == ctx.mark && g >= S[nb].g) continue;
+            S[nb].g = g;
+            S[nb].f = g + (goalPos - A[nb].center).Length();
+            S[nb].parent = cur;
+            S[nb].openMark = ctx.mark;
 
-            if (openCount >= openCap)
+            if (openCount >= ctx.heapCapacity)
             {
-                int newCap = openCap * 2 + 16;
-                if (newCap <= openCap
-                    || !CheckedRealloc((void **)&open, (size_t)newCap * sizeof(int)))
+                int newCap = ctx.heapCapacity * 2 + 16;
+                if (newCap <= ctx.heapCapacity || !EnsureSearchHeap(ctx, newCap))
                 {
                     result.status = NAV_SEARCH_ALLOC_FAILURE;
                     return result;
                 }
-                openCap = newCap;
+                open = ctx.heap;
             }
             int ci = openCount++;
             open[ci] = nb;
             while (ci > 0)
             {
                 int par = (ci - 1) >> 1;
-                if (A[open[par]].f <= A[open[ci]].f) break;
+                if (S[open[par]].f <= S[open[ci]].f) break;
                 int t = open[par];
                 open[par] = open[ci];
                 open[ci] = t;
@@ -2506,6 +2579,19 @@ static float NavAreaDistanceSq(const CNavMesh &mesh, int areaIdx, const Vector &
 
 int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
 {
+    const bool ownsContext = !m_searchBusy;
+    NavSearchContext localContext;
+    NavSearchContext &ctx = ownsContext ? m_searchContext : localContext;
+    if (ownsContext) m_searchBusy = true;
+    int result = FindClosestReachableAreaWithContext(startIdx, desired, ctx);
+    if (ownsContext) m_searchBusy = false;
+    else FreeNavSearchContext(localContext);
+    return result;
+}
+
+int CNavMesh::FindClosestReachableAreaWithContext(int startIdx, const Vector &desired,
+                                                   NavSearchContext &ctx)
+{
     if (startIdx < 0 || startIdx >= m_count || !m_areas || m_count <= 0)
         return -1;
 
@@ -2514,14 +2600,16 @@ int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
     // walking a whole weak component when the graph contains one-way edges.
     if (m_sccReach && m_gridStart && m_gridW > 0 && m_gridH > 0)
     {
-        m_mark++;
-        if (m_mark == 0) m_mark = 1;
-        const unsigned int stamp = m_mark;
+        if (!EnsureSearchNodes(ctx, m_count)) return -1;
+        ctx.mark++;
+        if (ctx.mark == 0) ctx.mark = 1;
+        const unsigned int stamp = ctx.mark;
         NavAreaData *A = m_areas;
+        NavSearchNode *S = ctx.nodes;
         const int startScc = A[startIdx].strongComponent;
         int best = startIdx;
         float bestDs = NavAreaDistanceSq(*this, startIdx, desired);
-        A[startIdx].closedMark = stamp;
+        S[startIdx].closedMark = stamp;
 
         int cx = (int)((desired.x - m_gridMinX) / m_gridCell);
         int cy = (int)((desired.y - m_gridMinY) / m_gridCell);
@@ -2549,8 +2637,8 @@ int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
                     for (int k = m_gridStart[cell]; k < m_gridStart[cell + 1]; k++)
                     {
                         const int idx = m_gridCells[k];
-                        if (A[idx].closedMark == stamp) continue;
-                        A[idx].closedMark = stamp;
+                        if (S[idx].closedMark == stamp) continue;
+                        S[idx].closedMark = stamp;
                         if (!SccReachable(startScc, A[idx].strongComponent)) continue;
                         const float ds = NavAreaDistanceSq(*this, idx, desired);
                         if (ds < bestDs || (ds == bestDs && idx < best))
@@ -2567,36 +2655,20 @@ int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
 
     // Directed fallback: weak components can contain one-way edges, so walk
     // the actual outgoing graph when mutual reachability is not guaranteed.
-    // Reusable BFS queue grown to at least m_count entries. Use the same
-    // checked-allocation pattern as BuildPath so OOM fails closed.
-    static int *frontier = 0;
-    static int frontierCap = 0;
-    if (frontierCap < m_count)
-    {
-        if (!CheckedRealloc((void **)&frontier, (size_t)m_count * sizeof(int)))
-            return -1;
-        frontierCap = m_count;
-    }
-
-    m_mark++;
-    const unsigned int stamp = m_mark;
+    if (!EnsureSearchNodes(ctx, m_count) || !EnsureSearchFrontier(ctx, m_count))
+        return -1;
+    ctx.mark++;
+    if (ctx.mark == 0) ctx.mark = 1;
+    const unsigned int stamp = ctx.mark;
     NavAreaData *A = m_areas;
+    NavSearchNode *S = ctx.nodes;
+    int *frontier = ctx.frontier;
     int head = 0, tail = 0;
-    A[startIdx].closedMark = stamp;
+    S[startIdx].closedMark = stamp;
     frontier[tail++] = startIdx;
 
     int best = startIdx;
-    float bestDs = 0.0f;
-    {
-        const NavAreaData &a = A[startIdx];
-        float x = desired.x;
-        float y = desired.y;
-        if (x < a.lo.x) x = a.lo.x; else if (x > a.hi.x) x = a.hi.x;
-        if (y < a.lo.y) y = a.lo.y; else if (y > a.hi.y) y = a.hi.y;
-        Vector closest(x, y, GetZ(startIdx, x, y));
-        Vector d = closest - desired;
-        bestDs = d.x * d.x + d.y * d.y + d.z * d.z * 4.0f;
-    }
+    float bestDs = NavAreaDistanceSq(*this, startIdx, desired);
 
     while (head < tail)
     {
@@ -2620,8 +2692,8 @@ int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
         {
             int nb = a.connIdx[k];
             if (nb < 0 || nb >= m_count) continue;
-            if (A[nb].closedMark == stamp) continue;
-            A[nb].closedMark = stamp;
+            if (S[nb].closedMark == stamp) continue;
+            S[nb].closedMark = stamp;
             frontier[tail++] = nb;
         }
     }
