@@ -1326,6 +1326,7 @@ int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int se
     if (startIdx < 0 || goalIdx < 0 || startIdx >= m_count || goalIdx >= m_count) return 0;
     if (!path || maxLen <= 0) return 0;
     if (startIdx == goalIdx) { path[0] = startIdx; return 1; }
+    if (m_areas[startIdx].component != m_areas[goalIdx].component) return 0;
 
     RefreshCostParamsFromGlobals();
     m_mark++;
@@ -1521,6 +1522,8 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
     if (startIdx == goalIdx) return 0.0f;
 
     RefreshCostParamsFromGlobals();
+    if (m_areas[startIdx].component != m_areas[goalIdx].component)
+        return -1.0f;
 
     // Deterministic (seed 0, no danger zones) queries are cached: capture
     // refill and objective picking re-ask the same pairs dozens of times per

@@ -73,6 +73,15 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
     // the path, which used to make the bot beeline straight at the point and
     // grind into a wall.
     if (end < 0) end = g_NavMesh.FindNearestArea(goal);
+    if (start >= 0 && end >= 0
+        && g_NavMesh.ComponentForArea(start) != g_NavMesh.ComponentForArea(end))
+    {
+        // A goal center can snap to a disconnected tile. Route to the nearest
+        // reachable point instead of repeatedly failing the same disconnected
+        // A* query.
+        int reachable = g_NavMesh.FindClosestReachableArea(start, goal);
+        if (reachable >= 0) end = reachable;
+    }
     if (start < 0 || end < 0)
     {
         // off-mesh right now (spawn point not covered, or goal truly off the

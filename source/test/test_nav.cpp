@@ -7,9 +7,13 @@
 struct Vector { float x,y,z; Vector(){} Vector(float a,float b,float c):x(a),y(b),z(c){}
   Vector operator-(const Vector&o)const{return Vector(x-o.x,y-o.y,z-o.z);}
   float Length()const{return sqrtf(x*x+y*y+z*z);} };
+#define private public
+#define protected public
 #define TESTING_NATIVE 1
 #include "../src/nav.h"
 #include "../src/nav.cpp"
+#undef private
+#undef protected
 
 static void put32(FILE*f,unsigned v){fwrite(&v,4,1,f);} 
 static void put16(FILE*f,unsigned short v){fwrite(&v,2,1,f);} 
@@ -151,6 +155,31 @@ static bool WriteDirectedFixture(const char *path)
     fclose(f);
     return true;
 }
+
+// Two isolated areas: no path exists and neither area shares a component.
+static bool WriteDisconnectedFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345); // magic, version, bspsize
+    put16(f, 0);                                        // no places
+    put32(f, 2);                                        // areas
+    for (unsigned int i = 0; i < 2; i++)
+    {
+        put32(f, i + 1); put16(f, 0);
+        putf(f, i * 100.0f); putf(f, 0); putf(f, 0);
+        putf(f, i * 100.0f + 100.0f); putf(f, 100); putf(f, 0);
+        putf(f, 0); putf(f, 0);
+        for (int d = 0; d < 4; d++) put32(f, 0);
+        put8(f, 0); put8(f, 0); put32(f, 0); put16(f, 0);
+        put32(f, 0); put32(f, 0);
+        putf(f, 1.f); putf(f, 2.f);
+    }
+    put32(f, 0); // no ladders
+    fclose(f);
+    return true;
+}
+
 int main(){
   // build a 3x3 grid of 100x100 areas, 4-connected
   const char *navPath="test_nav.tmp";
@@ -318,6 +347,24 @@ int main(){
       if (ps != 3) { printf("FAIL: protected start proxy=%d\n", ps); return 1; }
   }
   remove(dirPath);
+    // Component fast-reject: a disconnected goal must not enter A*.
+  const char *discPath = "test_nav_disconnected.tmp";
+  if (!WriteDisconnectedFixture(discPath)) { printf("FAIL: write disconnected fixture\n"); return 1; }
+  CNavMesh mDisc;
+  if (!mDisc.Load(discPath)) { printf("FAIL: disconnected load\n"); return 1; }
+  {
+      unsigned int markBefore = mDisc.m_mark;
+      int discRoute[8];
+      if (mDisc.BuildPath(0, 1, discRoute, 8) != 0)
+      { printf("FAIL: disconnected path returned a route\n"); return 1; }
+      if (mDisc.m_mark != markBefore)
+      { printf("FAIL: disconnected BuildPath entered A*\n"); return 1; }
+      if (mDisc.GetPathCost(0, 1, 0) >= 0.0f)
+      { printf("FAIL: disconnected cost was reachable\n"); return 1; }
+      if (mDisc.m_mark != markBefore)
+      { printf("FAIL: disconnected GetPathCost entered A*\n"); return 1; }
+  }
+  remove(discPath);
     // --- NAVATTR_AVOID (0x0080) verification ---
   const char *normalForkPath = "test_nav_fork_norm.tmp";
   WriteForkFixture(normalForkPath, 0);
