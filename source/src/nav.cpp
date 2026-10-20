@@ -200,6 +200,7 @@ void CNavMesh::Free()
     if (m_connLadder) free(m_connLadder);
     if (m_connMeta) free(m_connMeta);
     if (m_areaIdTable) free(m_areaIdTable);
+    if (m_sccReach) free(m_sccReach);
     if (m_sniperSpots) free(m_sniperSpots);
     if (m_ladders) free(m_ladders);
     if (m_gridStart) free(m_gridStart);
@@ -208,6 +209,7 @@ void CNavMesh::Free()
     m_connIdx = 0; m_connBad = 0; m_connLadder = 0; m_connMeta = 0;
     m_connCount = 0;
     m_areaIdTable = 0; m_areaIdTableSize = 0;
+    m_sccCount = 0; m_sccReachWords = 0; m_sccReach = 0;
     m_sniperSpots = 0; m_sniperSpotCount = 0;
     m_gridStart = 0; m_gridCells = 0;
     m_gridW = m_gridH = 0;
@@ -287,7 +289,10 @@ int CNavMesh::IndexOfId(unsigned int id) const
 // cells.
 void CNavMesh::BuildGrid()
 {
-    const float CELL = 512.0f;
+#ifndef NAV_GRID_CELL_SIZE
+#define NAV_GRID_CELL_SIZE 256.0f
+#endif
+    const float CELL = NAV_GRID_CELL_SIZE;
     if (m_gridStart) { free(m_gridStart); m_gridStart = 0; }
     if (m_gridCells) { free(m_gridCells); m_gridCells = 0; }
     m_gridW = m_gridH = 0;
@@ -409,6 +414,9 @@ void CNavMesh::TakeState(CNavMesh &source)
     m_connCount = source.m_connCount;
     m_areaIdTable = source.m_areaIdTable;
     m_areaIdTableSize = source.m_areaIdTableSize;
+    m_sccCount = source.m_sccCount;
+    m_sccReachWords = source.m_sccReachWords;
+    m_sccReach = source.m_sccReach;
     m_gridW = source.m_gridW;
     m_gridH = source.m_gridH;
     m_gridMinX = source.m_gridMinX;
@@ -437,6 +445,9 @@ void CNavMesh::TakeState(CNavMesh &source)
     source.m_connCount = 0;
     source.m_areaIdTable = 0;
     source.m_areaIdTableSize = 0;
+    source.m_sccCount = 0;
+    source.m_sccReachWords = 0;
+    source.m_sccReach = 0;
     source.m_gridW = source.m_gridH = 0;
     source.m_gridMinX = source.m_gridMinY = 0.0f;
     source.m_gridCell = 0.0f;
@@ -924,6 +935,167 @@ bool CNavMesh::LoadInPlace(const char *path)
         m_areas[i].component = componentRoot;
     }
     free(componentParent);
+
+    // Strongly connected components: equal SCC ids mean a directed route
+    // exists in both directions, so the common same-component lookup can skip
+    // the full forward BFS entirely.
+    int *sccIndex = (int *)malloc((size_t)m_count * sizeof(int));
+    int *sccVisited = (int *)calloc((size_t)m_count, sizeof(int));
+    int *dfsOrder = (int *)malloc((size_t)m_count * sizeof(int));
+    int *dfsStack = (int *)malloc((size_t)m_count * sizeof(int));
+    int *dfsEdge = (int *)malloc((size_t)m_count * sizeof(int));
+    if (!sccIndex || !sccVisited || !dfsOrder || !dfsStack || !dfsEdge)
+    {
+        free(sccIndex); free(sccVisited); free(dfsOrder); free(dfsStack); free(dfsEdge);
+        NAVLOAD_ERR("[insbots] nav load failed: out of memory building strong components\n");
+        Free();
+        return false;
+    }
+
+    int orderCount = 0;
+    for (int root = 0; root < m_count; root++)
+    {
+        if (sccVisited[root]) continue;
+        int depth = 0;
+        dfsStack[0] = root;
+        dfsEdge[0] = 0;
+        sccVisited[root] = 1;
+        while (depth >= 0)
+        {
+            const int node = dfsStack[depth];
+            int &edge = dfsEdge[depth];
+            if (edge < m_areas[node].connCount)
+            {
+                const int nb = m_areas[node].connIdx[edge++];
+                if (nb >= 0 && nb < m_count && !sccVisited[nb])
+                {
+                    sccVisited[nb] = 1;
+                    dfsStack[++depth] = nb;
+                    dfsEdge[depth] = 0;
+                }
+                continue;
+            }
+            dfsOrder[orderCount++] = node;
+            depth--;
+        }
+    }
+
+    int *revCount = (int *)calloc((size_t)m_count, sizeof(int));
+    int *revOffset = (int *)malloc((size_t)(m_count + 1) * sizeof(int));
+    int *revEdges = (int *)malloc((size_t)(m_connCount > 0 ? m_connCount : 1) * sizeof(int));
+    int *revCursor = (int *)malloc((size_t)m_count * sizeof(int));
+    int *sccStack = (int *)malloc((size_t)m_count * sizeof(int));
+    if (!revCount || !revOffset || !revEdges || !revCursor || !sccStack)
+    {
+        free(sccIndex); free(sccVisited); free(dfsOrder); free(dfsStack); free(dfsEdge);
+        free(revCount); free(revOffset); free(revEdges); free(revCursor); free(sccStack);
+        NAVLOAD_ERR("[insbots] nav load failed: out of memory building reverse edges\n");
+        Free();
+        return false;
+    }
+    for (int i = 0; i < m_count; i++)
+    {
+        for (int c = 0; c < m_areas[i].connCount; c++)
+        {
+            const int nb = m_areas[i].connIdx[c];
+            if (nb >= 0 && nb < m_count) revCount[nb]++;
+        }
+    }
+    revOffset[0] = 0;
+    for (int i = 0; i < m_count; i++) revOffset[i + 1] = revOffset[i] + revCount[i];
+    memcpy(revCursor, revOffset, (size_t)m_count * sizeof(int));
+    for (int i = 0; i < m_count; i++)
+    {
+        for (int c = 0; c < m_areas[i].connCount; c++)
+        {
+            const int nb = m_areas[i].connIdx[c];
+            if (nb >= 0 && nb < m_count) revEdges[revCursor[nb]++] = i;
+        }
+    }
+    for (int i = 0; i < m_count; i++) sccIndex[i] = -1;
+
+    int sccCount = 0;
+    for (int oi = m_count - 1; oi >= 0; oi--)
+    {
+        const int root = dfsOrder[oi];
+        if (sccIndex[root] >= 0) continue;
+        int depth = 0;
+        sccStack[depth++] = root;
+        sccIndex[root] = sccCount;
+        while (depth > 0)
+        {
+            const int node = sccStack[--depth];
+            for (int e = revOffset[node]; e < revOffset[node + 1]; e++)
+            {
+                const int src = revEdges[e];
+                if (sccIndex[src] >= 0) continue;
+                sccIndex[src] = sccCount;
+                sccStack[depth++] = src;
+            }
+        }
+        sccCount++;
+    }
+    for (int i = 0; i < m_count; i++) m_areas[i].strongComponent = sccIndex[i];
+
+    m_sccCount = sccCount;
+    m_sccReachWords = 0;
+    m_sccReach = 0;
+    if (sccCount <= 512)
+    {
+        m_sccReachWords = (sccCount + 31) / 32;
+        m_sccReach = (unsigned int *)calloc(
+            (size_t)sccCount * (size_t)m_sccReachWords, sizeof(unsigned int));
+        unsigned char *sccAdj = (unsigned char *)calloc(
+            (size_t)sccCount * (size_t)sccCount, sizeof(unsigned char));
+        int *sccStack2 = (int *)malloc((size_t)sccCount * sizeof(int));
+        unsigned char *sccSeen = (unsigned char *)calloc((size_t)sccCount, sizeof(unsigned char));
+        if (!m_sccReach || !sccAdj || !sccStack2 || !sccSeen)
+        {
+            free(m_sccReach); m_sccReach = 0;
+            free(sccAdj); free(sccStack2); free(sccSeen);
+            free(sccIndex); free(sccVisited); free(dfsOrder); free(dfsStack); free(dfsEdge);
+            free(revCount); free(revOffset); free(revEdges); free(revCursor); free(sccStack);
+            NAVLOAD_ERR("[insbots] nav load failed: out of memory building SCC reachability\n");
+            Free();
+            return false;
+        }
+        for (int i = 0; i < m_count; i++)
+        {
+            const int from = m_areas[i].strongComponent;
+            for (int c = 0; c < m_areas[i].connCount; c++)
+            {
+                const int nb = m_areas[i].connIdx[c];
+                if (nb < 0 || nb >= m_count) continue;
+                const int to = m_areas[nb].strongComponent;
+                if (from != to) sccAdj[from * sccCount + to] = 1;
+            }
+        }
+        for (int from = 0; from < sccCount; from++)
+        {
+            memset(sccSeen, 0, (size_t)sccCount);
+            int depth = 0;
+            sccStack2[depth++] = from;
+            sccSeen[from] = 1;
+            while (depth > 0)
+            {
+                const int node = sccStack2[--depth];
+                m_sccReach[from * m_sccReachWords + (node >> 5)]
+                    |= (1u << (node & 31));
+                for (int to = 0; to < sccCount; to++)
+                {
+                    if (sccAdj[node * sccCount + to] && !sccSeen[to])
+                    {
+                        sccSeen[to] = 1;
+                        sccStack2[depth++] = to;
+                    }
+                }
+            }
+        }
+        free(sccAdj); free(sccStack2); free(sccSeen);
+    }
+
+    free(sccIndex); free(sccVisited); free(dfsOrder); free(dfsStack); free(dfsEdge);
+    free(revCount); free(revOffset); free(revEdges); free(revCursor); free(sccStack);
 
     // ---- Build Global Sniper Candidate Directory ----
     // Keep annotated and generated candidates together.  Objective-specific
@@ -2309,11 +2481,92 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
     return result.status == NAV_SEARCH_OK ? result.cost : -1.0f;
 }
 
+bool CNavMesh::SccReachable(int fromScc, int toScc) const
+{
+    if (!m_sccReach || m_sccReachWords <= 0
+        || fromScc < 0 || fromScc >= m_sccCount
+        || toScc < 0 || toScc >= m_sccCount)
+        return false;
+    return (m_sccReach[fromScc * m_sccReachWords + (toScc >> 5)]
+            & (1u << (toScc & 31))) != 0;
+}
+
+static float NavAreaDistanceSq(const CNavMesh &mesh, int areaIdx, const Vector &desired)
+{
+    const NavAreaData *a = mesh.Area(areaIdx);
+    if (!a) return 3.4e38f;
+    float x = desired.x;
+    float y = desired.y;
+    if (x < a->lo.x) x = a->lo.x; else if (x > a->hi.x) x = a->hi.x;
+    if (y < a->lo.y) y = a->lo.y; else if (y > a->hi.y) y = a->hi.y;
+    Vector closest(x, y, mesh.GetZ(areaIdx, x, y));
+    Vector d = closest - desired;
+    return d.x * d.x + d.y * d.y + d.z * d.z * 4.0f;
+}
+
 int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
 {
     if (startIdx < 0 || startIdx >= m_count || !m_areas || m_count <= 0)
         return -1;
 
+    // Component-aware spatial fallback: ring outward through the existing grid
+    // and keep only areas whose SCC is reachable from the start. This avoids
+    // walking a whole weak component when the graph contains one-way edges.
+    if (m_sccReach && m_gridStart && m_gridW > 0 && m_gridH > 0)
+    {
+        m_mark++;
+        if (m_mark == 0) m_mark = 1;
+        const unsigned int stamp = m_mark;
+        NavAreaData *A = m_areas;
+        const int startScc = A[startIdx].strongComponent;
+        int best = startIdx;
+        float bestDs = NavAreaDistanceSq(*this, startIdx, desired);
+        A[startIdx].closedMark = stamp;
+
+        int cx = (int)((desired.x - m_gridMinX) / m_gridCell);
+        int cy = (int)((desired.y - m_gridMinY) / m_gridCell);
+        if (cx < 0) cx = 0; else if (cx >= m_gridW) cx = m_gridW - 1;
+        if (cy < 0) cy = 0; else if (cy >= m_gridH) cy = m_gridH - 1;
+        const int maxRing = (m_gridW > m_gridH) ? m_gridW : m_gridH;
+        for (int ring = 0; ring < maxRing; ring++)
+        {
+            if (ring > 0)
+            {
+                const float lower = (float)(ring - 1) * m_gridCell;
+                if (lower * lower > bestDs) break;
+            }
+            const int x0 = cx - ring, x1 = cx + ring;
+            const int y0 = cy - ring, y1 = cy + ring;
+            for (int yy = y0; yy <= y1; yy++)
+            {
+                if (yy < 0 || yy >= m_gridH) continue;
+                for (int xx = x0; xx <= x1; xx++)
+                {
+                    if (xx < 0 || xx >= m_gridW) continue;
+                    if (ring > 0 && xx != x0 && xx != x1 && yy != y0 && yy != y1)
+                        continue;
+                    const int cell = yy * m_gridW + xx;
+                    for (int k = m_gridStart[cell]; k < m_gridStart[cell + 1]; k++)
+                    {
+                        const int idx = m_gridCells[k];
+                        if (A[idx].closedMark == stamp) continue;
+                        A[idx].closedMark = stamp;
+                        if (!SccReachable(startScc, A[idx].strongComponent)) continue;
+                        const float ds = NavAreaDistanceSq(*this, idx, desired);
+                        if (ds < bestDs || (ds == bestDs && idx < best))
+                        {
+                            bestDs = ds;
+                            best = idx;
+                        }
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    // Directed fallback: weak components can contain one-way edges, so walk
+    // the actual outgoing graph when mutual reachability is not guaranteed.
     // Reusable BFS queue grown to at least m_count entries. Use the same
     // checked-allocation pattern as BuildPath so OOM fails closed.
     static int *frontier = 0;
@@ -2373,22 +2626,4 @@ int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
         }
     }
     return best;
-}
-// Phase 1: Query nearby tactical sniper overlooks within maxDist of origin
-int CNavMesh::GetSniperSpots(const Vector &origin, float maxDist, HidingSpot *outSpots, int maxOut) const
-{
-    if (!m_sniperSpots || m_sniperSpotCount <= 0 || maxOut <= 0 || !outSpots) return 0;
-    float maxDistSq = maxDist * maxDist;
-    int found = 0;
-    for (int i = 0; i < m_sniperSpotCount && found < maxOut; i++)
-    {
-        float dx = m_sniperSpots[i].pos.x - origin.x;
-        float dy = m_sniperSpots[i].pos.y - origin.y;
-        float dz = m_sniperSpots[i].pos.z - origin.z;
-        if (dx * dx + dy * dy + dz * dz <= maxDistSq)
-        {
-            outSpots[found++] = m_sniperSpots[i];
-        }
-    }
-    return found;
 }

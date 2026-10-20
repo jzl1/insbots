@@ -106,6 +106,7 @@ struct NavAreaData
     int            connCount;
     int            ladderConnCount; // nonzero when this area is a ladder endpoint
     int            component;       // weak connected component for cheap reachability rejection
+    int            strongComponent; // SCC id: equal ids guarantee mutual reachability
 
     // hiding & sniper spots (Phase 1 Overwatch AI)
     HidingSpot    *hidingSpots;
@@ -161,6 +162,7 @@ public:
                  m_connIdx(0), m_connBad(0), m_connLadder(0), m_connMeta(0), m_connCount(0),
                  m_areaIdTable(0), m_areaIdTableSize(0),
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
+                 m_sccCount(0), m_sccReachWords(0), m_sccReach(0),
                  m_costStamp(0), m_costSeq(0), m_costParams(), m_lastSearchStatus(NAV_SEARCH_OK)
     {
         for (int i = 0; i < 64; i++)
@@ -285,8 +287,7 @@ public:
 
     int   RandomArea() const;
 
-    // Phase 1 Sniper & Overwatch Support: query nearby tactical overlooks
-    int   GetSniperSpots(const Vector &origin, float maxDist, HidingSpot *outSpots, int maxOut) const;
+    // Phase 1 Sniper & Overwatch Support: global candidate directory
     int   GetTotalSniperSpotCount() const { return m_sniperSpotCount; }
     const HidingSpot *GetSniperSpot(int idx) const
         { return (idx >= 0 && idx < m_sniperSpotCount) ? &m_sniperSpots[idx] : 0; }
@@ -322,6 +323,12 @@ private:
     int           *m_areaIdTable;
     int            m_areaIdTableSize;
 
+    // SCC condensation reachability. Only built when the SCC count is small
+    // enough for a compact bit matrix; larger graphs use the exact BFS fallback.
+    int            m_sccCount;
+    int            m_sccReachWords;
+    unsigned int  *m_sccReach;
+
     // Off-mesh fallback result cache (FindArea). Positions are quantized
     // to ~64u so repeated queries from the same spot (stuck retries,
     // several subsystems per frame) reuse the validated tile without
@@ -348,6 +355,7 @@ private:
     bool LoadInPlace(const char *path);
     void TakeState(CNavMesh &source);
     float EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const;
+    bool SccReachable(int fromScc, int toScc) const;
     NavSearchResult Search(int startIdx, int goalIdx, int seed,
                            int *path, int maxLen, bool wantPath,
                            bool *truncated);

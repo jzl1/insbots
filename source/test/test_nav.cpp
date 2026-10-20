@@ -418,6 +418,11 @@ int main(){
   int g=m.FindArea(Vector(290,290,0));     // area 9 (2,2)
   printf("start=%d(id=%u) goal=%d(id=%u)\n",s,m.Area(s)->id,g,m.Area(g)->id);
   if(s<0 || m.Area(s)->id!=1){printf("FAIL: surface-area lookup\n");return 1;}
+  {
+      int reachable = m.FindClosestReachableArea(s, m.Area(g)->center);
+      if (reachable != g)
+      { printf("FAIL: same-SCC reachable result=%d\n", reachable); return 1; }
+  }
   int path[64]; int n=m.BuildPath(s,g,path,64);
   printf("path len=%d:",n); for(int i=0;i<n;i++)printf(" %d(id=%u)",path[i],m.Area(path[i])->id); printf("\n");
   if(n<5){printf("FAIL: path\n");return 1;}
@@ -592,6 +597,9 @@ int main(){
   CNavMesh md;
   if (!md.Load(dirPath)) { printf("FAIL: directed load\n"); return 1; }
   if (md.Count() != 4) { printf("FAIL: directed count\n"); return 1; }
+  if (md.Area(0)->component != md.Area(3)->component
+      || md.Area(0)->strongComponent == md.Area(3)->strongComponent)
+  { printf("FAIL: directed weak/SCC classification\n"); return 1; }
   {
       int dpath[16];
       if (md.BuildPath(0, 3, dpath, 16) != 0) { printf("FAIL: protected route must be zero\n"); return 1; }
@@ -604,6 +612,8 @@ int main(){
       if (pn <= 0 || dpath[pn - 1] != 2) { printf("FAIL: proxy path len=%d\n", pn); return 1; }
       int ps = md.FindClosestReachableArea(3, desired);
       if (ps != 3) { printf("FAIL: protected start proxy=%d\n", ps); return 1; }
+      if (md.FindClosestReachableArea(0, md.Area(3)->center) != 2)
+      { printf("FAIL: directed fallback crossed SCC boundary\n"); return 1; }
   }
   remove(dirPath);
     // Component fast-reject: a disconnected goal must not enter A*.
@@ -626,8 +636,17 @@ int main(){
       { printf("FAIL: component-mismatch cost status\n"); return 1; }
       if (mDisc.m_mark != markBefore)
       { printf("FAIL: disconnected GetPathCost entered A*\n"); return 1; }
+      if (mDisc.FindClosestReachableArea(0, mDisc.Area(1)->center) != 0)
+      { printf("FAIL: disconnected reachable proxy crossed components\n"); return 1; }
+      if (mDisc.FindClosestReachableArea(0, Vector(100000.0f, 100000.0f, 0.0f)) != 0)
+      { printf("FAIL: out-of-map reachable proxy\n"); return 1; }
   }
   remove(discPath);
+  {
+      CNavMesh mEmpty;
+      if (mEmpty.FindClosestReachableArea(0, Vector(0.0f, 0.0f, 0.0f)) != -1)
+      { printf("FAIL: empty mesh reachable proxy\n"); return 1; }
+  }
     // Attribute semantics: NO_JUMP denies generic jump output from that area;
     // PRECISE and UNDERWATER remain parsed and documented (the latter drives
     // the bot water-speed path in bot_think.cpp).

@@ -69,8 +69,9 @@ static SampleStats Compute(const std::vector<double> &v)
     std::vector<double> c = v;
     std::sort(c.begin(), c.end());
     s.med = c[c.size() / 2];
-    s.p95 = c[(size_t)(c.size() * 0.95)];
-    if (s.p95 < c[c.size() - 1]) s.p95 = c[c.size() - 1];
+    size_t p95Index = (size_t)(c.size() * 0.95);
+    if (p95Index >= c.size()) p95Index = c.size() - 1;
+    s.p95 = c[p95Index];
     return s;
 }
 
@@ -250,14 +251,51 @@ static void RunFind(CNavMesh &m)
         pts.push_back(Vector(px, py, pz));
     }
     volatile int sink = 0;
+    const int batch = 100;
+    std::vector<double> areaSamples, nearestSamples;
     double t0 = NowMs();
-    for (int i = 0; i < N; i++) sink += m.FindArea(pts[i]);
-    double ta = NowMs() - t0;
+    sink += m.FindArea(pts[0]);
+    const double areaCold = (NowMs() - t0) * 1000.0;
+    for (int i = 0; i < N; i += batch)
+    {
+        t0 = NowMs();
+        for (int k = 0; k < batch; k++) sink += m.FindArea(pts[i + k]);
+        areaSamples.push_back((NowMs() - t0) * 1000.0 / batch);
+    }
     t0 = NowMs();
-    for (int i = 0; i < N; i++) sink += m.FindNearestArea(pts[i]);
-    double tn = NowMs() - t0;
-    printf("FindArea: %.3f us/call  | FindNearestArea: %.3f us/call  (sink=%d)\n",
-           ta * 1000.0 / N, tn * 1000.0 / N, sink);
+    sink += m.FindNearestArea(pts[0]);
+    const double nearestCold = (NowMs() - t0) * 1000.0;
+    for (int i = 0; i < N; i += batch)
+    {
+        t0 = NowMs();
+        for (int k = 0; k < batch; k++) sink += m.FindNearestArea(pts[i + k]);
+        nearestSamples.push_back((NowMs() - t0) * 1000.0 / batch);
+    }
+    SampleStats area = Compute(areaSamples), nearest = Compute(nearestSamples);
+    printf("FindArea: cold=%.3f us | warm avg=%.3f med=%.3f p95=%.3f max=%.3f us/call\n",
+           areaCold, area.avg, area.med, area.p95, area.max);
+    printf("FindNearestArea: cold=%.3f us | warm avg=%.3f med=%.3f p95=%.3f max=%.3f us/call\n",
+           nearestCold, nearest.avg, nearest.med, nearest.p95, nearest.max);
+    printf("    sink=%d, samples=%d batches of %d\n", sink, (int)areaSamples.size(), batch);
+}
+
+static void RunReachable(CNavMesh &m, int iters)
+{
+    std::vector<double> ms;
+    int ok = 0, fail = 0;
+    for (int i = 0; i < iters; i++)
+    {
+        int s = (int)(Rand() % (unsigned)m.Count());
+        int g = (int)(Rand() % (unsigned)m.Count());
+        double t0 = NowMs();
+        int r = m.FindClosestReachableArea(s, m.Area(g)->center);
+        double dt = NowMs() - t0;
+        if (r >= 0) ok++; else fail++;
+        ms.push_back(dt);
+    }
+    SampleStats s = Compute(ms);
+    printf("reachable-area: ok=%d fail=%d ms avg=%.4f med=%.4f p95=%.4f max=%.4f\n",
+           ok, fail, s.avg, s.med, s.p95, s.max);
 }
 
 static void MeshSummary(CNavMesh &m)
@@ -365,5 +403,7 @@ int main(int argc, char **argv)
         RunCost(m, iters);
     if (strcmp(scenario, "find") == 0 || strcmp(scenario, "all") == 0)
         RunFind(m);
+    if (strcmp(scenario, "reachable") == 0)
+        RunReachable(m, iters);
     return 0;
 }
