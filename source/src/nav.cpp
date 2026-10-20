@@ -196,6 +196,17 @@ static bool EnsureSearchFrontier(NavSearchContext &ctx, int count)
     return true;
 }
 
+static void AdvanceSearchMark(NavSearchContext &ctx)
+{
+    ctx.mark++;
+    if (ctx.mark == 0)
+    {
+        if (ctx.nodes)
+            memset(ctx.nodes, 0, (size_t)ctx.nodeCapacity * sizeof(NavSearchNode));
+        ctx.mark = 1;
+    }
+}
+
 // Every temporary allocation owned by CNavMesh::Load lives here so every
 // failure path frees the same set exactly once. All members start zeroed.
 struct NavLoadScratch
@@ -364,7 +375,10 @@ void CNavMesh::BuildGrid()
     m_gridCell = CELL;
 
     if (!m_areas || m_count <= 0)
+    {
+        NAVLOAD_ERR("[insbots] spatial grid disabled: no nav areas\n");
         return;
+    }
 
     float minX = m_areas[0].lo.x, maxX = m_areas[0].hi.x;
     float minY = m_areas[0].lo.y, maxY = m_areas[0].hi.y;
@@ -389,10 +403,19 @@ void CNavMesh::BuildGrid()
 
     const int cellCount = w * h;
     int *counts = (int *)calloc(cellCount, sizeof(int));
-    if (!counts) return;
+    if (!counts)
+    {
+        NAVLOAD_ERR("[insbots] spatial grid disabled: count allocation failed\n");
+        return;
+    }
 
     m_gridStart = (int *)malloc((cellCount + 1) * sizeof(int));
-    if (!m_gridStart) { free(counts); return; }
+    if (!m_gridStart)
+    {
+        free(counts);
+        NAVLOAD_ERR("[insbots] spatial grid disabled: offset allocation failed\n");
+        return;
+    }
 
     m_gridW = w; m_gridH = h;
     m_gridMinX = minX; m_gridMinY = minY;
@@ -406,18 +429,41 @@ void CNavMesh::BuildGrid()
         int y1 = (int)((a.hi.y - minY) / CELL); if (y1 < 0) y1 = 0; else if (y1 >= h) y1 = h - 1;
         for (int cy = y0; cy <= y1; cy++)
             for (int cx = x0; cx <= x1; cx++)
+            {
+                if (counts[cy * w + cx] == 0x7FFFFFFF)
+                {
+                    free(counts); free(m_gridStart);
+                    m_gridStart = 0; m_gridW = m_gridH = 0;
+                    NAVLOAD_ERR("[insbots] spatial grid disabled: cell count overflow\n");
+                    return;
+                }
                 counts[cy * w + cx]++;
+            }
     }
 
     int total = 0;
     for (int c = 0; c < cellCount; c++)
     {
+        if (counts[c] > 0x7FFFFFFF - total)
+        {
+            free(counts); free(m_gridStart);
+            m_gridStart = 0; m_gridW = m_gridH = 0;
+            NAVLOAD_ERR("[insbots] spatial grid disabled: total count overflow\n");
+            return;
+        }
         m_gridStart[c] = total;
         total += counts[c];
     }
     m_gridStart[cellCount] = total;
 
-    m_gridCells = (int *)malloc(total * sizeof(int));
+    if (total > 0x7FFFFFFF / (int)sizeof(int))
+    {
+        free(counts); free(m_gridStart);
+        m_gridStart = 0; m_gridW = m_gridH = 0;
+        NAVLOAD_ERR("[insbots] spatial grid disabled: cell storage overflow\n");
+        return;
+    }
+    m_gridCells = (int *)malloc((size_t)total * sizeof(int));
     int *cursor = 0;
     if (m_gridCells)
     {
@@ -431,6 +477,7 @@ void CNavMesh::BuildGrid()
     {
         free(counts); free(m_gridStart); m_gridStart = 0;
         m_gridW = m_gridH = 0;
+        NAVLOAD_ERR("[insbots] spatial grid disabled: cell allocation failed\n");
         return;
     }
     memcpy(cursor, m_gridStart, cellCount * sizeof(int));
@@ -2065,7 +2112,13 @@ bool CNavMesh::SaveBadLinks(const char *path) const
         // The loader stores at most 512 resolved links per area. Treat anything
         // outside that invariant as damaged state instead of walking past either
         // allocation during the timed save.
-        if (!a.connBad || !a.connIdx || a.connCount <= 0 || a.connCount > 512) continue;
+        // Ladder edges are appended after the serialized connection set, so a
+        // valid area can have more than 512 resolved connections. The flat
+        // arrays are sized from connOffset + connCount; validate that span
+        // instead of applying the old serialized-count limit here.
+        if (!a.connBad || !a.connIdx || a.connCount <= 0
+            || a.connOffset < 0 || a.connCount > m_connCount - a.connOffset)
+            continue;
         for (int k = 0; k < a.connCount; k++)
         {
             // One report is tentative runtime evidence. Persist only a link
@@ -2098,9 +2151,10 @@ int CNavMesh::LoadBadLinks(const char *path)
     while (fgets(line, sizeof(line), fp))
     {
         if (line[0] == '#' || line[0] == '\n') continue;
-        unsigned int fromId = 0, toId = 0; int cnt = 0;
-        if (sscanf(line, "%u %u %d", &fromId, &toId, &cnt) != 3) continue;
-        if (cnt <= 0) continue;
+        unsigned int fromId = 0, toId = 0; long cntValue = 0;
+        if (sscanf(line, "%u %u %ld", &fromId, &toId, &cntValue) != 3) continue;
+        if (cntValue <= 0) continue;
+        int cnt = cntValue > 255 ? 255 : (int)cntValue;
         int fi = IndexOfId(fromId), ti = IndexOfId(toId);
         if (fi < 0 || ti < 0) continue;
         NavAreaData &a = m_areas[fi];
@@ -2108,8 +2162,9 @@ int CNavMesh::LoadBadLinks(const char *path)
         for (int k = 0; k < a.connCount; k++)
             if (a.connIdx[k] == ti)
             {
-                int v = (int)a.connBad[k] + cnt;
-                a.connBad[k] = (unsigned char)(v > 255 ? 255 : v);
+                int current = (int)a.connBad[k];
+                int next = (current > 255 - cnt) ? 255 : current + cnt;
+                a.connBad[k] = (unsigned char)next;
                 applied++;
                 break;
             }
@@ -2344,8 +2399,6 @@ NavSearchResult CNavMesh::SearchWithContext(int startIdx, int goalIdx, int seed,
         return result;
     }
 
-    ctx.mark++;
-    if (ctx.mark == 0) ctx.mark = 1;
     const Vector &goalPos = m_areas[goalIdx].center;
 
     // Binary min-heap open list with lazy deletion. Improved nodes are
@@ -2361,6 +2414,7 @@ NavSearchResult CNavMesh::SearchWithContext(int startIdx, int goalIdx, int seed,
         result.status = NAV_SEARCH_ALLOC_FAILURE;
         return result;
     }
+    AdvanceSearchMark(ctx);
     int openCount = 0;
     NavAreaData *A = m_areas;
     NavSearchNode *S = ctx.nodes;
@@ -2526,7 +2580,8 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
     NavSearchResult result = Search(startIdx, goalIdx, seed, 0, 0, false, 0);
     m_lastSearchStatus = result.status;
     if (seed == 0 && !m_costParams.dangerEnabled
-        && result.status != NAV_SEARCH_ALLOC_FAILURE)
+        && result.status != NAV_SEARCH_ALLOC_FAILURE
+        && result.status != NAV_SEARCH_EXPANSION_LIMIT)
     {
         int slot = -1;
         unsigned int oldestSeq = 0xFFFFFFFFu;
@@ -2601,8 +2656,7 @@ int CNavMesh::FindClosestReachableAreaWithContext(int startIdx, const Vector &de
     if (m_sccReach && m_gridStart && m_gridW > 0 && m_gridH > 0)
     {
         if (!EnsureSearchNodes(ctx, m_count)) return -1;
-        ctx.mark++;
-        if (ctx.mark == 0) ctx.mark = 1;
+        AdvanceSearchMark(ctx);
         const unsigned int stamp = ctx.mark;
         NavAreaData *A = m_areas;
         NavSearchNode *S = ctx.nodes;
@@ -2657,8 +2711,7 @@ int CNavMesh::FindClosestReachableAreaWithContext(int startIdx, const Vector &de
     // the actual outgoing graph when mutual reachability is not guaranteed.
     if (!EnsureSearchNodes(ctx, m_count) || !EnsureSearchFrontier(ctx, m_count))
         return -1;
-    ctx.mark++;
-    if (ctx.mark == 0) ctx.mark = 1;
+    AdvanceSearchMark(ctx);
     const unsigned int stamp = ctx.mark;
     NavAreaData *A = m_areas;
     NavSearchNode *S = ctx.nodes;

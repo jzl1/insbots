@@ -168,7 +168,6 @@ void CInsBot::OnRelocated(const char *reason)
 {
     ResetDoorwayRunway();
     m_bestDist = 3.4e38f;
-    ResetDoorwayRunway();
 
     m_pathLen = 0;
     m_pathResult = BOT_PATH_NONE;

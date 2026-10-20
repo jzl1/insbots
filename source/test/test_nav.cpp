@@ -466,6 +466,18 @@ int main(){
       if (nestedLen != n || m.m_searchContext.mark != markBefore)
       { printf("FAIL: nested search used shared scratch\n"); return 1; }
   }
+  {
+      bool truncated = true;
+      int badPath[4];
+      if (m.BuildPath(-1, 0, badPath, 4, 0, &truncated) != 0 || truncated)
+      { printf("FAIL: invalid BuildPath left truncated set\n"); return 1; }
+      if (m.GetZ(-1, 0.0f, 0.0f) != 0.0f
+          || m.GetZ(m.Count(), 0.0f, 0.0f) != 0.0f)
+      { printf("FAIL: invalid GetZ behavior\n"); return 1; }
+      m.m_searchContext.mark = 0xFFFFFFFFu;
+      if (m.BuildPath(s, g, path, 64) <= 0 || m.m_searchContext.mark != 1)
+      { printf("FAIL: search generation wrap\n"); return 1; }
+  }
 
   // Ladder records become typed directed A* edges without masquerading as
   // ordinary shared-edge portals.
@@ -578,6 +590,49 @@ int main(){
   if (mIds.LoadBadLinks(sparseBadPath) != 1 || mIds.BadCount(0, 1) != 2)
   { printf("FAIL: sparse LoadBadLinks did not use the id map\n"); return 1; }
   remove(sparseBadPath);
+  const char *clampBadPath = "test_nav_badlinks_clamp.tmp";
+  FILE *clampFile = fopen(clampBadPath, "w");
+  if (!clampFile) { printf("FAIL: write clamp bad links\n"); return 1; }
+  fprintf(clampFile, "bad nav links v2\n100 200 2147483647\n");
+  fclose(clampFile);
+  if (mIds.LoadBadLinks(clampBadPath) != 1 || mIds.BadCount(0, 1) != 255)
+  { printf("FAIL: bad-link count clamp\n"); return 1; }
+  remove(clampBadPath);
+  {
+      const int edgeCount = 513;
+      CNavMesh mOverflowSave;
+      mOverflowSave.m_count = 1;
+      mOverflowSave.m_areas = (NavAreaData *)calloc(1, sizeof(NavAreaData));
+      mOverflowSave.m_connCount = edgeCount;
+      mOverflowSave.m_connIdx = (int *)calloc(edgeCount, sizeof(int));
+      mOverflowSave.m_connBad = (unsigned char *)calloc(edgeCount, 1);
+      mOverflowSave.m_connLadder = (int *)calloc(edgeCount, sizeof(int));
+      mOverflowSave.m_connMeta = (NavEdgeMeta *)calloc(edgeCount, sizeof(NavEdgeMeta));
+      if (!mOverflowSave.m_areas || !mOverflowSave.m_connIdx
+          || !mOverflowSave.m_connBad || !mOverflowSave.m_connLadder
+          || !mOverflowSave.m_connMeta)
+      { printf("FAIL: overflow save fixture allocation\n"); return 1; }
+      NavAreaData &oa = mOverflowSave.m_areas[0];
+      oa.id = 1;
+      oa.connOffset = 0;
+      oa.connCount = edgeCount;
+      oa.connIdx = mOverflowSave.m_connIdx;
+      oa.connBad = mOverflowSave.m_connBad;
+      oa.connLadder = mOverflowSave.m_connLadder;
+      oa.connMeta = mOverflowSave.m_connMeta;
+      mOverflowSave.m_connBad[0] = 2;
+      const char *overflowSavePath = "test_nav_overflow_save.tmp";
+      if (!mOverflowSave.SaveBadLinks(overflowSavePath))
+      { printf("FAIL: overflow SaveBadLinks\n"); return 1; }
+      FILE *sf = fopen(overflowSavePath, "r");
+      if (!sf) { printf("FAIL: read overflow save\n"); return 1; }
+      char saveText[256] = {0};
+      fread(saveText, 1, sizeof(saveText) - 1, sf);
+      fclose(sf);
+      remove(overflowSavePath);
+      if (!strstr(saveText, "1 1 2"))
+      { printf("FAIL: overflow save omitted edge\n"); return 1; }
+  }
   remove(idResolvePath);
 
   // Transactional load: failures must leave the previous mesh usable, and a

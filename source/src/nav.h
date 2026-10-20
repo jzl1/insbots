@@ -311,7 +311,8 @@ public:
     int   LoadBadLinks(const char *path);      // returns number of links applied
     void  ClearBadLinks();                     // zero all counters (insbot forget)
 
-    // z height of the area surface at x,y (bilinear-ish approx)
+    // z height of the area surface at x,y (bilinear-ish approx). Invalid
+    // indices return 0.0f rather than reading outside the area array.
     float GetZ(int idx, float x, float y) const;
 
     int   RandomArea() const;

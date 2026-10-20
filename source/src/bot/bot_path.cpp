@@ -348,11 +348,50 @@ struct PhysicalPortalProbe
     unsigned int mapHash;
     int fromIdx, toIdx;
     float sampleTime;
+    unsigned int stateSignature;
     bool tight;
     float centerX, centerY, centerZ;
     float halfSpan;
 };
 static PhysicalPortalProbe s_physicalPortalCache[1024];
+
+// Cheap hull trace used as a dynamic-state token for the cached probe. A
+// closed door, a moving prop, or a destroyed breakable changes the hit entity,
+// fraction, or end position and therefore invalidates the cached result.
+static unsigned int PhysicalPortalStateSignature(int fromIdx, int toIdx)
+{
+    if (!enginetrace) return 0;
+    const NavAreaData *from = g_NavMesh.Area(fromIdx);
+    const NavAreaData *to = g_NavMesh.Area(toIdx);
+    if (!from || !to) return 0;
+    Vector portal;
+    if (!g_NavMesh.GetPortal(fromIdx, toIdx, portal)) return 0;
+    Vector travel = to->center - from->center;
+    float len = sqrtf(travel.x * travel.x + travel.y * travel.y);
+    if (len < 0.5f) return 0;
+    Vector normal(travel.x / len, travel.y / len, 0.0f);
+    Vector start = portal - normal * 56.0f;
+    Vector end = portal + normal * 56.0f;
+    start.z = g_NavMesh.GetZ(fromIdx, start.x, start.y) + 8.0f;
+    end.z = g_NavMesh.GetZ(toIdx, end.x, end.y) + 8.0f;
+
+    CTraceFilterWorldAndPropsOnly filter;
+    Ray_t ray;
+    trace_t tr;
+    ray.Init(start, end, Vector(-16.0f, -16.0f, 0.0f), Vector(16.0f, 16.0f, 72.0f));
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+
+    unsigned int hash = 2166136261u;
+    hash = (hash ^ (unsigned int)(size_t)tr.m_pEnt) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.fraction * 100000.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.endpos.x * 16.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.endpos.y * 16.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.endpos.z * 16.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)tr.startsolid) * 16777619u;
+    hash = (hash ^ (unsigned int)tr.allsolid) * 16777619u;
+    return hash;
+}
+
 void InsBots_ResetPhysicalPortalCache()
 {
     memset(s_physicalPortalCache, 0, sizeof(s_physicalPortalCache));
@@ -379,9 +418,11 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
                                ^ ((unsigned int)toIdx * 19349663u);
     PhysicalPortalProbe &cached = s_physicalPortalCache[key & 1023u];
     float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+    const unsigned int stateSignature = PhysicalPortalStateSignature(fromIdx, toIdx);
     if (cached.mapHash == mapHash && cached.fromIdx == fromIdx
         && cached.toIdx == toIdx && now >= cached.sampleTime
-        && now - cached.sampleTime <= 30.0f)
+        && now - cached.sampleTime <= 30.0f
+        && cached.stateSignature == stateSignature)
     {
         if (cached.tight)
         {
@@ -396,6 +437,7 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
     cached.fromIdx = fromIdx;
     cached.toIdx = toIdx;
     cached.sampleTime = now;
+    cached.stateSignature = stateSignature;
     cached.tight = false;
     cached.halfSpan = 0.0f;
 
