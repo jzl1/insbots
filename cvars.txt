@@ -38,6 +38,7 @@ insbot set avoid_crouch              "2500" // A* penalty for nav areas flagged 
 insbot set avoid_jump                "4000" // A* penalty for nav areas flagged JUMP - bots route around jumps when a flat path exists (0=don't avoid)
 insbot set avoid_ladder              "3000" // A* penalty for ladder edges - bots route around ladders when a flat path exists (0=don't avoid)
 insbot set avoid_marked              "3000" // A* penalty for nav areas flagged AVOID (jump/crouch areas are marked AVOID by the generator) - 0=don't avoid
+insbot set avoid_narrow              "50" // A* penalty unit for narrow walk portals: x4 below 32u, x2 for 32-55u, x1 for 56-99u (0=don't avoid)
 insbot set avoid_vehicles            "1" // bots steer around driveable vehicle hulls (0=off)
 insbot set doorway_sprint           "1" // accurate doorway sprint alignment and kinematic modulation (0=off)
 insbot set doorway_teleport          "1" // warp a stalled front bot past a detected doorway after doorway_teleport_time (0=off)

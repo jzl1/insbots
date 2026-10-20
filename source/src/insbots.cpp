@@ -262,6 +262,7 @@ CfgVar insbot_avoid_jump("avoid_jump", "4000", "A* penalty for nav areas flagged
 CfgVar insbot_avoid_crouch("avoid_crouch", "2500", "A* penalty for nav areas flagged CROUCH - bots route around crouch passages when possible (0=don't avoid)");
 CfgVar insbot_avoid_marked("avoid_marked", "3000", "A* penalty for nav areas flagged AVOID (jump/crouch areas are marked AVOID by the generator) - 0=don't avoid");
 CfgVar insbot_avoid_ladder("avoid_ladder", "3000", "A* penalty for ladder edges - bots route around ladders when a flat path exists (0=don't avoid)");
+CfgVar insbot_avoid_narrow("avoid_narrow", "50", "A* penalty unit for narrow walk portals: x4 below 32u, x2 for 32-55u, x1 for 56-99u (0=don't avoid)");
 CfgVar insbot_ladder_up_penalty("ladder_up_penalty", "500", "extra A* cost for climbing UP a ladder; descending is the easy direction");
 CfgVar insbot_grenades("grenades", "0", "OPT-IN: throw grenades at range");
 CfgVar insbot_grenade_a("grenade_a", "weapon_m67", "side-A grenade classname");

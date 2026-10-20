@@ -130,6 +130,100 @@ static bool WriteEdgeGeometryFixture(const char *path)
     return true;
 }
 
+// Two routes between area 0 and area 3: a direct chain through three 20u
+// portals, and a five-edge detour through openings at least 80u wide.
+static bool WriteNarrowPortalFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0);
+    put32(f, 8);
+
+    unsigned int conn[4][3];
+    int counts[4];
+    memset(conn, 0, sizeof(conn));
+    memset(counts, 0, sizeof(counts));
+
+    // 0: start, connects east to the narrow chain and north to the wide detour.
+    conn[NAV_EAST][0] = 2; counts[NAV_EAST] = 1;
+    conn[NAV_NORTH][0] = 5; counts[NAV_NORTH] = 1;
+    WriteAreaV9(f, 1, 0, 0, 0, 100, 100, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 1; counts[NAV_WEST] = 1;
+    conn[NAV_EAST][0] = 3; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 2, 100, 0, 0, 200, 20, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 2; counts[NAV_WEST] = 1;
+    conn[NAV_EAST][0] = 4; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 3, 200, 0, 0, 300, 20, 0, conn, counts);
+
+    // Goal: 20u from the narrow chain, 80u from the wide connector.
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 3; conn[NAV_WEST][1] = 8; counts[NAV_WEST] = 2;
+    WriteAreaV9(f, 4, 300, 0, 0, 400, 100, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_SOUTH][0] = 1; counts[NAV_SOUTH] = 1;
+    conn[NAV_EAST][0] = 6; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 5, 0, 100, 0, 100, 200, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 5; counts[NAV_WEST] = 1;
+    conn[NAV_EAST][0] = 7; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 6, 100, 100, 0, 200, 200, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 6; counts[NAV_WEST] = 1;
+    conn[NAV_SOUTH][0] = 8; counts[NAV_SOUTH] = 1;
+    WriteAreaV9(f, 7, 200, 100, 0, 300, 200, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_NORTH][0] = 7; counts[NAV_NORTH] = 1;
+    conn[NAV_EAST][0] = 4; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 8, 200, 20, 0, 300, 100, 0, conn, counts);
+
+    put32(f, 0); // no ladders
+    fclose(f);
+    return true;
+}
+
+static bool WriteNarrowOnlyFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0);
+    put32(f, 4);
+
+    unsigned int conn[4][3];
+    int counts[4];
+    memset(conn, 0, sizeof(conn));
+    memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 2; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 1, 0, 0, 0, 100, 100, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 1; counts[NAV_WEST] = 1;
+    conn[NAV_EAST][0] = 3; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 2, 100, 0, 0, 200, 20, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 2; counts[NAV_WEST] = 1;
+    conn[NAV_EAST][0] = 4; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 3, 200, 0, 0, 300, 20, 0, conn, counts);
+
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 3; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 4, 300, 0, 0, 400, 100, 0, conn, counts);
+
+    put32(f, 0); // no ladders
+    fclose(f);
+    return true;
+}
+
 static bool WriteDuplicateIdFixture(const char *path)
 {
     FILE *f = fopen(path, "wb");
@@ -362,6 +456,7 @@ static bool WriteDisconnectedFixture(const char *path)
 }
 
 int main(){
+  setvbuf(stdout, NULL, _IONBF, 0);
   // build a 3x3 grid of 100x100 areas, 4-connected
   const char *navPath="test_nav.tmp";
   FILE*f=fopen(navPath,"wb");
@@ -861,6 +956,9 @@ int main(){
       { printf("FAIL: split doorway merge half=%.2f\n", halfSpan); return 1; }
       if (!mEdges.GetEdgeMeta(2, 5, meta) || !meta.valid || meta.kind != NAV_EDGE_JUMP)
       { printf("FAIL: stacked doorway slice not classified as jump\n"); return 1; }
+      if (!mEdges.GetEdgeMeta(2, 3, meta) || !meta.valid || meta.kind != NAV_EDGE_WALK
+          || fabsf(meta.costHalfSpan - 50.0f) > 0.01f)
+      { printf("FAIL: split doorway cost width=%.2f\n", meta.costHalfSpan); return 1; }
 
       if (!mEdges.GetEdgeMeta(6, 7, meta) || !meta.valid || meta.kind != NAV_EDGE_JUMP
           || meta.zDelta < 99.0f)
@@ -916,6 +1014,70 @@ int main(){
   }
   printf("VERIFIED: typed nav edges distinguish walk, ladder, drop, jump, and malformed geometry\n");
   remove(edgePath);
+
+  // Portal-aware routing: the direct route crosses three 20u openings; the
+  // alternate route is longer but every opening is at least 80u wide.
+  const char *narrowPath = "test_nav_narrow.tmp";
+  if (!WriteNarrowPortalFixture(narrowPath)) { printf("FAIL: write narrow fixture\n"); return 1; }
+  CNavMesh mNarrow;
+  if (!mNarrow.Load(narrowPath)) { printf("FAIL: narrow fixture load\n"); return 1; }
+  {
+      int slot = -1;
+      for (int k = 0; k < mNarrow.Area(0)->connCount; k++)
+          if (mNarrow.Area(0)->connIdx[k] == 1) { slot = k; break; }
+      if (slot < 0) { printf("FAIL: narrow direct edge missing\n"); return 1; }
+
+      g_navNarrowPenalty = 0.0f;
+      mNarrow.RefreshCostParamsFromGlobals();
+      float direct = mNarrow.EdgeCost(0, 1, slot, 0);
+      float expected = sqrtf(50.0f * 50.0f + 40.0f * 40.0f) + 50.0f;
+      if (fabsf(direct - expected) > 0.05f)
+      {
+          printf("FAIL: portal distance %.3f expected %.3f\n", direct, expected);
+          return 1;
+      }
+
+      int route[16];
+      int n = mNarrow.BuildPath(0, 3, route, 16, 0);
+      if (n != 4 || route[1] != 1 || route[2] != 2)
+      { printf("FAIL: zero-penalty route did not use narrow chain n=%d\n", n); return 1; }
+      float narrowCost = mNarrow.GetPathCost(0, 3, 0);
+
+      g_navNarrowPenalty = 50.0f;
+      mNarrow.RefreshCostParamsFromGlobals();
+      n = mNarrow.BuildPath(0, 3, route, 16, 0);
+      if (n != 6 || route[1] != 4 || route[2] != 5 || route[3] != 6 || route[4] != 7)
+      {
+          printf("FAIL: narrow penalty did not choose wide detour n=%d route=", n);
+          for (int k = 0; k < n; k++) printf(" %d", route[k]);
+          printf("\n");
+          return 1;
+      }
+      float wideCost = mNarrow.GetPathCost(0, 3, 0);
+      if (narrowCost < 0.0f || wideCost <= narrowCost)
+      {
+          printf("FAIL: narrow penalty cache/values %.3f -> %.3f\n", narrowCost, wideCost);
+          return 1;
+      }
+
+  }
+  // A narrow-only mesh must remain fully reachable under the same penalty.
+  const char *narrowOnlyPath = "test_nav_narrow_only.tmp";
+  if (!WriteNarrowOnlyFixture(narrowOnlyPath)) { printf("FAIL: write narrow-only fixture\n"); return 1; }
+  CNavMesh mNarrowOnly;
+  if (!mNarrowOnly.Load(narrowOnlyPath)) { printf("FAIL: narrow-only fixture load\n"); return 1; }
+  {
+      int route[16];
+      g_navNarrowPenalty = 50.0f;
+      mNarrowOnly.RefreshCostParamsFromGlobals();
+      int n = mNarrowOnly.BuildPath(0, 3, route, 16, 0);
+      if (n != 4 || route[1] != 1 || route[2] != 2)
+      { printf("FAIL: penalized narrow-only route unreachable n=%d\n", n); return 1; }
+  }
+  g_navNarrowPenalty = 50.0f;
+  printf("VERIFIED: narrow portals are softly penalized but remain reachable\n");
+  remove(narrowPath);
+  remove(narrowOnlyPath);
 
   // Cost-cache coherency: changing a runtime penalty must invalidate the
   // cached path cost for an otherwise identical query.

@@ -77,6 +77,13 @@ struct NavEdgeMeta
     float         normalX, normalY;
     float         halfSpan;
     float         zDelta;
+
+    // Merged walk-opening geometry used by the path-cost model. The raw
+    // fields above describe one nav-generator slice; a doorway split into
+    // several slices is one opening for routing purposes.
+    float         costMidX, costMidY, costMidZ;
+    float         costHalfSpan;
+    float         costLength;
 };
 
 struct NavTransitionWaypoint
@@ -120,13 +127,14 @@ struct NavCostParams
     float avoidPenalty;
     float ladderPenalty;
     float ladderUpPenalty;
+    float narrowPenalty;
     float dangerPenalty;
     bool  dangerEnabled;
 
     NavCostParams()
         : jumpPenalty(4000.0f), crouchPenalty(2500.0f), avoidPenalty(3000.0f),
-          ladderPenalty(3000.0f), ladderUpPenalty(500.0f), dangerPenalty(6000.0f),
-          dangerEnabled(false)
+          ladderPenalty(3000.0f), ladderUpPenalty(500.0f), narrowPenalty(50.0f),
+          dangerPenalty(6000.0f), dangerEnabled(false)
     {
     }
 };
@@ -435,6 +443,7 @@ extern float g_navAvoidPenalty;
 // ladder-aware A* costs (set by the plugin from cvars)
 extern float g_navLadderPenalty;    // additive cost per ladder edge; flat routes win when they exist
 extern float g_navLadderUpPenalty;  // extra cost when climbing UP a ladder (descending is cheap)
+extern float g_navNarrowPenalty;    // additive cost multiplier for narrow walk portals
 
 // Dynamic firefight-avoidance zones (fed per-frame by the roster). Only
 // capture-committed bots enable the penalty (g_navDangerEnabled), so normal

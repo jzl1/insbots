@@ -1,6 +1,6 @@
 // bench_path.cpp - A* / nav-mesh benchmark against a real .nav mesh.
 //
-// usage: bench_path <map.nav> [scenario] [iters]
+// usage: bench_path <map.nav> [scenario] [iters] [narrowPenalty]
 //   scenarios: long   - uniform random start/goal pairs (map-crossing, seed jitter)
 //              local  - nearby pairs (<1500u), seed jitter
 //              obj    - random starts to 4 map-spread goal areas, seed jitter
@@ -317,6 +317,7 @@ int main(int argc, char **argv)
     const char *path = argc > 1 ? argv[1] : "ins_sinjar.nav";
     const char *scenario = argc > 2 ? argv[2] : "all";
     int iters = argc > 3 ? atoi(argv[3]) : 800;
+    if (argc > 4) g_navNarrowPenalty = (float)atof(argv[4]);
     if (iters < 50) iters = 50;
 
     CNavMesh m;

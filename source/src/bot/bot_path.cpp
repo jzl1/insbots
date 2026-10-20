@@ -44,6 +44,7 @@ extern CfgVar                insbot_avoid_jump;
 extern CfgVar                insbot_avoid_crouch;
 extern CfgVar                insbot_avoid_marked;
 extern CfgVar                insbot_avoid_ladder;
+extern CfgVar                insbot_avoid_narrow;
 extern CfgVar                insbot_ladder_up_penalty;
 extern CfgVar                insbot_danger_avoid;
 extern CfgVar                insbot_streaming;
@@ -103,6 +104,7 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
     g_navCrouchPenalty = insbot_avoid_crouch.GetFloat();
     g_navAvoidPenalty  = insbot_avoid_marked.GetFloat();
     g_navLadderPenalty   = insbot_avoid_ladder.GetFloat();
+    g_navNarrowPenalty   = insbot_avoid_narrow.GetFloat();
     g_navLadderUpPenalty = insbot_ladder_up_penalty.GetFloat();
     // Capture-committed bots route around active firefights (dynamic zones
     // refreshed each frame by CBotRoster::UpdateDangerZones).

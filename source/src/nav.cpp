@@ -39,6 +39,7 @@ float g_navCrouchPenalty = 2500.0f;
 float g_navAvoidPenalty  = 3000.0f;   // NAVATTR_AVOID areas (e.g. jump/crouch marked avoid)
 float g_navLadderPenalty   = 3000.0f; // ladder edges cost extra so A* prefers flat routes when available
 float g_navLadderUpPenalty = 500.0f;  // climbing up is slower/riskier than descending
+float g_navNarrowPenalty   = 50.0f;   // soft penalty for walk portals narrower than 100u
 
 // Dynamic firefight-avoidance zones (capture-committed bots only). The roster
 // refreshes these every frame from bots that are actively engaging; the A*
@@ -64,6 +65,7 @@ void CNavMesh::RefreshCostParamsFromGlobals()
     next.avoidPenalty = g_navAvoidPenalty;
     next.ladderPenalty = g_navLadderPenalty;
     next.ladderUpPenalty = g_navLadderUpPenalty;
+    next.narrowPenalty = g_navNarrowPenalty;
     next.dangerPenalty = g_navDangerPenalty;
     next.dangerEnabled = g_navDangerEnabled;
 
@@ -72,6 +74,7 @@ void CNavMesh::RefreshCostParamsFromGlobals()
         || next.avoidPenalty != m_costParams.avoidPenalty
         || next.ladderPenalty != m_costParams.ladderPenalty
         || next.ladderUpPenalty != m_costParams.ladderUpPenalty
+        || next.narrowPenalty != m_costParams.narrowPenalty
         || next.dangerPenalty != m_costParams.dangerPenalty
         || next.dangerEnabled != m_costParams.dangerEnabled)
     {
@@ -1173,6 +1176,39 @@ bool CNavMesh::LoadInPlace(const char *path)
     {
         for (int c = 0; c < m_areas[i].connCount; c++)
             BuildEdgeMetadata(i, c, m_areas[i].connMeta[c]);
+    }
+
+    // Cache merged walk-opening geometry once. EdgeCost runs inside A* and
+    // must not rescan every connection of an area to discover that a doorway
+    // was cut into several collinear nav slices.
+    for (int i = 0; i < m_count; i++)
+    {
+        for (int c = 0; c < m_areas[i].connCount; c++)
+        {
+            NavEdgeMeta &meta = m_areas[i].connMeta[c];
+            if (!meta.valid || meta.kind != NAV_EDGE_WALK) continue;
+            Vector mid, axis;
+            float halfSpan = 0.0f;
+            if (GetPortalMerged(i, m_areas[i].connIdx[c], mid, axis, halfSpan))
+            {
+                meta.costMidX = mid.x;
+                meta.costMidY = mid.y;
+                meta.costMidZ = mid.z;
+                meta.costHalfSpan = halfSpan;
+                meta.costLength = (mid - m_areas[i].center).Length()
+                                  + (m_areas[m_areas[i].connIdx[c]].center - mid).Length();
+            }
+            else
+            {
+                meta.costMidX = meta.midX;
+                meta.costMidY = meta.midY;
+                meta.costMidZ = meta.midZ;
+                meta.costHalfSpan = meta.halfSpan;
+                Vector portal(meta.costMidX, meta.costMidY, meta.costMidZ);
+                meta.costLength = (portal - m_areas[i].center).Length()
+                                  + (m_areas[m_areas[i].connIdx[c]].center - portal).Length();
+            }
+        }
     }
 
     // Build weak connected components once.  They are only a cheap rejection
@@ -2459,6 +2495,13 @@ float CNavMesh::EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const
     int ladderIdx = -1;
     bool ladderUp = false;
     bool ladderEdge = GetLadderConnection(fromIdx, toIdx, ladderIdx, ladderUp);
+    const NavEdgeMeta *meta = (from.connMeta && connSlot >= 0) ? &from.connMeta[connSlot] : 0;
+    const bool walkPortal = !ladderEdge && meta && meta->valid && meta->kind == NAV_EDGE_WALK;
+    if (walkPortal)
+    {
+        cost = meta->costLength;
+    }
+
     if (ladderEdge)
     {
         const NavLadderData *ladder = Ladder(ladderIdx);
@@ -2472,6 +2515,16 @@ float CNavMesh::EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const
     {
         // Falling off a roof is discouraged, but not forbidden.
         cost += 400.0f;
+    }
+
+    if (walkPortal && m_costParams.narrowPenalty > 0.0f)
+    {
+        float width = (meta->costHalfSpan > 0.0f ? meta->costHalfSpan : meta->halfSpan) * 2.0f;
+        float factor = 0.0f;
+        if (width < 32.0f) factor = 4.0f;
+        else if (width < 56.0f) factor = 2.0f;
+        else if (width < 100.0f) factor = 1.0f;
+        cost += factor * m_costParams.narrowPenalty;
     }
 
     if (to.attributes & NAVATTR_CROUCH) cost += m_costParams.crouchPenalty;

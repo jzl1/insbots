@@ -6,7 +6,7 @@ insbot set <cvar> <value>
 insbot get <cvar>
 ```
 
-As of v0.21.0 the plugin exposes **260 settings**. This guide covers the
+As of v0.21.0 the plugin exposes **261 settings**. This guide covers the
 commonly tuned ones; the complete list is printed in-console by `insbot list`
 and mirrored in `cvars.txt` at the repository root.
 
@@ -128,3 +128,15 @@ not be modified unless diagnosing engine structural changes:
 | `hidden_offset` | `884` | `884` | Legacy. |
 | `team_flip` | `0` | `0` | 1 = the owner field stores the enemy team (flip it). |
 | `learn_persist` | `1` | `1` | Save/restore learned bad nav links (`addons/insbots_learn_<map>.txt`). |
+
+---
+
+## 8. Navigation & Pathfinding
+
+| Setting | Default | Description |
+|---|---|---|
+| `avoid_jump` | `4000` | A* penalty for nav areas flagged JUMP (0 = don't avoid). |
+| `avoid_crouch` | `2500` | A* penalty for nav areas flagged CROUCH (0 = don't avoid). |
+| `avoid_marked` | `3000` | A* penalty for nav areas flagged AVOID (0 = don't avoid). |
+| `avoid_ladder` | `3000` | A* penalty for ladder edges (0 = don't avoid). |
+| `avoid_narrow` | `50` | Base penalty for narrow walk portals: x4 below 32 units, x2 for 32-55, x1 for 56-99; wider openings are free. Soft cost only, so a narrow route remains usable when no alternative exists. |

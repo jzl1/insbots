@@ -37,14 +37,17 @@ int main(int argc, char **argv)
     if (!m.Load(argv[1])) { printf("FAIL load\n"); return 1; }
     Vector start(atof(argv[2]), atof(argv[3]), atof(argv[4]));
     Vector goal(atof(argv[5]), atof(argv[6]), atof(argv[7]));
-    float narrowPenalty = argc>8 ? (float)atof(argv[8]) : 1200.0f;
+    float narrowPenalty = argc>8 ? (float)atof(argv[8]) : g_navNarrowPenalty;
     int s=m.FindArea(start); if(s<0) s=m.FindNearestArea(start);
     int g=m.FindArea(goal);  if(g<0) g=m.FindNearestArea(goal);
     printf("mesh %d areas; start area=%d goal area=%d\n", m.Count(), s, g);
     if (s<0||g<0) return 1;
 
     int nrm[512], wide[512];
+    float savedNarrowPenalty = g_navNarrowPenalty;
+    g_navNarrowPenalty = 0.0f;
     int nN = m.BuildPath(s,g,nrm,512,0);
+    g_navNarrowPenalty = savedNarrowPenalty;
     double normDist=0;
     for (int i=0;i<nN-1;i++) normDist += (m.Area(nrm[i+1])->center - m.Area(nrm[i])->center).Length();
     printf("normal path: %d areas, center-dist %.0f\n", nN, normDist);
@@ -98,7 +101,7 @@ int main(int argc, char **argv)
     for (int i=0;i<cnt/2;i++) { int t=wide[i]; wide[i]=wide[cnt-1-i]; wide[cnt-1-i]=t; }
     double wideDist=0;
     for (int i=0;i<cnt-1;i++) wideDist += (m.Area(wide[i+1])->center - m.Area(wide[i])->center).Length();
-    printf("wide-route: %d areas (cost %.0f, center-dist %.0f, +%.0f%%)\n", cnt, dist[g], wideDist, (wideDist-normDist)*100.0/(normDist>0?normDist:1));
+    printf("wide-route: %d areas (cost %.0f, center-dist %.0f, %+.0f%%)\n", cnt, dist[g], wideDist, (wideDist-normDist)*100.0/(normDist>0?normDist:1));
     int wTiny=0,wTight=0,wNarrow=0,wNorm=0;
     float wMin=9999;
     for (int i=0;i<cnt-1;i++)
