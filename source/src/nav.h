@@ -55,6 +55,27 @@ struct NavLadderData
     int          bottomArea;
 };
 
+enum NavEdgeKind
+{
+    NAV_EDGE_WALK = 0,
+    NAV_EDGE_LADDER_UP,
+    NAV_EDGE_LADDER_DOWN,
+    NAV_EDGE_DROP,
+    NAV_EDGE_JUMP,
+    NAV_EDGE_MALFORMED
+};
+
+struct NavEdgeMeta
+{
+    unsigned char kind;
+    unsigned char valid;          // record built and usable as a typed edge
+    float         midX, midY, midZ;
+    float         axisX, axisY;
+    float         normalX, normalY;
+    float         halfSpan;
+    float         zDelta;
+};
+
 struct NavAreaData
 {
     unsigned int   id;
@@ -67,6 +88,7 @@ struct NavAreaData
     int           *connIdx;       // indices into the area array
     unsigned char *connBad;       // per-connection failure count (learned bad links)
     int           *connLadder;    // 0=walk, +(index+1)=ladder up, -(index+1)=down
+    NavEdgeMeta   *connMeta;      // one typed portal record per connection
     int            connCount;
     int            ladderConnCount; // nonzero when this area is a ladder endpoint
     int            component;       // weak connected component for cheap reachability rejection
@@ -169,6 +191,12 @@ public:
     // Returns the typed ladder edge between two path areas. Ordinary shared-
     // edge connections return false. 'up' is true when traversing bottom->top.
     bool  GetLadderConnection(int fromIdx, int toIdx, int &ladderIdx, bool &up) const;
+
+    // Returns the typed geometry record for a resolved connection. This also
+    // returns malformed records so callers can inspect why a link has no
+    // ordinary portal; check NavEdgeMeta::valid before treating it as usable.
+    bool  GetEdgeMeta(int fromIdx, int toIdx, NavEdgeMeta &out) const;
+
     const NavLadderData *Ladder(int idx) const
         { return (idx >= 0 && idx < m_ladderCount) ? &m_ladders[idx] : 0; }
     int   LadderCount() const { return m_ladderCount; }
@@ -240,6 +268,7 @@ private:
     NavCostParams  m_costParams;
     void InvalidateCostCache() { m_costSeq = 0; if (++m_costStamp == 0) m_costStamp = 1; }
     void RefreshCostParamsFromGlobals();
+    bool BuildEdgeMetadata(int fromIdx, int connSlot, NavEdgeMeta &out) const;
 
     int  IndexOfId(unsigned int id) const;
     void BuildGrid();

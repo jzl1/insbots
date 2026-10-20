@@ -20,6 +20,86 @@ static void put16(FILE*f,unsigned short v){fwrite(&v,2,1,f);}
 static void put8(FILE*f,unsigned char v){fwrite(&v,1,1,f);} 
 static void putf(FILE*f,float v){fwrite(&v,4,1,f);} 
 
+static void WriteAreaV9(FILE *f, unsigned int id,
+                        float x0, float y0, float z0,
+                        float x1, float y1, float z1,
+                        const unsigned int conn[4][3], const int connCounts[4])
+{
+    put32(f, id); put16(f, 0);
+    putf(f, x0); putf(f, y0); putf(f, z0);
+    putf(f, x1); putf(f, y1); putf(f, z1);
+    putf(f, z1); putf(f, z0);                    // neZ, swZ
+    for (int d = 0; d < 4; d++)
+    {
+        put32(f, (unsigned)connCounts[d]);
+        for (int k = 0; k < connCounts[d]; k++) put32(f, conn[d][k]);
+    }
+    put8(f, 0); put8(f, 0); put32(f, 0); put16(f, 0);
+    put32(f, 0); put32(f, 0);
+    putf(f, 1.0f); putf(f, 2.0f);
+}
+
+static bool WriteEdgeGeometryFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0);
+    put32(f, 12);
+
+    unsigned int conn[4][3];
+    int counts[4];
+    memset(conn, 0, sizeof(conn));
+    memset(counts, 0, sizeof(counts));
+
+    // Adjacent walk edge (indices 0 -> 1).
+    conn[NAV_EAST][0] = 102; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 101, 0, 0, 0, 100, 100, 0, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 101; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 102, 100, 0, 0, 200, 100, 0, conn, counts);
+
+    // Split doorway slices plus a stacked upper slice at the same plane.
+    // The upper slice must not join the merged walk span.
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 202; conn[NAV_EAST][1] = 203; conn[NAV_EAST][2] = 204;
+    counts[NAV_EAST] = 3;
+    WriteAreaV9(f, 201, 0, 200, 0, 100, 300, 0, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 201; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 202, 100, 200, 0, 200, 250, 0, conn, counts);
+    WriteAreaV9(f, 203, 100, 250, 0, 200, 300, 0, conn, counts);
+    WriteAreaV9(f, 204, 100, 200, 100, 200, 300, 100, conn, counts);
+
+    // Fully stacked floors (indices 6 <-> 7): jump upward, drop downward.
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 302; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 301, 300, 0, 0, 400, 100, 0, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 301; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 302, 300, 0, 100, 400, 100, 100, conn, counts);
+
+    // Separated short drop (indices 8 -> 9).
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 402; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 401, 500, 0, 100, 600, 100, 100, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 401; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 402, 620, 0, 0, 720, 100, 0, conn, counts);
+
+    // Fully overlapping same-elevation rectangles are malformed, not walk.
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 502; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 501, 800, 0, 0, 900, 100, 0, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 501; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 502, 800, 0, 0, 900, 100, 0, conn, counts);
+
+    put32(f, 0); // no ladders
+    fclose(f);
+    return true;
+}
+
 // A mesh whose area declares more connections than the loader retains must be
 // rejected outright instead of being silently truncated to 512.
 
@@ -382,6 +462,64 @@ int main(){
   if (pLen != 3 || pathBuf[1] != 2) { printf("FAIL: avoid path should detour to Area 3\n"); return 1; }
   printf("VERIFIED: NAVATTR_AVOID (0x0080) successfully detours around avoid areas!\n");
   remove(avoidForkPath);
+
+  // Typed nav-edge geometry: walk portals only come from a genuine shared
+  // boundary. Stacked floors and separated drops are explicit transitions,
+  // and split doorway slices merge only when their plane/elevation agree.
+  const char *edgePath = "test_nav_edges.tmp";
+  if (!WriteEdgeGeometryFixture(edgePath)) { printf("FAIL: write edge fixture\n"); return 1; }
+  CNavMesh mEdges;
+  if (!mEdges.Load(edgePath)) { printf("FAIL: edge fixture load\n"); return 1; }
+  {
+      NavEdgeMeta meta;
+      Vector portal;
+      if (!mEdges.GetEdgeMeta(0, 1, meta) || !meta.valid || meta.kind != NAV_EDGE_WALK)
+      { printf("FAIL: adjacent edge not walk\n"); return 1; }
+      if (fabsf(meta.midX - 100.0f) > 0.01f || fabsf(meta.midY - 50.0f) > 0.01f
+          || fabsf(meta.halfSpan - 50.0f) > 0.01f || meta.axisY < 0.99f)
+      { printf("FAIL: adjacent edge geometry\n"); return 1; }
+      if (!mEdges.GetPortal(0, 1, portal)
+          || fabsf(portal.x - meta.midX) > 0.01f
+          || fabsf(portal.y - meta.midY) > 0.01f)
+      { printf("FAIL: adjacent walk portal\n"); return 1; }
+
+      Vector mid, axis;
+      float halfSpan = 0.0f;
+      if (!mEdges.GetPortalMerged(2, 3, mid, axis, halfSpan)
+          || fabsf(halfSpan - 50.0f) > 0.01f || axis.y < 0.99f)
+      { printf("FAIL: split doorway merge half=%.2f\n", halfSpan); return 1; }
+      if (!mEdges.GetEdgeMeta(2, 5, meta) || !meta.valid || meta.kind != NAV_EDGE_JUMP)
+      { printf("FAIL: stacked doorway slice not classified as jump\n"); return 1; }
+
+      if (!mEdges.GetEdgeMeta(6, 7, meta) || !meta.valid || meta.kind != NAV_EDGE_JUMP
+          || meta.zDelta < 99.0f)
+      { printf("FAIL: stacked upward edge kind=%u dz=%.1f\n", (unsigned)meta.kind, meta.zDelta); return 1; }
+      if (mEdges.GetPortal(6, 7, portal))
+      { printf("FAIL: stacked upward edge exposed as portal\n"); return 1; }
+      if (!mEdges.GetEdgeMeta(7, 6, meta) || !meta.valid || meta.kind != NAV_EDGE_DROP
+          || meta.zDelta > -99.0f)
+      { printf("FAIL: stacked downward edge kind=%u dz=%.1f\n", (unsigned)meta.kind, meta.zDelta); return 1; }
+      if (mEdges.GetPortal(7, 6, portal))
+      { printf("FAIL: stacked downward edge exposed as portal\n"); return 1; }
+
+      if (!mEdges.GetEdgeMeta(8, 9, meta) || !meta.valid || meta.kind != NAV_EDGE_DROP
+          || fabsf(meta.midX - 600.0f) > 0.01f || fabsf(meta.midY - 50.0f) > 0.01f
+          || fabsf(meta.midZ - 100.0f) > 0.01f || fabsf(meta.zDelta + 100.0f) > 0.01f
+          || fabsf(meta.halfSpan - 50.0f) > 0.01f)
+      { printf("FAIL: separated drop geometry\n"); return 1; }
+      if (mEdges.GetPortal(8, 9, portal))
+      { printf("FAIL: separated drop exposed as walk portal\n"); return 1; }
+      if (mEdges.GetPortalMerged(8, 9, mid, axis, halfSpan))
+      { printf("FAIL: separated drop exposed as merged portal\n"); return 1; }
+
+      if (!mEdges.GetEdgeMeta(10, 11, meta) || meta.valid
+          || meta.kind != NAV_EDGE_MALFORMED)
+      { printf("FAIL: full same-level overlap was not malformed\n"); return 1; }
+      if (mEdges.GetPortal(10, 11, portal))
+      { printf("FAIL: full same-level overlap exposed as portal\n"); return 1; }
+  }
+  printf("VERIFIED: typed nav edges distinguish walk, ladder, drop, jump, and malformed geometry\n");
+  remove(edgePath);
 
   // Cost-cache coherency: changing a runtime penalty must invalidate the
   // cached path cost for an otherwise identical query.

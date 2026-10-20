@@ -175,6 +175,7 @@ void CNavMesh::Free()
             if (m_areas[i].connIdx) free(m_areas[i].connIdx);
             if (m_areas[i].connBad) free(m_areas[i].connBad);
             if (m_areas[i].connLadder) free(m_areas[i].connLadder);
+            if (m_areas[i].connMeta) free(m_areas[i].connMeta);
             if (m_areas[i].hidingSpots) free(m_areas[i].hidingSpots);
         }
         free(m_areas);
@@ -503,12 +504,15 @@ bool CNavMesh::Load(const char *path)
         m_areas[i].connIdx = (int *)malloc(s.connCounts[i] * sizeof(int));
         m_areas[i].connBad = (unsigned char *)calloc(s.connCounts[i], 1);
         m_areas[i].connLadder = (int *)calloc(s.connCounts[i], sizeof(int));
-        if (!m_areas[i].connIdx || !m_areas[i].connBad || !m_areas[i].connLadder)
+        m_areas[i].connMeta = (NavEdgeMeta *)calloc(s.connCounts[i], sizeof(NavEdgeMeta));
+        if (!m_areas[i].connIdx || !m_areas[i].connBad || !m_areas[i].connLadder
+            || !m_areas[i].connMeta)
         {
             NAVLOAD_ERR("[insbots] nav load failed: out of memory resolving area %u connections\n", m_areas[i].id);
             free(m_areas[i].connIdx); m_areas[i].connIdx = 0;
             free(m_areas[i].connBad); m_areas[i].connBad = 0;
             free(m_areas[i].connLadder); m_areas[i].connLadder = 0;
+            free(m_areas[i].connMeta); m_areas[i].connMeta = 0;
             FreeNavLoadScratch(s, areaCount);
             Free();
             return false;
@@ -622,7 +626,8 @@ bool CNavMesh::Load(const char *path)
                     int n = m_areas[i].connCount;
                     if (!CheckedRealloc((void **)&m_areas[i].connIdx, (n + 1) * sizeof(int)) ||
                         !CheckedRealloc((void **)&m_areas[i].connBad, n + 1) ||
-                        !CheckedRealloc((void **)&m_areas[i].connLadder, (n + 1) * sizeof(int)))
+                        !CheckedRealloc((void **)&m_areas[i].connLadder, (n + 1) * sizeof(int)) ||
+                        !CheckedRealloc((void **)&m_areas[i].connMeta, (n + 1) * sizeof(NavEdgeMeta)))
                     {
                         NAVLOAD_ERR("[insbots] nav load failed: out of memory appending ladder edge for area %u\n", m_areas[i].id);
                         FreeNavLoadScratch(s, areaCount);
@@ -632,6 +637,7 @@ bool CNavMesh::Load(const char *path)
                     m_areas[i].connIdx[n] = target;
                     m_areas[i].connBad[n] = 0;
                     m_areas[i].connLadder[n] = ladderCode;
+                    memset(&m_areas[i].connMeta[n], 0, sizeof(NavEdgeMeta));
                     m_areas[i].connCount++;
                 }
             }
@@ -645,6 +651,15 @@ bool CNavMesh::Load(const char *path)
     if (s.ladderUpCounts) free(s.ladderUpCounts); s.ladderUpCounts = 0;
     if (s.ladderDownCounts) free(s.ladderDownCounts); s.ladderDownCounts = 0;
     if (s.data) free(s.data); s.data = 0;
+
+    // Classify every resolved connection once. Portal queries are hot paths
+    // (steering, doorway lanes and stuck recovery), so they must not re-derive
+    // rectangle relationships or mistake stacked floors for walkable seams.
+    for (int i = 0; i < m_count; i++)
+    {
+        for (int c = 0; c < m_areas[i].connCount; c++)
+            BuildEdgeMetadata(i, c, m_areas[i].connMeta[c]);
+    }
 
     // Build weak connected components once.  They are only a cheap rejection
     // test; a particular sniper still needs a successful directed A* route.
@@ -1073,6 +1088,242 @@ float CNavMesh::GetZ(int idx, float x, float y) const
     return n + (s - n) * v;
 }
 
+bool CNavMesh::BuildEdgeMetadata(int fromIdx, int connSlot, NavEdgeMeta &out) const
+{
+    memset(&out, 0, sizeof(out));
+    out.kind = NAV_EDGE_MALFORMED;
+    out.valid = 0;
+    if (fromIdx < 0 || fromIdx >= m_count) return false;
+    const NavAreaData &a = m_areas[fromIdx];
+    if (connSlot < 0 || connSlot >= a.connCount || !a.connIdx) return false;
+    int toIdx = a.connIdx[connSlot];
+    if (toIdx < 0 || toIdx >= m_count || toIdx == fromIdx) return false;
+    const NavAreaData &b = m_areas[toIdx];
+
+    // Ladder records are vertical transitions, not rectangle-overlap portals.
+    // Keep the serialized ladder index in connLadder and expose only its type
+    // and source-side geometry here.
+    int ladderCode = a.connLadder ? a.connLadder[connSlot] : 0;
+    if (ladderCode != 0)
+    {
+        int ladderIdx = (ladderCode > 0 ? ladderCode : -ladderCode) - 1;
+        out.kind = ladderCode > 0 ? NAV_EDGE_LADDER_UP : NAV_EDGE_LADDER_DOWN;
+        if (ladderIdx < 0 || ladderIdx >= m_ladderCount) return true;
+        const NavLadderData &ladder = m_ladders[ladderIdx];
+        const Vector &source = ladderCode > 0 ? ladder.bottom : ladder.top;
+        const Vector &target = ladderCode > 0 ? ladder.top : ladder.bottom;
+        out.midX = source.x;
+        out.midY = source.y;
+        out.midZ = GetZ(fromIdx, source.x, source.y);
+        out.zDelta = target.z - source.z;
+        out.halfSpan = ladder.width * 0.5f;
+        if (ladder.dir == NAV_NORTH || ladder.dir == NAV_SOUTH)
+        {
+            out.axisX = 1.0f;
+            out.normalY = ladder.dir == NAV_NORTH ? 1.0f : -1.0f;
+        }
+        else
+        {
+            out.axisY = 1.0f;
+            out.normalX = ladder.dir == NAV_EAST ? 1.0f : -1.0f;
+        }
+        out.valid = 1;
+        return true;
+    }
+
+    float ox0 = a.lo.x > b.lo.x ? a.lo.x : b.lo.x;
+    float ox1 = a.hi.x < b.hi.x ? a.hi.x : b.hi.x;
+    float oy0 = a.lo.y > b.lo.y ? a.lo.y : b.lo.y;
+    float oy1 = a.hi.y < b.hi.y ? a.hi.y : b.hi.y;
+    float overlapX = ox1 - ox0;
+    float overlapY = oy1 - oy0;
+    const float contactEps = 0.0f;
+    const float walkGap = 4.0f;
+    const float transitionGap = 64.0f;
+    const float elevationThreshold = 24.0f;
+
+    // A positive-area rectangle overlap has no unique shared boundary. It is
+    // either a vertical transition (stacked floors) or malformed/duplicate
+    // geometry, never an ordinary walk portal.
+    if (overlapX > contactEps && overlapY > contactEps)
+    {
+        out.midX = (ox0 + ox1) * 0.5f;
+        out.midY = (oy0 + oy1) * 0.5f;
+        float sourceZ = GetZ(fromIdx, out.midX, out.midY);
+        float targetZ = GetZ(toIdx, out.midX, out.midY);
+        out.midZ = sourceZ;
+        out.zDelta = targetZ - sourceZ;
+        if (overlapX >= overlapY)
+        {
+            out.axisX = 1.0f;
+            out.halfSpan = overlapX * 0.5f;
+        }
+        else
+        {
+            out.axisY = 1.0f;
+            out.halfSpan = overlapY * 0.5f;
+        }
+        if (out.zDelta < -elevationThreshold)
+        {
+            out.kind = NAV_EDGE_DROP;
+            out.valid = 1;
+        }
+        else if (out.zDelta > elevationThreshold)
+        {
+            out.kind = NAV_EDGE_JUMP;
+            out.valid = 1;
+        }
+        return true;
+    }
+
+    // Boundary normal along X: rectangles are separated/touching in X and
+    // overlap laterally along Y.
+    if (overlapY > contactEps)
+    {
+        float sourceX, targetX, gap;
+        if (a.hi.x <= b.lo.x)
+        {
+            sourceX = a.hi.x;
+            targetX = b.lo.x;
+            gap = targetX - sourceX;
+        }
+        else if (b.hi.x <= a.lo.x)
+        {
+            sourceX = a.lo.x;
+            targetX = b.hi.x;
+            gap = sourceX - targetX;
+        }
+        else
+        {
+            sourceX = targetX = (ox0 + ox1) * 0.5f;
+            gap = 0.0f;
+        }
+        if (gap > transitionGap) return true;
+
+        out.midY = (oy0 + oy1) * 0.5f;
+        out.axisY = 1.0f;
+        out.halfSpan = (oy1 - oy0) * 0.5f;
+        if (b.center.x > a.center.x) out.normalX = 1.0f;
+        else if (b.center.x < a.center.x) out.normalX = -1.0f;
+        float sourceZ = GetZ(fromIdx, sourceX, out.midY);
+        float targetZ = GetZ(toIdx, targetX, out.midY);
+        out.zDelta = targetZ - sourceZ;
+        out.midZ = sourceZ;
+        if (gap <= walkGap
+            && out.zDelta >= -elevationThreshold
+            && out.zDelta <= elevationThreshold)
+        {
+            out.kind = NAV_EDGE_WALK;
+            out.midX = (sourceX + targetX) * 0.5f;
+            out.midZ = targetZ;
+        }
+        else if (out.zDelta < -elevationThreshold)
+        {
+            out.kind = NAV_EDGE_DROP;
+            out.midX = sourceX;
+        }
+        else
+        {
+            // A horizontal gap needs a jump even when both floors are level;
+            // an upward step over the threshold is also a jump.
+            out.kind = NAV_EDGE_JUMP;
+            out.midX = sourceX;
+        }
+        out.valid = 1;
+        return true;
+    }
+
+    // Boundary normal along Y: rectangles are separated/touching in Y and
+    // overlap laterally along X.
+    if (overlapX > contactEps)
+    {
+        float sourceY, targetY, gap;
+        if (a.hi.y <= b.lo.y)
+        {
+            sourceY = a.hi.y;
+            targetY = b.lo.y;
+            gap = targetY - sourceY;
+        }
+        else if (b.hi.y <= a.lo.y)
+        {
+            sourceY = a.lo.y;
+            targetY = b.hi.y;
+            gap = sourceY - targetY;
+        }
+        else
+        {
+            sourceY = targetY = (oy0 + oy1) * 0.5f;
+            gap = 0.0f;
+        }
+        if (gap > transitionGap) return true;
+
+        out.midX = (ox0 + ox1) * 0.5f;
+        out.axisX = 1.0f;
+        out.halfSpan = (ox1 - ox0) * 0.5f;
+        if (b.center.y > a.center.y) out.normalY = 1.0f;
+        else if (b.center.y < a.center.y) out.normalY = -1.0f;
+        float sourceZ = GetZ(fromIdx, out.midX, sourceY);
+        float targetZ = GetZ(toIdx, out.midX, targetY);
+        out.zDelta = targetZ - sourceZ;
+        out.midZ = sourceZ;
+        if (gap <= walkGap
+            && out.zDelta >= -elevationThreshold
+            && out.zDelta <= elevationThreshold)
+        {
+            out.kind = NAV_EDGE_WALK;
+            out.midY = (sourceY + targetY) * 0.5f;
+            out.midZ = targetZ;
+        }
+        else if (out.zDelta < -elevationThreshold)
+        {
+            out.kind = NAV_EDGE_DROP;
+            out.midY = sourceY;
+        }
+        else
+        {
+            out.kind = NAV_EDGE_JUMP;
+            out.midY = sourceY;
+        }
+        out.valid = 1;
+        return true;
+    }
+
+    return true;
+}
+
+bool CNavMesh::GetEdgeMeta(int fromIdx, int toIdx, NavEdgeMeta &out) const
+{
+    memset(&out, 0, sizeof(out));
+    out.kind = NAV_EDGE_MALFORMED;
+    if (fromIdx < 0 || fromIdx >= m_count) return false;
+    const NavAreaData &a = m_areas[fromIdx];
+    if (!a.connIdx || !a.connMeta) return false;
+    bool found = false;
+    NavEdgeMeta first;
+    memset(&first, 0, sizeof(first));
+    first.kind = NAV_EDGE_MALFORMED;
+    for (int k = 0; k < a.connCount; k++)
+    {
+        if (a.connIdx[k] != toIdx) continue;
+        if (!found)
+        {
+            first = a.connMeta[k];
+            found = true;
+        }
+        if (a.connMeta[k].valid)
+        {
+            out = a.connMeta[k];
+            return true;
+        }
+    }
+    if (found)
+    {
+        out = first;
+        return true;
+    }
+    return false;
+}
+
 int CNavMesh::RandomArea() const
 {
     if (!m_count) return -1;
@@ -1219,87 +1470,86 @@ void CNavMesh::ClearBadLinks()
 
 bool CNavMesh::GetPortal(int fromIdx, int toIdx, Vector &out) const
 {
-    int ladderIdx; bool up;
-    if (GetLadderConnection(fromIdx, toIdx, ladderIdx, up)) return false;
     const NavAreaData *a = Area(fromIdx);
-    const NavAreaData *b = Area(toIdx);
-    if (!a || !b) return false;
-    float lx = a->lo.x > b->lo.x ? a->lo.x : b->lo.x;
-    float hx = a->hi.x < b->hi.x ? a->hi.x : b->hi.x;
-    float ly = a->lo.y > b->lo.y ? a->lo.y : b->lo.y;
-    float hy = a->hi.y < b->hi.y ? a->hi.y : b->hi.y;
-    // allow a small tolerance so edge-adjacent areas still register
-    if (lx > hx + 24.0f || ly > hy + 24.0f) return false;
-    out.x = (lx + hx) * 0.5f;
-    out.y = (ly + hy) * 0.5f;
-    out.z = GetZ(toIdx, out.x, out.y);
-    return true;
+    if (!a || !a->connMeta) return false;
+    for (int k = 0; k < a->connCount; k++)
+    {
+        if (a->connIdx[k] != toIdx) continue;
+        const NavEdgeMeta &meta = a->connMeta[k];
+        if (!meta.valid || meta.kind != NAV_EDGE_WALK) continue;
+        out.x = meta.midX;
+        out.y = meta.midY;
+        out.z = meta.midZ;
+        return true;
+    }
+    return false;
 }
 
 bool CNavMesh::GetPortalMerged(int fromIdx, int toIdx, Vector &mid, Vector &axis,
                                float &halfSpan) const
 {
-    int ladderIdx; bool up;
-    if (GetLadderConnection(fromIdx, toIdx, ladderIdx, up)) return false;
     const NavAreaData *a = Area(fromIdx);
-    const NavAreaData *b = Area(toIdx);
-    if (!a || !b) return false;
-    float lx = a->lo.x > b->lo.x ? a->lo.x : b->lo.x;
-    float hx = a->hi.x < b->hi.x ? a->hi.x : b->hi.x;
-    float ly = a->lo.y > b->lo.y ? a->lo.y : b->lo.y;
-    float hy = a->hi.y < b->hi.y ? a->hi.y : b->hi.y;
-    if (lx > hx + 24.0f || ly > hy + 24.0f) return false;
+    if (!a || !a->connMeta) return false;
 
-    // The shared edge runs along the longer overlap axis; bots are spread
-    // along it so each one crosses at a different lateral point. When the
-    // generator cut one opening into several thin slices, merge collinear
-    // contiguous slices from the same boundary so the whole passage is used.
-    float spanX = hx - lx;
-    float spanY = hy - ly;
-    bool vertical = spanX <= spanY;          // opening runs along Y (x plane)
-    float u0 = vertical ? ly : lx;           // segment along the opening
-    float u1 = vertical ? hy : hx;
-    float plane = vertical ? lx : ly;        // boundary plane constant
-    const float mergeGap = 4.0f;             // hairline mesh gaps only
+    const NavEdgeMeta *base = 0;
+    for (int k = 0; k < a->connCount; k++)
+    {
+        if (a->connIdx[k] != toIdx) continue;
+        const NavEdgeMeta &meta = a->connMeta[k];
+        if (meta.valid && meta.kind == NAV_EDGE_WALK)
+        {
+            base = &meta;
+            break;
+        }
+    }
+    if (!base) return false;
+
+    // A portal slice is an interval along its tangent axis. Merge only
+    // collinear, contiguous walk slices on the same boundary plane and with
+    // compatible elevation deltas. Non-walk and malformed records never
+    // participate, even when their 2D rectangles happen to overlap.
+    const float axisX = base->axisX;
+    const float axisY = base->axisY;
+    const bool xNormal = axisY > 0.5f;
+    const float plane = xNormal ? base->midX : base->midY;
+    float u0 = (xNormal ? base->midY : base->midX) - base->halfSpan;
+    float u1 = (xNormal ? base->midY : base->midX) + base->halfSpan;
+    const float mergeGap = 4.0f;
+    const float planeTolerance = 1.0f;
+    const float elevationTolerance = 8.0f;
 
     for (int k = 0; k < a->connCount; k++)
     {
         int otherIdx = a->connIdx[k];
         if (otherIdx < 0 || otherIdx >= m_count || otherIdx == toIdx) continue;
-        if (a->connLadder && a->connLadder[k] != 0) continue;   // walk edges only
-        const NavAreaData *c = Area(otherIdx);
-        if (!c) continue;
-        float clx = a->lo.x > c->lo.x ? a->lo.x : c->lo.x;
-        float chx = a->hi.x < c->hi.x ? a->hi.x : c->hi.x;
-        float cly = a->lo.y > c->lo.y ? a->lo.y : c->lo.y;
-        float chy = a->hi.y < c->hi.y ? a->hi.y : c->hi.y;
-        if (clx > chx + 24.0f || cly > chy + 24.0f) continue;
-        bool cVertical = (chx - clx) <= (chy - cly);
-        if (cVertical != vertical) continue;
-        if (fabsf((vertical ? clx : cly) - plane) > 1.0f) continue;
-        float cu0 = vertical ? cly : clx;
-        float cu1 = vertical ? chy : chx;
+        const NavEdgeMeta &meta = a->connMeta[k];
+        if (!meta.valid || meta.kind != NAV_EDGE_WALK) continue;
+        if (fabsf(meta.axisX - axisX) > 0.001f
+            || fabsf(meta.axisY - axisY) > 0.001f)
+            continue;
+        float otherPlane = xNormal ? meta.midX : meta.midY;
+        if (fabsf(otherPlane - plane) > planeTolerance) continue;
+        if (fabsf(meta.zDelta - base->zDelta) > elevationTolerance) continue;
+        float cu0 = (xNormal ? meta.midY : meta.midX) - meta.halfSpan;
+        float cu1 = (xNormal ? meta.midY : meta.midX) + meta.halfSpan;
         if (cu0 > u1 + mergeGap || cu1 < u0 - mergeGap) continue;
         if (cu0 < u0) u0 = cu0;
         if (cu1 > u1) u1 = cu1;
     }
 
-    if (vertical)
+    if (xNormal)
     {
-        lx = hx = plane;
-        ly = u0; hy = u1;
+        mid.x = plane;
+        mid.y = (u0 + u1) * 0.5f;
         axis = Vector(0.0f, 1.0f, 0.0f);
-        halfSpan = (hy - ly) * 0.5f;
     }
     else
     {
-        lx = u0; hx = u1;
-        ly = hy = plane;
+        mid.x = (u0 + u1) * 0.5f;
+        mid.y = plane;
         axis = Vector(1.0f, 0.0f, 0.0f);
-        halfSpan = (hx - lx) * 0.5f;
     }
-    mid.x = (lx + hx) * 0.5f;
-    mid.y = (ly + hy) * 0.5f;
+    halfSpan = (u1 - u0) * 0.5f;
     mid.z = GetZ(toIdx, mid.x, mid.y);
     return true;
 }
@@ -1309,11 +1559,17 @@ bool CNavMesh::GetLadderConnection(int fromIdx, int toIdx, int &ladderIdx, bool 
     ladderIdx = -1; up = false;
     if (fromIdx < 0 || fromIdx >= m_count) return false;
     const NavAreaData &a = m_areas[fromIdx];
+    if (!a.connMeta) return false;
     for (int k = 0; k < a.connCount; k++)
     {
-        if (a.connIdx[k] != toIdx || !a.connLadder || a.connLadder[k] == 0) continue;
+        if (a.connIdx[k] != toIdx) continue;
+        const NavEdgeMeta &meta = a.connMeta[k];
+        if (!meta.valid
+            || (meta.kind != NAV_EDGE_LADDER_UP && meta.kind != NAV_EDGE_LADDER_DOWN))
+            continue;
+        if (!a.connLadder || a.connLadder[k] == 0) continue;
         int code = a.connLadder[k];
-        up = code > 0;
+        up = meta.kind == NAV_EDGE_LADDER_UP;
         ladderIdx = (code > 0 ? code : -code) - 1;
         return ladderIdx >= 0 && ladderIdx < m_ladderCount;
     }
