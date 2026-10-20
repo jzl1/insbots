@@ -335,6 +335,7 @@ static bool CrossedExactPortalIntoArea(int fromIdx, int toIdx,
 // that seam should make ordinary waypoint following press +jump.
 bool WalkEdgeNeedsJump(int fromIdx, int toIdx)
 {
+    if (!g_NavMesh.CanJumpFrom(fromIdx)) return false;
     Vector seam;
     if (!g_NavMesh.GetPortal(fromIdx, toIdx, seam)) return false;
     float fromZ = g_NavMesh.GetZ(fromIdx, seam.x, seam.y);

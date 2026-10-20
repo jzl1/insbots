@@ -2442,10 +2442,6 @@ overwatch_done:
         if (contents & (CONTENTS_WATER | CONTENTS_SLIME))
             inWater = true;
     }
-    const NavAreaData *curNav = g_NavMesh.Area(CurrentArea(pos));
-    if (curNav && (curNav->attributes & NAVATTR_UNDERWATER))
-        inWater = true;
-
     // In water, strictly suppress sprint and clamp forward speed to smooth wading
     if (inWater)
     {

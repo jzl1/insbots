@@ -933,6 +933,12 @@ bool CNavMesh::Load(const char *path)
 }
 static const float NAV_LOOKUP_TIE_EPS = 0.001f;
 
+bool CNavMesh::CanJumpFrom(int areaIdx) const
+{
+    const NavAreaData *a = Area(areaIdx);
+    return !a || !(a->attributes & NAVATTR_NO_JUMP);
+}
+
 int CNavMesh::FindArea(const Vector &pos) const
 {
     INSPROF_SCOPE(INSPROF_FINDAREA);

@@ -2039,6 +2039,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             }
 
             const NavAreaData *cur = g_NavMesh.Area(m_path[m_pathCursor]);
+            bool canJump = g_NavMesh.CanJumpFrom(CurrentArea(pos));
             if (cur && !ladderMove)
             {
                 // Crouch only on imminent physical contact. nav_generate
@@ -2046,7 +2047,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                 // longer ducks bots while they stream through a passage; the
                 // LowCeilingAhead trace below only fires when a real overhang
                 // is within a few feet.
-                if (cur->attributes & NAVATTR_JUMP)   buttons |= IN_JUMP;
+                if ((cur->attributes & NAVATTR_JUMP) && canJump) buttons |= IN_JUMP;
             }
             if (!ladderMove && LowCeilingAhead(mvYaw)) buttons |= IN_DUCK;
             // Only jump when the waypoint is genuinely above the player - well
@@ -2069,6 +2070,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                     }
                 }
             }
+            if (!canJump) edgeStep = false;
             if (edgeStep && xyd(pos, m_moveTarget) < 96.0f)
                 buttons |= IN_JUMP;
         }

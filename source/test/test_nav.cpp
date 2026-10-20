@@ -533,6 +533,25 @@ int main(){
       { printf("FAIL: disconnected GetPathCost entered A*\n"); return 1; }
   }
   remove(discPath);
+    // Attribute semantics: NO_JUMP denies generic jump output from that area;
+    // PRECISE and UNDERWATER remain parsed and documented (the latter drives
+    // the bot water-speed path in bot_think.cpp).
+  const char *noJumpPath = "test_nav_no_jump.tmp";
+  if (!WriteForkFixture(noJumpPath, NAVATTR_NO_JUMP)) { printf("FAIL: write no-jump fixture\n"); return 1; }
+  CNavMesh mNoJump;
+  if (!mNoJump.Load(noJumpPath)) { printf("FAIL: no-jump load\n"); return 1; }
+  if (mNoJump.CanJumpFrom(1) || !mNoJump.CanJumpFrom(0))
+  { printf("FAIL: NO_JUMP permission\n"); return 1; }
+  remove(noJumpPath);
+  const char *flagsPath = "test_nav_flags.tmp";
+  if (!WriteForkFixture(flagsPath, NAVATTR_PRECISE))
+  { printf("FAIL: write attribute fixture\n"); return 1; }
+  CNavMesh mFlags;
+  if (!mFlags.Load(flagsPath)
+      || mFlags.Area(1)->attributes != NAVATTR_PRECISE
+      || !mFlags.CanJumpFrom(1))
+  { printf("FAIL: PRECISE parsing\n"); return 1; }
+  remove(flagsPath);
     // --- NAVATTR_AVOID (0x0080) verification ---
   const char *normalForkPath = "test_nav_fork_norm.tmp";
   WriteForkFixture(normalForkPath, 0);

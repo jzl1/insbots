@@ -15,10 +15,13 @@ enum
 {
     NAVATTR_CROUCH  = 0x01,
     NAVATTR_JUMP    = 0x02,
-    NAVATTR_PRECISE = 0x04,
-    NAVATTR_NO_JUMP    = 0x08,
+    NAVATTR_PRECISE = 0x04,       // parsed and retained; no per-area precision
+                                  // controller exists in this plugin (informational)
+    NAVATTR_NO_JUMP    = 0x08,    // suppress generic jump output from this area
     NAVATTR_AVOID      = 0x0080,   // Source NAV_MESH_AVOID: route around unless it's the only way
-    NAVATTR_UNDERWATER = 0x010000, // Source NAV_MESH_UNDERWATER
+    // v4-v9 NAV areas store 16-bit attributes. Newer Source's
+    // NAV_MESH_UNDERWATER (0x010000) cannot appear in this format; water
+    // movement is driven by CONTENTS_WATER/SLIME traces instead.
 };
 
 struct HidingSpot
@@ -163,6 +166,7 @@ public:
     // bot routes to the closest tile instead of beelining through walls.
     int   FindNearestArea(const Vector &pos) const;
     const NavAreaData *Area(int idx) const { return (idx >= 0 && idx < m_count) ? &m_areas[idx] : 0; }
+    bool  CanJumpFrom(int areaIdx) const;
 
     // A* between area indices; fills 'path' with up to maxLen indices
     // (start..goal). Returns length, or 0 on failure. When the complete route
