@@ -135,6 +135,25 @@ struct NavCostParams
     }
 };
 
+enum NavSearchStatus
+{
+    NAV_SEARCH_OK = 0,
+    NAV_SEARCH_INVALID_INPUT,
+    NAV_SEARCH_COMPONENT_MISMATCH,
+    NAV_SEARCH_UNREACHABLE,
+    NAV_SEARCH_ALLOC_FAILURE,
+    NAV_SEARCH_EXPANSION_LIMIT,
+    NAV_SEARCH_MALFORMED_GRAPH
+};
+
+struct NavSearchResult
+{
+    NavSearchStatus status;
+    float           cost;
+    int             pathLength;
+    bool            truncated;
+};
+
 class CNavMesh
 {
 public:
@@ -142,7 +161,7 @@ public:
                  m_connIdx(0), m_connBad(0), m_connLadder(0), m_connMeta(0), m_connCount(0),
                  m_areaIdTable(0), m_areaIdTableSize(0),
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
-                 m_costStamp(0), m_costSeq(0), m_costParams()
+                 m_costStamp(0), m_costSeq(0), m_costParams(), m_lastSearchStatus(NAV_SEARCH_OK)
     {
         for (int i = 0; i < 64; i++)
         {
@@ -157,6 +176,7 @@ public:
             m_costCache[i].cost = 0.0f;
             m_costCache[i].stamp = 0;
             m_costCache[i].seq = 0;
+            m_costCache[i].status = NAV_SEARCH_OK;
         }
     }
     ~CNavMesh() { Free(); }
@@ -190,6 +210,7 @@ public:
     // callers can compare routes without reconstructing a path. Returns -1
     // when start/goal is invalid or no route exists.
     float GetPathCost(int startIdx, int goalIdx, int seed = 0);
+    NavSearchStatus LastSearchStatus() const { return m_lastSearchStatus; }
 
     // Follows outgoing NAV connections starting at 'startIdx' and returns the
     // reachable area whose surface/center is closest to 'desired'. Chooses the
@@ -314,17 +335,22 @@ private:
     // and on a 25k-area mesh each miss is a full A*. Costs are stable until a
     // learned bad link changes, so entries live until then (or until the mesh
     // reloads). 256 entries covers every bot area for one objective.
-    struct CostEntry { int from, to; float cost; unsigned int stamp; unsigned int seq; };
+    struct CostEntry { int from, to; float cost; unsigned int stamp; unsigned int seq; int status; };
     CostEntry      m_costCache[256];
     unsigned int   m_costStamp;
     unsigned int m_costSeq;
     NavCostParams  m_costParams;
+    NavSearchStatus m_lastSearchStatus;
     void InvalidateCostCache() { m_costSeq = 0; if (++m_costStamp == 0) m_costStamp = 1; }
     void RefreshCostParamsFromGlobals();
     bool BuildEdgeMetadata(int fromIdx, int connSlot, NavEdgeMeta &out) const;
     bool BuildAreaIdMap();
     bool LoadInPlace(const char *path);
     void TakeState(CNavMesh &source);
+    float EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const;
+    NavSearchResult Search(int startIdx, int goalIdx, int seed,
+                           int *path, int maxLen, bool wantPath,
+                           bool *truncated);
 
     int  IndexOfId(unsigned int id) const;
     void BuildGrid();

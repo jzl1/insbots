@@ -20,6 +20,21 @@ static void put16(FILE*f,unsigned short v){fwrite(&v,2,1,f);}
 static void put8(FILE*f,unsigned char v){fwrite(&v,1,1,f);} 
 static void putf(FILE*f,float v){fwrite(&v,4,1,f);} 
 
+static float PathCostByEdges(const CNavMesh &m, const int *path, int length)
+{
+    float total = 0.0f;
+    for (int i = 0; i + 1 < length; i++)
+    {
+        const NavAreaData *a = m.Area(path[i]);
+        int slot = -1;
+        for (int k = 0; k < a->connCount; k++)
+            if (a->connIdx[k] == path[i + 1]) { slot = k; break; }
+        if (slot < 0) return -1.0f;
+        total += m.EdgeCost(path[i], path[i + 1], slot, 0);
+    }
+    return total;
+}
+
 static void WriteAreaV9(FILE *f, unsigned int id,
                         float x0, float y0, float z0,
                         float x1, float y1, float z1,
@@ -185,6 +200,30 @@ static bool WriteForkFixture(const char *path, unsigned short area2Attr)
     putf(f, 0); putf(f, 0);
     put32(f, 0); put32(f, 0); put32(f, 0); put32(f, 0);
     put8(f, 0); put8(f, 0); put32(f, 0); put16(f, 0); put32(f, 0); put32(f, 0); putf(f, 0); putf(f, 0);
+    put32(f, 0);
+    fclose(f);
+    return true;
+}
+
+static bool WriteTwoAreaFixture(const char *path, float spacing)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0); put32(f, 2);
+    put32(f, 1); put16(f, 0);
+    putf(f, -25); putf(f, -25); putf(f, 0); putf(f, 25); putf(f, 25); putf(f, 0);
+    putf(f, 0); putf(f, 0);
+    put32(f, 1); put32(f, 2); put32(f, 0); put32(f, 0); put32(f, 0);
+    put8(f, 0); put8(f, 0); put32(f, 0); put16(f, 0); put32(f, 0); put32(f, 0);
+    putf(f, 0); putf(f, 0);
+    put32(f, 2); put16(f, 0);
+    putf(f, spacing - 25); putf(f, -25); putf(f, 0);
+    putf(f, spacing + 25); putf(f, 25); putf(f, 0);
+    putf(f, 0); putf(f, 0);
+    put32(f, 1); put32(f, 1); put32(f, 0); put32(f, 0); put32(f, 0);
+    put8(f, 0); put8(f, 0); put32(f, 0); put16(f, 0); put32(f, 0); put32(f, 0);
+    putf(f, 0); putf(f, 0);
     put32(f, 0);
     fclose(f);
     return true;
@@ -519,6 +558,8 @@ int main(){
   if (mTx.Load(txBadPath) || mTx.Count() != 4
       || mTx.BuildPath(0, 3, txPath, 16) <= 0)
   { printf("FAIL: corrupt reload replaced good mesh\n"); return 1; }
+  if (mTx.LastSearchStatus() != NAV_SEARCH_OK)
+  { printf("FAIL: failed reload changed search status\n"); return 1; }
   mTx.MarkBadConnection(0, 1);
   mTx.MarkBadConnection(0, 1);
   if (!mTx.SaveBadLinks(txLearnPath)) { printf("FAIL: save tx learned links\n"); return 1; }
@@ -527,6 +568,22 @@ int main(){
       || mTx.LoadBadLinks(txLearnPath) != 1 || mTx.BadCount(0, 1) != 2)
   { printf("FAIL: successful reload/learned-link restore\n"); return 1; }
   remove(txGoodPath); remove(txBadPath); remove(txReloadPath); remove(txLearnPath);
+
+  // Reload must invalidate cached path costs even when area indices still line
+  // up, otherwise a query could reuse the previous mesh's geometry.
+  const char *cacheNearPath = "test_nav_cache_near.tmp";
+  const char *cacheFarPath = "test_nav_cache_far.tmp";
+  if (!WriteTwoAreaFixture(cacheNearPath, 100.0f)
+      || !WriteTwoAreaFixture(cacheFarPath, 500.0f))
+  { printf("FAIL: write reload cache fixtures\n"); return 1; }
+  CNavMesh mCacheReload;
+  if (!mCacheReload.Load(cacheNearPath)) { printf("FAIL: near cache load\n"); return 1; }
+  float nearCost = mCacheReload.GetPathCost(0, 1, 0);
+  if (!mCacheReload.Load(cacheFarPath)) { printf("FAIL: far cache load\n"); return 1; }
+  float farCost = mCacheReload.GetPathCost(0, 1, 0);
+  if (fabsf(nearCost - 100.0f) > 0.01f || fabsf(farCost - 500.0f) > 0.01f)
+  { printf("FAIL: stale cost across reload near=%.3f far=%.3f\n", nearCost, farCost); return 1; }
+  remove(cacheNearPath); remove(cacheFarPath);
 
     // Directed reachability frontier: the protected component is one-way into
   // the main component, so the closest reachable area to it is area 2.
@@ -538,6 +595,8 @@ int main(){
   {
       int dpath[16];
       if (md.BuildPath(0, 3, dpath, 16) != 0) { printf("FAIL: protected route must be zero\n"); return 1; }
+      if (md.LastSearchStatus() != NAV_SEARCH_UNREACHABLE)
+      { printf("FAIL: unreachable search status\n"); return 1; }
       Vector desired(550.f, 50.f, 0.f);
       int proxy = md.FindClosestReachableArea(0, desired);
       if (proxy != 2) { printf("FAIL: reachable proxy=%d\n", proxy); return 1; }
@@ -557,10 +616,14 @@ int main(){
       int discRoute[8];
       if (mDisc.BuildPath(0, 1, discRoute, 8) != 0)
       { printf("FAIL: disconnected path returned a route\n"); return 1; }
+      if (mDisc.LastSearchStatus() != NAV_SEARCH_COMPONENT_MISMATCH)
+      { printf("FAIL: component-mismatch path status\n"); return 1; }
       if (mDisc.m_mark != markBefore)
       { printf("FAIL: disconnected BuildPath entered A*\n"); return 1; }
       if (mDisc.GetPathCost(0, 1, 0) >= 0.0f)
       { printf("FAIL: disconnected cost was reachable\n"); return 1; }
+      if (mDisc.LastSearchStatus() != NAV_SEARCH_COMPONENT_MISMATCH)
+      { printf("FAIL: component-mismatch cost status\n"); return 1; }
       if (mDisc.m_mark != markBefore)
       { printf("FAIL: disconnected GetPathCost entered A*\n"); return 1; }
   }
@@ -592,6 +655,20 @@ int main(){
   int pathBuf[16];
   int pLen = mNorm.BuildPath(0, 3, pathBuf, 16);
   if (pLen != 3 || pathBuf[1] != 1) { printf("FAIL: normal path should pick Area 2\n"); return 1; }
+  float edgePathCost = PathCostByEdges(mNorm, pathBuf, pLen);
+  float queryPathCost = mNorm.GetPathCost(0, 3, 0);
+  if (edgePathCost < 0.0f || fabsf(edgePathCost - queryPathCost) > 0.01f)
+  { printf("FAIL: shared path/cost disagreement %.3f vs %.3f\n", edgePathCost, queryPathCost); return 1; }
+  NavClearDangerZones();
+  g_navDangerEnabled = false;
+  float normalCost = mNorm.GetPathCost(0, 3, 0);
+  NavAddDangerZone(mNorm.Area(1)->center, 1000.0f);
+  g_navDangerEnabled = true;
+  float dangerCost = mNorm.GetPathCost(0, 3, 0);
+  g_navDangerEnabled = false;
+  NavClearDangerZones();
+  if (dangerCost <= normalCost)
+  { printf("FAIL: danger-zone cost did not change path cost\n"); return 1; }
   remove(normalForkPath);
   const char *avoidForkPath = "test_nav_fork_avoid.tmp";
   WriteForkFixture(avoidForkPath, 0x0080);

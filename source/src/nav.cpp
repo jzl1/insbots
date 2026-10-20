@@ -212,6 +212,7 @@ void CNavMesh::Free()
     m_gridStart = 0; m_gridCells = 0;
     m_gridW = m_gridH = 0;
     m_areas = 0; m_count = 0;
+    m_lastSearchStatus = NAV_SEARCH_OK;
     for (int i = 0; i < 64; i++)
     {
         m_fbCache[i].key = 0;
@@ -415,9 +416,12 @@ void CNavMesh::TakeState(CNavMesh &source)
     m_gridCell = source.m_gridCell;
     m_gridStart = source.m_gridStart;
     m_gridCells = source.m_gridCells;
-    m_costStamp = source.m_costStamp;
-    m_costSeq = source.m_costSeq;
+    // Free() invalidated the old cache before this transfer. Keep that fresh
+    // stamp: copying the candidate's zero stamp could make entries from the
+    // previous mesh look valid again.
+    m_costSeq = 0;
     m_costParams = source.m_costParams;
+    m_lastSearchStatus = source.m_lastSearchStatus;
 
     source.m_areas = 0;
     source.m_count = 0;
@@ -1996,185 +2000,219 @@ bool CNavMesh::GetLadderConnection(int fromIdx, int toIdx, int &ladderIdx, bool 
     return false;
 }
 
-int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int seed, bool *truncated)
+float CNavMesh::EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const
 {
-    INSPROF_SCOPE(INSPROF_BUILDPATH);
-    if (startIdx < 0 || goalIdx < 0 || startIdx >= m_count || goalIdx >= m_count) return 0;
-    if (!path || maxLen <= 0) return 0;
-    if (startIdx == goalIdx) { path[0] = startIdx; return 1; }
-    if (m_areas[startIdx].component != m_areas[goalIdx].component) return 0;
+    const NavAreaData &from = m_areas[fromIdx];
+    const NavAreaData &to = m_areas[toIdx];
+    Vector step = to.center - from.center;
+    float cost = step.Length();
+
+    int ladderIdx = -1;
+    bool ladderUp = false;
+    bool ladderEdge = GetLadderConnection(fromIdx, toIdx, ladderIdx, ladderUp);
+    if (ladderEdge)
+    {
+        const NavLadderData *ladder = Ladder(ladderIdx);
+        float climbLen = ladder ? ladder->length : 0.0f;
+        float minClimb = fabsf(step.z);
+        if (climbLen < minClimb) climbLen = minClimb;
+        cost = climbLen + m_costParams.ladderPenalty;
+        if (ladderUp) cost += m_costParams.ladderUpPenalty;
+    }
+    else if (step.z < -120.0f)
+    {
+        // Falling off a roof is discouraged, but not forbidden.
+        cost += 400.0f;
+    }
+
+    if (to.attributes & NAVATTR_CROUCH) cost += m_costParams.crouchPenalty;
+    if (to.attributes & NAVATTR_JUMP)   cost += m_costParams.jumpPenalty;
+    if (to.attributes & NAVATTR_AVOID)  cost += m_costParams.avoidPenalty;
+
+    if (m_costParams.dangerEnabled && m_costParams.dangerPenalty > 0.0f && s_dangerCount > 0)
+    {
+        const Vector &p = to.center;
+        for (int z = 0; z < s_dangerCount; z++)
+        {
+            float dx = p.x - s_dangerPos[z].x;
+            float dy = p.y - s_dangerPos[z].y;
+            float dz = p.z - s_dangerPos[z].z;
+            float r = s_dangerRadius[z];
+            if (dx * dx + dy * dy + dz * dz * 4.0f < r * r)
+            {
+                cost += m_costParams.dangerPenalty;
+                break;
+            }
+        }
+    }
+
+    unsigned char bad = (from.connBad && connSlot >= 0) ? from.connBad[connSlot] : 0;
+    if (bad >= 2)
+    {
+        int confidence = (int)bad - 1;
+        if (confidence > 8) confidence = 8;
+        cost += (float)confidence * 3500.0f;
+        if (bad >= 3) cost += 500000.0f;
+    }
+
+    if (seed)
+    {
+        unsigned int h = (unsigned int)fromIdx * 2654435761u
+                       + (unsigned int)toIdx * 40503u
+                       + (unsigned int)seed * 2246822519u;
+        cost += (float)(h & 0x3F);
+    }
+    return cost;
+}
+
+NavSearchResult CNavMesh::Search(int startIdx, int goalIdx, int seed,
+                                 int *path, int maxLen, bool wantPath,
+                                 bool *truncated)
+{
+    NavSearchResult result;
+    result.status = NAV_SEARCH_INVALID_INPUT;
+    result.cost = -1.0f;
+    result.pathLength = 0;
+    result.truncated = false;
+    if (truncated) *truncated = false;
+    if (startIdx < 0 || goalIdx < 0 || startIdx >= m_count || goalIdx >= m_count)
+        return result;
+    if (wantPath && (!path || maxLen <= 0)) return result;
 
     RefreshCostParamsFromGlobals();
+    if (m_areas[startIdx].component != m_areas[goalIdx].component)
+    {
+        result.status = NAV_SEARCH_COMPONENT_MISMATCH;
+        return result;
+    }
+    if (startIdx == goalIdx)
+    {
+        result.status = NAV_SEARCH_OK;
+        result.cost = 0.0f;
+        result.pathLength = wantPath ? 1 : 0;
+        if (wantPath) path[0] = startIdx;
+        return result;
+    }
+
     m_mark++;
+    if (m_mark == 0) m_mark = 1;
     const Vector &goalPos = m_areas[goalIdx].center;
 
-    // binary min-heap open list keyed by f, with lazy deletion (improved nodes
-    // are re-pushed; stale duplicates are skipped on pop). Scales to the large
-    // generated meshes (tens of thousands of areas) where a linear scan choked.
-        static int *open = 0; static int openCap = 0;
-    if (m_count < 0 || (size_t)m_count > ((size_t)0x7FFFFFFF / 2 - 16)) return 0;
+    // Binary min-heap open list with lazy deletion. Improved nodes are
+    // re-pushed; stale duplicates are skipped when popped.
+    static int *open = 0;
+    static int openCap = 0;
+    if ((size_t)m_count > ((size_t)0x7FFFFFFF / 2 - 16))
+    {
+        result.status = NAV_SEARCH_ALLOC_FAILURE;
+        return result;
+    }
     int need = m_count * 2 + 16;
     if (openCap < need)
     {
-        if (!CheckedRealloc((void **)&open, (size_t)need * sizeof(int))) return 0;
+        if (!CheckedRealloc((void **)&open, (size_t)need * sizeof(int)))
+        {
+            result.status = NAV_SEARCH_ALLOC_FAILURE;
+            return result;
+        }
         openCap = need;
     }
     int openCount = 0;
-
     NavAreaData *A = m_areas;
-    A[startIdx].g = 0;
-    Vector d0 = goalPos - A[startIdx].center;
-    A[startIdx].f = d0.Length();
+    A[startIdx].g = 0.0f;
+    A[startIdx].f = (goalPos - A[startIdx].center).Length();
     A[startIdx].parent = -1;
     A[startIdx].openMark = m_mark;
     open[openCount++] = startIdx;
 
-    int guard = 0;
-    while (openCount > 0 && guard++ < 2000000)
+    const int maxExpansions = 2000000;
+    int expansions = 0;
+    while (openCount > 0)
     {
-        // heap extract-min (pop root, move last up, sift down)
+        if (expansions++ >= maxExpansions)
+        {
+            result.status = NAV_SEARCH_EXPANSION_LIMIT;
+            return result;
+        }
+
         int cur = open[0];
         open[0] = open[--openCount];
+        int pi = 0;
+        for (;;)
         {
-            int pi = 0;
-            for (;;)
-            {
-                int l = pi * 2 + 1, r = l + 1, sm = pi;
-                if (l < openCount && A[open[l]].f < A[open[sm]].f) sm = l;
-                if (r < openCount && A[open[r]].f < A[open[sm]].f) sm = r;
-                if (sm == pi) break;
-                int t = open[sm]; open[sm] = open[pi]; open[pi] = t; pi = sm;
-            }
+            int l = pi * 2 + 1;
+            int r = l + 1;
+            int smallest = pi;
+            if (l < openCount && A[open[l]].f < A[open[smallest]].f) smallest = l;
+            if (r < openCount && A[open[r]].f < A[open[smallest]].f) smallest = r;
+            if (smallest == pi) break;
+            int t = open[smallest];
+            open[smallest] = open[pi];
+            open[pi] = t;
+            pi = smallest;
         }
-        // lazy deletion: a stale duplicate for an already-expanded node
         if (A[cur].closedMark == m_mark) continue;
 
         if (cur == goalIdx)
         {
-            // Two-pass reconstruction: count the whole parent chain first so a
-            // route longer than the caller buffer is returned as a true prefix
-            // (start -> ... -> prefixEnd) with *truncated set, letting the
-            // caller continue pathfinding from the prefix end next frame.
-            int totalNodes = 0;
-            for (int c = cur; c != -1; c = A[c].parent)
+            result.status = NAV_SEARCH_OK;
+            result.cost = A[cur].g;
+            if (wantPath)
             {
-                if (++totalNodes > m_count) return 0;   // corrupt parent chain
+                int totalNodes = 0;
+                for (int c = cur; c != -1; c = A[c].parent)
+                {
+                    if (++totalNodes > m_count)
+                    {
+                        result.status = NAV_SEARCH_MALFORMED_GRAPH;
+                        result.cost = -1.0f;
+                        return result;
+                    }
+                }
+                int emitCount = totalNodes < maxLen ? totalNodes : maxLen;
+                result.truncated = totalNodes > maxLen;
+                if (truncated) *truncated = result.truncated;
+                int skip = totalNodes - emitCount;
+                int c = cur;
+                for (int i = 0; i < skip; i++) c = A[c].parent;
+                for (int i = 0; i < emitCount; i++)
+                {
+                    path[i] = c;
+                    c = A[c].parent;
+                }
+                for (int i = 0; i < emitCount / 2; i++)
+                {
+                    int t = path[i];
+                    path[i] = path[emitCount - 1 - i];
+                    path[emitCount - 1 - i] = t;
+                }
+                result.pathLength = emitCount;
             }
-            int emitCount = totalNodes < maxLen ? totalNodes : maxLen;
-            if (truncated) *truncated = (totalNodes > maxLen);
-            int skip = totalNodes - emitCount;
-            int c = cur;
-            for (int i = 0; i < skip; i++) c = A[c].parent;
-            for (int i = 0; i < emitCount; i++)
-            {
-                path[i] = c;
-                c = A[c].parent;
-            }
-            for (int i = 0; i < emitCount / 2; i++)
-            {
-                int t = path[i];
-                path[i] = path[emitCount - 1 - i];
-                path[emitCount - 1 - i] = t;
-            }
-            return emitCount;
+            return result;
         }
-        A[cur].closedMark = m_mark;
 
+        A[cur].closedMark = m_mark;
         for (int k = 0; k < A[cur].connCount; k++)
         {
             int nb = A[cur].connIdx[k];
             if (A[nb].closedMark == m_mark) continue;
-            Vector step = A[nb].center - A[cur].center;
-            float cost = step.Length();
-
-            // ---- ladder-aware A* logic ----
-            // Typed ladder edges are NOT costed like walk edges: the actual
-            // climb distance is the ladder record length (never shorter than
-            // the vertical span between the two area centres, so a short or
-            // stale record cannot make a ladder path artificially cheap), an
-            // avoidance penalty keeps flat routes preferred when one exists,
-            // and climbing UP costs extra because it is the slow/risky
-            // direction. Descents are the "free" direction (no big-drop
-            // penalty - it is a controlled ladder descent, not a fall).
-            int ladderIdx = -1; bool ladderUp = false;
-            bool ladderEdge = GetLadderConnection(cur, nb, ladderIdx, ladderUp);
-            if (ladderEdge)
-            {
-                const NavLadderData *ladder = Ladder(ladderIdx);
-                float climbLen = ladder ? ladder->length : 0.0f;
-                float minClimb = fabsf(step.z);
-                if (climbLen < minClimb) climbLen = minClimb;
-                cost = climbLen + m_costParams.ladderPenalty;
-                if (ladderUp) cost += m_costParams.ladderUpPenalty;
-            }
-            else
-            {
-                // discourage big drops (falling off roofs)
-                if (step.z < -120.0f) cost += 400.0f;
-            }
-            // AVOID jump/crouch areas: large additive penalties so bots route
-            // around anything needing a jump or a crouch when a flat path exists,
-            // but still use them if it's the only way. Tunable via the globals.
-            if (A[nb].attributes & NAVATTR_CROUCH) cost += m_costParams.crouchPenalty;
-            if (A[nb].attributes & NAVATTR_JUMP)   cost += m_costParams.jumpPenalty;
-            if (A[nb].attributes & NAVATTR_AVOID)  cost += m_costParams.avoidPenalty;
-            // Dynamic firefight avoidance for capture-committed bots: areas
-            // inside an active engagement pay a large additive cost so A*
-            // prefers a flat detour around the fight. z distance is weighted
-            // so a firefight on another floor does not block travel above or
-            // below it. Zones are rebuilt every frame by the roster.
-            if (m_costParams.dangerEnabled && m_costParams.dangerPenalty > 0.0f && s_dangerCount > 0)
-            {
-                const Vector &p = A[nb].center;
-                for (int z = 0; z < s_dangerCount; z++)
-                {
-                    float dx = p.x - s_dangerPos[z].x;
-                    float dy = p.y - s_dangerPos[z].y;
-                    float dz = p.z - s_dangerPos[z].z;
-                    float r  = s_dangerRadius[z];
-                    if (dx*dx + dy*dy + dz*dz*4.0f < r*r)
-                    {
-                        cost += m_costParams.dangerPenalty;
-                        break;
-                    }
-                }
-            }
-            // Confidence model: one report is tentative and costs nothing; two
-            // reports strongly discourage the edge; three or more effectively
-            // hard-block it whenever any alternative exists. It remains a soft
-            // cost so an isolated objective can still be reached/rescued when
-            // this is literally the graph's only connection.
-            unsigned char bad = A[cur].connBad ? A[cur].connBad[k] : 0;
-            if (bad >= 2)
-            {
-                int confidence = (int)bad - 1;
-                if (confidence > 8) confidence = 8; // no unbounded penalty arms race
-                cost += (float)confidence * 3500.0f;
-                if (bad >= 3) cost += 500000.0f;
-            }
-            // per-bot jitter: diversifies routes so bots don't all take the same
-            // shortest path (surfaces bad links faster; spreads the bots out)
-            if (seed)
-            {
-                unsigned int h = (unsigned int)cur * 2654435761u
-                               + (unsigned int)nb * 40503u
-                               + (unsigned int)seed * 2246822519u;
-                cost += (float)(h & 0x3F);   // 0..63 units of noise
-            }
+            float cost = EdgeCost(cur, nb, k, seed);
             float g = A[cur].g + cost;
-            if (A[nb].openMark == m_mark && g >= A[nb].g) continue;   // no improvement
+            if (A[nb].openMark == m_mark && g >= A[nb].g) continue;
             A[nb].g = g;
-            Vector h = goalPos - A[nb].center;
-            A[nb].f = g + h.Length();
+            A[nb].f = g + (goalPos - A[nb].center).Length();
             A[nb].parent = cur;
             A[nb].openMark = m_mark;
-            // heap push nb (re-push on improvement = lazy decrease-key). Grow if
-            // duplicates ever exceed the cap.
-                        if (openCount >= openCap)
+
+            if (openCount >= openCap)
             {
                 int newCap = openCap * 2 + 16;
-                if (newCap <= openCap || !CheckedRealloc((void **)&open, (size_t)newCap * sizeof(int)))
-                    return 0;
+                if (newCap <= openCap
+                    || !CheckedRealloc((void **)&open, (size_t)newCap * sizeof(int)))
+                {
+                    result.status = NAV_SEARCH_ALLOC_FAILURE;
+                    return result;
+                }
                 openCap = newCap;
             }
             int ci = openCount++;
@@ -2183,29 +2221,48 @@ int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int se
             {
                 int par = (ci - 1) >> 1;
                 if (A[open[par]].f <= A[open[ci]].f) break;
-                int t = open[par]; open[par] = open[ci]; open[ci] = t; ci = par;
+                int t = open[par];
+                open[par] = open[ci];
+                open[ci] = t;
+                ci = par;
             }
         }
     }
-    return 0;
+    result.status = NAV_SEARCH_UNREACHABLE;
+    return result;
+}
+
+int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int seed, bool *truncated)
+{
+    INSPROF_SCOPE(INSPROF_BUILDPATH);
+    NavSearchResult result = Search(startIdx, goalIdx, seed, path, maxLen, true, truncated);
+    m_lastSearchStatus = result.status;
+    return result.status == NAV_SEARCH_OK ? result.pathLength : 0;
 }
 
 float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
 {
     INSPROF_SCOPE(INSPROF_GETPATHCOST);
     if (startIdx < 0 || goalIdx < 0 || startIdx >= m_count || goalIdx >= m_count)
+    {
+        m_lastSearchStatus = NAV_SEARCH_INVALID_INPUT;
         return -1.0f;
-    if (startIdx == goalIdx) return 0.0f;
+    }
+    if (startIdx == goalIdx)
+    {
+        m_lastSearchStatus = NAV_SEARCH_OK;
+        return 0.0f;
+    }
 
     RefreshCostParamsFromGlobals();
     if (m_areas[startIdx].component != m_areas[goalIdx].component)
+    {
+        m_lastSearchStatus = NAV_SEARCH_COMPONENT_MISMATCH;
         return -1.0f;
+    }
 
-    // Deterministic (seed 0, no danger zones) queries are cached: capture
-    // refill and objective picking re-ask the same pairs dozens of times per
-    // second, and each miss on a 25k-area mesh is a full A*. Costs only change
-    // when learned links change or the mesh reloads, both of which bump the
-    // stamp. Per-bot jitter (seed) and danger routing are never cached.
+    // Deterministic cost queries are cached. Jittered and danger-aware
+    // queries deliberately bypass the cache.
     if (seed == 0 && !m_costParams.dangerEnabled)
     {
         for (int i = 0; i < 256; i++)
@@ -2213,165 +2270,18 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
             if (m_costCache[i].stamp == m_costStamp
                 && m_costCache[i].from == startIdx
                 && m_costCache[i].to == goalIdx)
-                {
+            {
                 m_costCache[i].seq = ++m_costSeq;
+                m_lastSearchStatus = (NavSearchStatus)m_costCache[i].status;
                 return m_costCache[i].cost;
             }
         }
     }
 
-    m_mark++;
-    const Vector &goalPos = m_areas[goalIdx].center;
-
-    // Same binary min-heap open list as BuildPath (lazy deletion; stale
-    // duplicates are skipped on pop).
-        static int *open = 0; static int openCap = 0;
-    if (m_count < 0 || (size_t)m_count > ((size_t)0x7FFFFFFF / 2 - 16)) return -1.0f;
-    int need = m_count * 2 + 16;
-    if (openCap < need)
-    {
-        if (!CheckedRealloc((void **)&open, (size_t)need * sizeof(int))) return -1.0f;
-        openCap = need;
-    }
-    int openCount = 0;
-
-    NavAreaData *A = m_areas;
-    A[startIdx].g = 0;
-    Vector d0 = goalPos - A[startIdx].center;
-    A[startIdx].f = d0.Length();
-    A[startIdx].parent = -1;
-    A[startIdx].openMark = m_mark;
-    open[openCount++] = startIdx;
-
-    int guard = 0;
-    while (openCount > 0 && guard++ < 2000000)
-    {
-        int cur = open[0];
-        open[0] = open[--openCount];
-        {
-            int pi = 0;
-            for (;;)
-            {
-                int l = pi * 2 + 1, r = l + 1, sm = pi;
-                if (l < openCount && A[open[l]].f < A[open[sm]].f) sm = l;
-                if (r < openCount && A[open[r]].f < A[open[sm]].f) sm = r;
-                if (sm == pi) break;
-                int t = open[sm]; open[sm] = open[pi]; open[pi] = t; pi = sm;
-            }
-        }
-        if (A[cur].closedMark == m_mark) continue;
-        if (cur == goalIdx)
-        {
-            float result = A[cur].g;
-            if (seed == 0 && !m_costParams.dangerEnabled)
-            {
-                int slot = -1;
-                unsigned int oldestSeq = 0xFFFFFFFFu;
-                for (int i = 0; i < 256; i++)
-                {
-                    if (m_costCache[i].stamp != m_costStamp)
-                    {
-                        slot = i;
-                        break;
-                    }
-                    if (m_costCache[i].seq < oldestSeq)
-                    {
-                        oldestSeq = m_costCache[i].seq;
-                        slot = i;
-                    }
-                }
-                if (slot < 0) slot = 0;
-                m_costCache[slot].from = startIdx;
-                m_costCache[slot].to = goalIdx;
-                m_costCache[slot].cost = result;
-                m_costCache[slot].stamp = m_costStamp;
-        m_costCache[slot].seq = ++m_costSeq;
-            }
-            return result;
-        }
-        A[cur].closedMark = m_mark;
-
-        for (int k = 0; k < A[cur].connCount; k++)
-        {
-            int nb = A[cur].connIdx[k];
-            if (A[nb].closedMark == m_mark) continue;
-            Vector step = A[nb].center - A[cur].center;
-            float cost = step.Length();
-
-            int ladderIdx = -1; bool ladderUp = false;
-            bool ladderEdge = GetLadderConnection(cur, nb, ladderIdx, ladderUp);
-            if (ladderEdge)
-            {
-                const NavLadderData *ladder = Ladder(ladderIdx);
-                float climbLen = ladder ? ladder->length : 0.0f;
-                float minClimb = fabsf(step.z);
-                if (climbLen < minClimb) climbLen = minClimb;
-                cost = climbLen + m_costParams.ladderPenalty;
-                if (ladderUp) cost += m_costParams.ladderUpPenalty;
-            }
-            else
-            {
-                if (step.z < -120.0f) cost += 400.0f;
-            }
-            if (A[nb].attributes & NAVATTR_CROUCH) cost += m_costParams.crouchPenalty;
-            if (A[nb].attributes & NAVATTR_JUMP)   cost += m_costParams.jumpPenalty;
-            if (A[nb].attributes & NAVATTR_AVOID)  cost += m_costParams.avoidPenalty;
-            if (m_costParams.dangerEnabled && m_costParams.dangerPenalty > 0.0f && s_dangerCount > 0)
-            {
-                const Vector &p = A[nb].center;
-                for (int z = 0; z < s_dangerCount; z++)
-                {
-                    float dx = p.x - s_dangerPos[z].x;
-                    float dy = p.y - s_dangerPos[z].y;
-                    float dz = p.z - s_dangerPos[z].z;
-                    float r  = s_dangerRadius[z];
-                    if (dx*dx + dy*dy + dz*dz*4.0f < r*r)
-                    {
-                        cost += m_costParams.dangerPenalty;
-                        break;
-                    }
-                }
-            }
-            unsigned char bad = A[cur].connBad ? A[cur].connBad[k] : 0;
-            if (bad >= 2)
-            {
-                int confidence = (int)bad - 1;
-                if (confidence > 8) confidence = 8;
-                cost += (float)confidence * 3500.0f;
-                if (bad >= 3) cost += 500000.0f;
-            }
-            if (seed)
-            {
-                unsigned int h = (unsigned int)cur * 2654435761u
-                               + (unsigned int)nb * 40503u
-                               + (unsigned int)seed * 2246822519u;
-                cost += (float)(h & 0x3F);
-            }
-            float g = A[cur].g + cost;
-            if (A[nb].openMark == m_mark && g >= A[nb].g) continue;
-            A[nb].g = g;
-            Vector h = goalPos - A[nb].center;
-            A[nb].f = g + h.Length();
-            A[nb].parent = cur;
-            A[nb].openMark = m_mark;
-                        if (openCount >= openCap)
-            {
-                int newCap = openCap * 2 + 16;
-                if (newCap <= openCap || !CheckedRealloc((void **)&open, (size_t)newCap * sizeof(int)))
-                    return -1.0f;
-                openCap = newCap;
-            }
-            int ci = openCount++;
-            open[ci] = nb;
-            while (ci > 0)
-            {
-                int par = (ci - 1) >> 1;
-                if (A[open[par]].f <= A[open[ci]].f) break;
-                int t = open[par]; open[par] = open[ci]; open[ci] = t; ci = par;
-            }
-        }
-    }
-    if (seed == 0 && !m_costParams.dangerEnabled)
+    NavSearchResult result = Search(startIdx, goalIdx, seed, 0, 0, false, 0);
+    m_lastSearchStatus = result.status;
+    if (seed == 0 && !m_costParams.dangerEnabled
+        && result.status != NAV_SEARCH_ALLOC_FAILURE)
     {
         int slot = -1;
         unsigned int oldestSeq = 0xFFFFFFFFu;
@@ -2391,11 +2301,12 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
         if (slot < 0) slot = 0;
         m_costCache[slot].from = startIdx;
         m_costCache[slot].to = goalIdx;
-        m_costCache[slot].cost = -1.0f;
+        m_costCache[slot].cost = result.status == NAV_SEARCH_OK ? result.cost : -1.0f;
         m_costCache[slot].stamp = m_costStamp;
         m_costCache[slot].seq = ++m_costSeq;
+        m_costCache[slot].status = result.status;
     }
-    return -1.0f;
+    return result.status == NAV_SEARCH_OK ? result.cost : -1.0f;
 }
 
 int CNavMesh::FindClosestReachableArea(int startIdx, const Vector &desired)
