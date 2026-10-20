@@ -852,7 +852,7 @@ public:
                                 float viewYaw, float &fwd, float &side);
     void     ResetHadithaDoorGate();
     void     InvalidateAdvanceTargets();
-    void     InvalidateNavMeshState();
+    void     InvalidateNavMeshState(bool reloadSucceeded);
     void     ResetSniperCaches();
     void     RequestSniperCache(int team, int obj);
     void     UpdateSniperCaches(float now);

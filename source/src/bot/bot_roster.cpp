@@ -1606,7 +1606,7 @@ void CBotRoster::FrameUpdate(bool simulating)
     }
 }
 
-void CBotRoster::InvalidateNavMeshState()
+void CBotRoster::InvalidateNavMeshState(bool reloadSucceeded)
 {
     ResetSniperCaches();
     ResetLadderQueues();
@@ -1628,7 +1628,9 @@ void CBotRoster::InvalidateNavMeshState()
             m_bots[i].ResetLadderTraversal(true);
         }
     }
-    if (m_mapname[0] && g_NavMesh.IsLoaded() && insbot_learn_persist.GetBool())
+    if (reloadSucceeded)
+        m_navLoadedForMap = true;
+    if (reloadSucceeded && m_mapname[0] && insbot_learn_persist.GetBool())
     {
         char gamedir[256];
         if (engine) engine->GetGameDir(gamedir, sizeof(gamedir));

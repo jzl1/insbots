@@ -385,6 +385,65 @@ void CNavMesh::BuildGrid()
 
 bool CNavMesh::Load(const char *path)
 {
+    CNavMesh candidate;
+    if (!candidate.LoadInPlace(path)) return false;
+    Free();
+    TakeState(candidate);
+    return true;
+}
+
+void CNavMesh::TakeState(CNavMesh &source)
+{
+    m_areas = source.m_areas;
+    m_count = source.m_count;
+    m_mark = source.m_mark;
+    m_ladders = source.m_ladders;
+    m_ladderCount = source.m_ladderCount;
+    m_sniperSpots = source.m_sniperSpots;
+    m_sniperSpotCount = source.m_sniperSpotCount;
+    m_connIdx = source.m_connIdx;
+    m_connBad = source.m_connBad;
+    m_connLadder = source.m_connLadder;
+    m_connMeta = source.m_connMeta;
+    m_connCount = source.m_connCount;
+    m_areaIdTable = source.m_areaIdTable;
+    m_areaIdTableSize = source.m_areaIdTableSize;
+    m_gridW = source.m_gridW;
+    m_gridH = source.m_gridH;
+    m_gridMinX = source.m_gridMinX;
+    m_gridMinY = source.m_gridMinY;
+    m_gridCell = source.m_gridCell;
+    m_gridStart = source.m_gridStart;
+    m_gridCells = source.m_gridCells;
+    m_costStamp = source.m_costStamp;
+    m_costSeq = source.m_costSeq;
+    m_costParams = source.m_costParams;
+
+    source.m_areas = 0;
+    source.m_count = 0;
+    source.m_mark = 0;
+    source.m_ladders = 0;
+    source.m_ladderCount = 0;
+    source.m_sniperSpots = 0;
+    source.m_sniperSpotCount = 0;
+    source.m_connIdx = 0;
+    source.m_connBad = 0;
+    source.m_connLadder = 0;
+    source.m_connMeta = 0;
+    source.m_connCount = 0;
+    source.m_areaIdTable = 0;
+    source.m_areaIdTableSize = 0;
+    source.m_gridW = source.m_gridH = 0;
+    source.m_gridMinX = source.m_gridMinY = 0.0f;
+    source.m_gridCell = 0.0f;
+    source.m_gridStart = 0;
+    source.m_gridCells = 0;
+    source.m_costStamp = 0;
+    source.m_costSeq = 0;
+}
+
+bool CNavMesh::LoadInPlace(const char *path)
+{
     Free();
 
     FILE *fp = fopen(path, "rb");

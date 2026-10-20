@@ -486,6 +486,9 @@ static void Cmd_InsBot_Status()
 
 static void Cmd_InsBot_NavReload()
 {
+    // Preserve links learned since the last level load before replacing the
+    // mesh. The successful load path below restores this file.
+    InsBots_SaveLearn();
     char gamedir[256];
     engine->GetGameDir(gamedir, sizeof(gamedir));
     char path[512];
@@ -501,7 +504,7 @@ static void Cmd_InsBot_NavReload()
         }
     }
     Msg("[insbots] nav reload '%s': %s (%d areas)\n", path, ok ? "OK" : "FAILED", g_NavMesh.Count());
-    g_Bots.InvalidateNavMeshState();
+    g_Bots.InvalidateNavMeshState(ok);
 }
 
 // ---- take-cover overhaul v2 debug subcommands ------------------------------

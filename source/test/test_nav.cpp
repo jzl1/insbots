@@ -496,6 +496,38 @@ int main(){
   remove(sparseBadPath);
   remove(idResolvePath);
 
+  // Transactional load: failures must leave the previous mesh usable, and a
+  // successful replacement must still be able to restore learned links.
+  const char *txGoodPath = "test_nav_tx_good.tmp";
+  const char *txBadPath = "test_nav_tx_bad.tmp";
+  const char *txReloadPath = "test_nav_tx_reload.tmp";
+  const char *txLearnPath = "test_nav_tx_learn.tmp";
+  CNavMesh mTxMissing;
+  if (mTxMissing.Load("test_nav_missing.tmp") || mTxMissing.Count() != 0)
+  { printf("FAIL: first-load failure left state\n"); return 1; }
+  if (!WriteForkFixture(txGoodPath, 0)) { printf("FAIL: write tx fixture\n"); return 1; }
+  CNavMesh mTx;
+  if (!mTx.Load(txGoodPath) || mTx.Count() != 4)
+  { printf("FAIL: tx initial load\n"); return 1; }
+  int txPath[16];
+  if (mTx.BuildPath(0, 3, txPath, 16) <= 0)
+  { printf("FAIL: tx initial path\n"); return 1; }
+  FILE *badTx = fopen(txBadPath, "wb");
+  if (!badTx) { printf("FAIL: write corrupt tx\n"); return 1; }
+  fwrite("this is not a nav mesh", 1, 23, badTx);
+  fclose(badTx);
+  if (mTx.Load(txBadPath) || mTx.Count() != 4
+      || mTx.BuildPath(0, 3, txPath, 16) <= 0)
+  { printf("FAIL: corrupt reload replaced good mesh\n"); return 1; }
+  mTx.MarkBadConnection(0, 1);
+  mTx.MarkBadConnection(0, 1);
+  if (!mTx.SaveBadLinks(txLearnPath)) { printf("FAIL: save tx learned links\n"); return 1; }
+  if (!WriteForkFixture(txReloadPath, 0)) { printf("FAIL: write tx reload fixture\n"); return 1; }
+  if (!mTx.Load(txReloadPath) || mTx.Count() != 4
+      || mTx.LoadBadLinks(txLearnPath) != 1 || mTx.BadCount(0, 1) != 2)
+  { printf("FAIL: successful reload/learned-link restore\n"); return 1; }
+  remove(txGoodPath); remove(txBadPath); remove(txReloadPath); remove(txLearnPath);
+
     // Directed reachability frontier: the protected component is one-way into
   // the main component, so the closest reachable area to it is area 2.
   const char *dirPath = "test_nav_directed.tmp";

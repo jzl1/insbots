@@ -150,6 +150,14 @@ public:
             m_fbCache[i].area = -1;
             m_fbCache[i].pos = Vector(0, 0, 0);
         }
+        for (int i = 0; i < 256; i++)
+        {
+            m_costCache[i].from = -1;
+            m_costCache[i].to = -1;
+            m_costCache[i].cost = 0.0f;
+            m_costCache[i].stamp = 0;
+            m_costCache[i].seq = 0;
+        }
     }
     ~CNavMesh() { Free(); }
 
@@ -315,6 +323,8 @@ private:
     void RefreshCostParamsFromGlobals();
     bool BuildEdgeMetadata(int fromIdx, int connSlot, NavEdgeMeta &out) const;
     bool BuildAreaIdMap();
+    bool LoadInPlace(const char *path);
+    void TakeState(CNavMesh &source);
 
     int  IndexOfId(unsigned int id) const;
     void BuildGrid();
