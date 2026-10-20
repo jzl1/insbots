@@ -109,6 +109,53 @@ static bool WriteEdgeGeometryFixture(const char *path)
     return true;
 }
 
+static bool WriteDuplicateIdFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0); put32(f, 2);
+    unsigned int conn[4][3];
+    int counts[4];
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    WriteAreaV9(f, 7, 0, 0, 0, 100, 100, 0, conn, counts);
+    WriteAreaV9(f, 7, 200, 0, 0, 300, 100, 0, conn, counts);
+    put32(f, 0);
+    fclose(f);
+    return true;
+}
+
+static bool WriteIdResolutionFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0); put32(f, 3);
+    unsigned int conn[4][3];
+    int counts[4];
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 200;
+    conn[NAV_EAST][1] = 999;   // missing area
+    conn[NAV_EAST][2] = 100;   // self reference
+    counts[NAV_EAST] = 3;
+    WriteAreaV9(f, 100, 0, 0, 0, 100, 100, 0, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 100; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 200, 100, 0, 0, 200, 100, 0, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    WriteAreaV9(f, 300, 400, 0, 0, 500, 100, 0, conn, counts);
+
+    // One ladder whose bottom endpoint is not present in the area table.
+    put32(f, 1);
+    put32(f, 900); putf(f, 32.0f);
+    putf(f, 450); putf(f, 50); putf(f, 0);
+    putf(f, 450); putf(f, 50); putf(f, 100);
+    putf(f, 100); put32(f, NAV_NORTH);
+    put32(f, 300); put32(f, 0); put32(f, 0); put32(f, 0); put32(f, 999);
+    fclose(f);
+    return true;
+}
+
 // A mesh whose area declares more connections than the loader retains must be
 // rejected outright instead of being silently truncated to 512.
 
@@ -417,6 +464,38 @@ int main(){
   if (mo.Load(overflowPath)) { printf("FAIL: 513-connection mesh accepted\n"); return 1; }
   if (mo.Count() != 0) { printf("FAIL: failed load left areas\n"); return 1; }
   remove(overflowPath);
+
+  // Area-ID map: duplicate IDs are ambiguous and must reject the mesh.
+  const char *duplicatePath = "test_nav_duplicate_ids.tmp";
+  if (!WriteDuplicateIdFixture(duplicatePath)) { printf("FAIL: write duplicate fixture\n"); return 1; }
+  CNavMesh mDup;
+  if (mDup.Load(duplicatePath) || mDup.Count() != 0)
+  { printf("FAIL: duplicate area IDs accepted\n"); return 1; }
+  remove(duplicatePath);
+
+  // Missing/self connections are skipped; an out-of-range ladder endpoint is
+  // retained as unresolved metadata rather than indexed into m_areas.
+  const char *idResolvePath = "test_nav_id_resolve.tmp";
+  if (!WriteIdResolutionFixture(idResolvePath)) { printf("FAIL: write id-resolution fixture\n"); return 1; }
+  CNavMesh mIds;
+  if (!mIds.Load(idResolvePath) || mIds.Count() != 3)
+  { printf("FAIL: id-resolution load\n"); return 1; }
+  if (mIds.Area(0)->connCount != 1
+      || mIds.Area(mIds.Area(0)->connIdx[0])->id != 200)
+  { printf("FAIL: missing/self connection was retained\n"); return 1; }
+  if (mIds.LadderCount() != 1 || mIds.Ladder(0)->bottomArea != -1
+      || mIds.Ladder(0)->topForwardArea != 2)
+  { printf("FAIL: out-of-range ladder endpoint resolution\n"); return 1; }
+  const char *sparseBadPath = "test_nav_badlinks_sparse.tmp";
+  FILE *badFile = fopen(sparseBadPath, "w");
+  if (!badFile) { printf("FAIL: write sparse bad links\n"); return 1; }
+  fprintf(badFile, "bad nav links v2\n100 200 2\n");
+  fclose(badFile);
+  if (mIds.LoadBadLinks(sparseBadPath) != 1 || mIds.BadCount(0, 1) != 2)
+  { printf("FAIL: sparse LoadBadLinks did not use the id map\n"); return 1; }
+  remove(sparseBadPath);
+  remove(idResolvePath);
+
     // Directed reachability frontier: the protected component is one-way into
   // the main component, so the closest reachable area to it is area 2.
   const char *dirPath = "test_nav_directed.tmp";

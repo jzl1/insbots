@@ -99,6 +99,7 @@ struct NavAreaData
     unsigned char *connBad;       // per-connection failure count (learned bad links)
     int           *connLadder;    // 0=walk, +(index+1)=ladder up, -(index+1)=down
     NavEdgeMeta   *connMeta;      // one typed portal record per connection
+    int            connOffset;    // first edge slot in the mesh-wide flat arrays
     int            connCount;
     int            ladderConnCount; // nonzero when this area is a ladder endpoint
     int            component;       // weak connected component for cheap reachability rejection
@@ -135,6 +136,8 @@ class CNavMesh
 {
 public:
     CNavMesh() : m_areas(0), m_count(0), m_mark(0), m_ladders(0), m_ladderCount(0), m_sniperSpots(0), m_sniperSpotCount(0),
+                 m_connIdx(0), m_connBad(0), m_connLadder(0), m_connMeta(0), m_connCount(0),
+                 m_areaIdTable(0), m_areaIdTableSize(0),
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
                  m_costStamp(0), m_costSeq(0), m_costParams()
     {
@@ -274,6 +277,18 @@ private:
     int   *m_gridStart;   // W*H+1 prefix offsets into m_gridCells
     int   *m_gridCells;   // area indices, grouped by cell
 
+    // Mesh-wide flat edge storage. Per-area connIdx/connBad/connLadder/connMeta
+    // point into these arrays at connOffset; they are not independently owned.
+    int           *m_connIdx;
+    unsigned char *m_connBad;
+    int           *m_connLadder;
+    NavEdgeMeta   *m_connMeta;
+    int            m_connCount;
+
+    // Open-addressed area id -> index map (stored index + 1; 0 means empty).
+    int           *m_areaIdTable;
+    int            m_areaIdTableSize;
+
     // Off-mesh fallback result cache (FindArea). Positions are quantized
     // to ~64u so repeated queries from the same spot (stuck retries,
     // several subsystems per frame) reuse the validated tile without
@@ -295,6 +310,7 @@ private:
     void InvalidateCostCache() { m_costSeq = 0; if (++m_costStamp == 0) m_costStamp = 1; }
     void RefreshCostParamsFromGlobals();
     bool BuildEdgeMetadata(int fromIdx, int connSlot, NavEdgeMeta &out) const;
+    bool BuildAreaIdMap();
 
     int  IndexOfId(unsigned int id) const;
     void BuildGrid();

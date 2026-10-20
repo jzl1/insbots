@@ -138,30 +138,49 @@ static bool CheckedRealloc(void **target, size_t bytes)
 struct NavLoadScratch
 {
     unsigned char  *data;
-    unsigned int  **connIds;
-    int            *connCounts;
+    unsigned int   *connIds;        // flat serialized connection IDs
+    int            *connOffsets;    // areaCount + 1 prefix offsets
+    int             connTotal;
+    int             connCapacity;
     unsigned int  **ladderUpIds;
     unsigned int  **ladderDownIds;
     int            *ladderUpCounts;
     int            *ladderDownCounts;
     unsigned int   *ladderAreaIds;
+    int            *edgeIdx;
+    unsigned char  *edgeBad;
+    int            *edgeLadder;
+    NavEdgeMeta    *edgeMeta;
+    int            *edgeOffsets;
+    int            *edgeCounts;
+    int            *extraOffsets;
+    int            *extraCounts;
+    int             edgeTotal;
+    int             edgeCapacity;
 };
 
 static void FreeNavLoadScratch(NavLoadScratch &s, unsigned int areaCount)
 {
     for (unsigned int i = 0; i < areaCount; i++)
     {
-        if (s.connIds)      { if (s.connIds[i])      free(s.connIds[i]);      s.connIds[i] = 0; }
         if (s.ladderUpIds)  { if (s.ladderUpIds[i])  free(s.ladderUpIds[i]);  s.ladderUpIds[i] = 0; }
         if (s.ladderDownIds){ if (s.ladderDownIds[i])free(s.ladderDownIds[i]);s.ladderDownIds[i] = 0; }
     }
     if (s.connIds)       free(s.connIds);
-    if (s.connCounts)    free(s.connCounts);
+    if (s.connOffsets)   free(s.connOffsets);
     if (s.ladderUpIds)   free(s.ladderUpIds);
     if (s.ladderDownIds) free(s.ladderDownIds);
     if (s.ladderUpCounts)    free(s.ladderUpCounts);
     if (s.ladderDownCounts)  free(s.ladderDownCounts);
     if (s.ladderAreaIds) free(s.ladderAreaIds);
+    if (s.edgeIdx)       free(s.edgeIdx);
+    if (s.edgeBad)       free(s.edgeBad);
+    if (s.edgeLadder)    free(s.edgeLadder);
+    if (s.edgeMeta)      free(s.edgeMeta);
+    if (s.edgeOffsets)   free(s.edgeOffsets);
+    if (s.edgeCounts)    free(s.edgeCounts);
+    if (s.extraOffsets)  free(s.extraOffsets);
+    if (s.extraCounts)   free(s.extraCounts);
     if (s.data)          free(s.data);
     memset(&s, 0, sizeof(s));
 }
@@ -172,19 +191,23 @@ void CNavMesh::Free()
     {
         for (int i = 0; i < m_count; i++)
         {
-            if (m_areas[i].connIdx) free(m_areas[i].connIdx);
-            if (m_areas[i].connBad) free(m_areas[i].connBad);
-            if (m_areas[i].connLadder) free(m_areas[i].connLadder);
-            if (m_areas[i].connMeta) free(m_areas[i].connMeta);
             if (m_areas[i].hidingSpots) free(m_areas[i].hidingSpots);
         }
         free(m_areas);
     }
+    if (m_connIdx) free(m_connIdx);
+    if (m_connBad) free(m_connBad);
+    if (m_connLadder) free(m_connLadder);
+    if (m_connMeta) free(m_connMeta);
+    if (m_areaIdTable) free(m_areaIdTable);
     if (m_sniperSpots) free(m_sniperSpots);
     if (m_ladders) free(m_ladders);
     if (m_gridStart) free(m_gridStart);
     if (m_gridCells) free(m_gridCells);
     m_ladders = 0; m_ladderCount = 0;
+    m_connIdx = 0; m_connBad = 0; m_connLadder = 0; m_connMeta = 0;
+    m_connCount = 0;
+    m_areaIdTable = 0; m_areaIdTableSize = 0;
     m_sniperSpots = 0; m_sniperSpotCount = 0;
     m_gridStart = 0; m_gridCells = 0;
     m_gridW = m_gridH = 0;
@@ -196,11 +219,63 @@ void CNavMesh::Free()
     }
 }
 
+static unsigned int HashNavAreaId(unsigned int value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+bool CNavMesh::BuildAreaIdMap()
+{
+    if (m_areaIdTable) free(m_areaIdTable);
+    m_areaIdTable = 0;
+    m_areaIdTableSize = 0;
+    if (m_count <= 0) return true;
+
+    int tableSize = 16;
+    while (tableSize < m_count * 2) tableSize <<= 1;
+    m_areaIdTable = (int *)calloc((size_t)tableSize, sizeof(int));
+    if (!m_areaIdTable) return false;
+    m_areaIdTableSize = tableSize;
+
+    for (int i = 0; i < m_count; i++)
+    {
+        unsigned int slot = HashNavAreaId(m_areas[i].id) & (unsigned int)(tableSize - 1);
+        while (m_areaIdTable[slot])
+        {
+            int existing = m_areaIdTable[slot] - 1;
+            if (m_areas[existing].id == m_areas[i].id)
+            {
+                NAVLOAD_ERR("[insbots] nav load failed: duplicate area id %u at indices %d and %d\n",
+                            m_areas[i].id, existing, i);
+                free(m_areaIdTable);
+                m_areaIdTable = 0;
+                m_areaIdTableSize = 0;
+                return false;
+            }
+            slot = (slot + 1) & (unsigned int)(tableSize - 1);
+        }
+        m_areaIdTable[slot] = i + 1;
+    }
+    return true;
+}
+
 int CNavMesh::IndexOfId(unsigned int id) const
 {
-    // areas are usually in ascending id order but not densely packed: linear ok at load time
-    for (int i = 0; i < m_count; i++)
-        if (m_areas[i].id == id) return i;
+    if (!m_areaIdTable || m_areaIdTableSize <= 0) return -1;
+    unsigned int slot = HashNavAreaId(id) & (unsigned int)(m_areaIdTableSize - 1);
+    for (int probe = 0; probe < m_areaIdTableSize; probe++)
+    {
+        int stored = m_areaIdTable[slot];
+        if (!stored) return -1;
+        int index = stored - 1;
+        if (m_areas[index].id == id) return index;
+        slot = (slot + 1) & (unsigned int)(m_areaIdTableSize - 1);
+    }
     return -1;
 }
 
@@ -352,14 +427,13 @@ bool CNavMesh::Load(const char *path)
     if (!m_areas) { FreeNavLoadScratch(s, 0); return false; }
     m_count = (int)areaCount;
 
-    // temporary connection id storage
-    s.connIds = (unsigned int **)calloc(areaCount, sizeof(unsigned int *));
-    s.connCounts = (int *)calloc(areaCount, sizeof(int));
+    // temporary connection id storage (one contiguous buffer)
+    s.connOffsets = (int *)calloc(areaCount + 1, sizeof(int));
     s.ladderUpIds = (unsigned int **)calloc(areaCount, sizeof(unsigned int *));
     s.ladderDownIds = (unsigned int **)calloc(areaCount, sizeof(unsigned int *));
     s.ladderUpCounts = (int *)calloc(areaCount, sizeof(int));
     s.ladderDownCounts = (int *)calloc(areaCount, sizeof(int));
-    if (!s.connIds || !s.connCounts || !s.ladderUpIds || !s.ladderDownIds ||
+    if (!s.connOffsets || !s.ladderUpIds || !s.ladderDownIds ||
         !s.ladderUpCounts || !s.ladderDownCounts)
     {
         NAVLOAD_ERR("[insbots] nav load failed: out of memory allocating area scratch buffers\n");
@@ -405,12 +479,24 @@ bool CNavMesh::Load(const char *path)
             }
         }
         if (connectionOverflow) { r.ok = false; break; }
+        s.connOffsets[i] = s.connTotal;
         if (total)
         {
-            s.connIds[i] = (unsigned int *)malloc(total * sizeof(unsigned int));
-            if (!s.connIds[i]) { r.ok = false; break; }
-            memcpy(s.connIds[i], ids, total * sizeof(unsigned int));
-            s.connCounts[i] = total;
+            int needed = s.connTotal + total;
+            if (needed > s.connCapacity)
+            {
+                int capacity = s.connCapacity > 0 ? s.connCapacity : 4096;
+                while (capacity < needed) capacity *= 2;
+                if (!CheckedRealloc((void **)&s.connIds,
+                                    (size_t)capacity * sizeof(unsigned int)))
+                {
+                    r.ok = false;
+                    break;
+                }
+                s.connCapacity = capacity;
+            }
+            memcpy(s.connIds + s.connTotal, ids, (size_t)total * sizeof(unsigned int));
+            s.connTotal = needed;
         }
 
         // hiding spots (Phase 1: parse and retain coordinates & sniper flags)
@@ -464,6 +550,7 @@ bool CNavMesh::Load(const char *path)
 
         if (version >= 8) r.Skip(2 * 4);    // earliest occupy times (2 teams)
     }
+    s.connOffsets[areaCount] = s.connTotal;
 
     // Mesh-level ladder list. Source v7-v9 stores 60 bytes per ladder:
     // id,width,top,bottom,length,dir and five connecting area IDs.
@@ -497,37 +584,58 @@ bool CNavMesh::Load(const char *path)
         return false;
     }
 
-    // resolve connection ids -> indices
-    for (int i = 0; i < m_count; i++)
+    if (!BuildAreaIdMap())
     {
-        if (!s.connCounts[i]) continue;
-        m_areas[i].connIdx = (int *)malloc(s.connCounts[i] * sizeof(int));
-        m_areas[i].connBad = (unsigned char *)calloc(s.connCounts[i], 1);
-        m_areas[i].connLadder = (int *)calloc(s.connCounts[i], sizeof(int));
-        m_areas[i].connMeta = (NavEdgeMeta *)calloc(s.connCounts[i], sizeof(NavEdgeMeta));
-        if (!m_areas[i].connIdx || !m_areas[i].connBad || !m_areas[i].connLadder
-            || !m_areas[i].connMeta)
+        FreeNavLoadScratch(s, areaCount);
+        Free();
+        return false;
+    }
+
+    // Resolve all serialized connections into one flat edge buffer. The
+    // capacity includes the maximum four directed edges a ladder can append.
+    s.edgeCapacity = s.connTotal + m_ladderCount * 4;
+    s.edgeOffsets = (int *)calloc(areaCount + 1, sizeof(int));
+    s.edgeCounts = (int *)calloc(areaCount, sizeof(int));
+    s.extraOffsets = (int *)calloc(areaCount, sizeof(int));
+    s.extraCounts = (int *)calloc(areaCount, sizeof(int));
+    if (!s.edgeOffsets || !s.edgeCounts || !s.extraOffsets || !s.extraCounts)
+    {
+        NAVLOAD_ERR("[insbots] nav load failed: out of memory allocating edge offsets\n");
+        FreeNavLoadScratch(s, areaCount);
+        Free();
+        return false;
+    }
+    if (s.edgeCapacity > 0)
+    {
+        s.edgeIdx = (int *)malloc((size_t)s.edgeCapacity * sizeof(int));
+        s.edgeBad = (unsigned char *)calloc((size_t)s.edgeCapacity, 1);
+        s.edgeLadder = (int *)calloc((size_t)s.edgeCapacity, sizeof(int));
+        s.edgeMeta = (NavEdgeMeta *)calloc((size_t)s.edgeCapacity, sizeof(NavEdgeMeta));
+        if (!s.edgeIdx || !s.edgeBad || !s.edgeLadder || !s.edgeMeta)
         {
-            NAVLOAD_ERR("[insbots] nav load failed: out of memory resolving area %u connections\n", m_areas[i].id);
-            free(m_areas[i].connIdx); m_areas[i].connIdx = 0;
-            free(m_areas[i].connBad); m_areas[i].connBad = 0;
-            free(m_areas[i].connLadder); m_areas[i].connLadder = 0;
-            free(m_areas[i].connMeta); m_areas[i].connMeta = 0;
+            NAVLOAD_ERR("[insbots] nav load failed: out of memory allocating flat edge storage\n");
             FreeNavLoadScratch(s, areaCount);
             Free();
             return false;
         }
-        int n = 0;
-        for (int k = 0; k < s.connCounts[i]; k++)
-        {
-            int idx = IndexOfId(s.connIds[i][k]);
-            if (idx >= 0) m_areas[i].connIdx[n++] = idx;
-        }
-        m_areas[i].connCount = n;
-        free(s.connIds[i]); s.connIds[i] = 0;
     }
-    if (s.connIds) free(s.connIds); s.connIds = 0;
-    if (s.connCounts) free(s.connCounts); s.connCounts = 0;
+    for (int i = 0; i < m_count; i++)
+    {
+        int offset = s.edgeTotal;
+        for (int k = s.connOffsets[i]; k < s.connOffsets[i + 1]; k++)
+        {
+            int idx = IndexOfId(s.connIds[k]);
+            if (idx < 0 || idx == i) continue;   // missing or self-referential
+            int slot = s.edgeTotal++;
+            s.edgeIdx[slot] = idx;
+            s.edgeBad[slot] = 0;
+            s.edgeLadder[slot] = 0;
+            memset(&s.edgeMeta[slot], 0, sizeof(NavEdgeMeta));
+        }
+        s.edgeOffsets[i] = offset;
+        s.edgeCounts[i] = s.edgeTotal - offset;
+    }
+    s.edgeOffsets[areaCount] = s.edgeTotal;
 
     // Resolve ladder endpoints, then append the directed connections that are
     // explicitly present in each area's up/down ladder list. Top-behind is
@@ -611,46 +719,109 @@ bool CNavMesh::Load(const char *path)
                     }
                     bool duplicate = false;
                     int ladderCode = direction == 0 ? li + 1 : -(li + 1);
-                    for (int e = 0; e < m_areas[i].connCount; e++)
-                        if (m_areas[i].connIdx[e] == target)
+                    int areaEdgeOffset = s.edgeOffsets[i];
+                    for (int e = 0; e < s.edgeCounts[i]; e++)
+                    {
+                        int edgeSlot = areaEdgeOffset + e;
+                        if (s.edgeIdx[edgeSlot] == target)
                         {
                             // nav_generate may also serialize a conventional
                             // area edge between the same two landings. Upgrade
                             // it to a typed ladder edge so movement does not try
                             // to walk straight through the vertical transition.
-                            if (m_areas[i].connLadder) m_areas[i].connLadder[e] = ladderCode;
+                            s.edgeLadder[edgeSlot] = ladderCode;
                             duplicate = true;
                             break;
                         }
-                    if (duplicate) continue;
-                    int n = m_areas[i].connCount;
-                    if (!CheckedRealloc((void **)&m_areas[i].connIdx, (n + 1) * sizeof(int)) ||
-                        !CheckedRealloc((void **)&m_areas[i].connBad, n + 1) ||
-                        !CheckedRealloc((void **)&m_areas[i].connLadder, (n + 1) * sizeof(int)) ||
-                        !CheckedRealloc((void **)&m_areas[i].connMeta, (n + 1) * sizeof(NavEdgeMeta)))
+                    }
+                    if (!duplicate)
                     {
-                        NAVLOAD_ERR("[insbots] nav load failed: out of memory appending ladder edge for area %u\n", m_areas[i].id);
+                        for (int e = 0; e < s.extraCounts[i]; e++)
+                        {
+                            int edgeSlot = s.extraOffsets[i] + e;
+                            if (s.edgeIdx[edgeSlot] == target)
+                            {
+                                s.edgeLadder[edgeSlot] = ladderCode;
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (duplicate) continue;
+                    if (s.edgeTotal >= s.edgeCapacity)
+                    {
+                        NAVLOAD_ERR("[insbots] nav load failed: ladder edge capacity exceeded for area %u\n", m_areas[i].id);
                         FreeNavLoadScratch(s, areaCount);
                         Free();
                         return false;
                     }
-                    m_areas[i].connIdx[n] = target;
-                    m_areas[i].connBad[n] = 0;
-                    m_areas[i].connLadder[n] = ladderCode;
-                    memset(&m_areas[i].connMeta[n], 0, sizeof(NavEdgeMeta));
-                    m_areas[i].connCount++;
+                    if (s.extraCounts[i] == 0)
+                        s.extraOffsets[i] = s.edgeTotal;
+                    int slot = s.edgeTotal++;
+                    s.edgeIdx[slot] = target;
+                    s.edgeBad[slot] = 0;
+                    s.edgeLadder[slot] = ladderCode;
+                    memset(&s.edgeMeta[slot], 0, sizeof(NavEdgeMeta));
+                    s.extraCounts[i]++;
                 }
             }
         }
-        if (s.ladderUpIds && s.ladderUpIds[i])   { free(s.ladderUpIds[i]);   s.ladderUpIds[i] = 0; }
-        if (s.ladderDownIds && s.ladderDownIds[i]) { free(s.ladderDownIds[i]); s.ladderDownIds[i] = 0; }
     }
-    if (s.ladderAreaIds) free(s.ladderAreaIds); s.ladderAreaIds = 0;
-    if (s.ladderUpIds) free(s.ladderUpIds); s.ladderUpIds = 0;
-    if (s.ladderDownIds) free(s.ladderDownIds); s.ladderDownIds = 0;
-    if (s.ladderUpCounts) free(s.ladderUpCounts); s.ladderUpCounts = 0;
-    if (s.ladderDownCounts) free(s.ladderDownCounts); s.ladderDownCounts = 0;
-    if (s.data) free(s.data); s.data = 0;
+
+    // Publish the flat edge storage. Per-area pointers are views only; Free()
+    // releases the four backing arrays once.
+    m_connCount = s.edgeTotal;
+    if (m_connCount > 0)
+    {
+        m_connIdx = (int *)malloc((size_t)m_connCount * sizeof(int));
+        m_connBad = (unsigned char *)calloc((size_t)m_connCount, 1);
+        m_connLadder = (int *)calloc((size_t)m_connCount, sizeof(int));
+        m_connMeta = (NavEdgeMeta *)calloc((size_t)m_connCount, sizeof(NavEdgeMeta));
+        if (!m_connIdx || !m_connBad || !m_connLadder || !m_connMeta)
+        {
+            NAVLOAD_ERR("[insbots] nav load failed: out of memory compacting flat edge storage\n");
+            FreeNavLoadScratch(s, areaCount);
+            Free();
+            return false;
+        }
+    }
+    int dst = 0;
+    for (int i = 0; i < m_count; i++)
+    {
+        NavAreaData &a = m_areas[i];
+        a.connOffset = dst;
+        a.connCount = s.edgeCounts[i] + s.extraCounts[i];
+        if (a.connCount > 0)
+        {
+            a.connIdx = &m_connIdx[a.connOffset];
+            a.connBad = &m_connBad[a.connOffset];
+            a.connLadder = &m_connLadder[a.connOffset];
+            a.connMeta = &m_connMeta[a.connOffset];
+        }
+        else
+        {
+            a.connIdx = 0; a.connBad = 0; a.connLadder = 0; a.connMeta = 0;
+        }
+        for (int k = 0; k < s.edgeCounts[i]; k++)
+        {
+            int src = s.edgeOffsets[i] + k;
+            m_connIdx[dst] = s.edgeIdx[src];
+            m_connBad[dst] = s.edgeBad[src];
+            m_connLadder[dst] = s.edgeLadder[src];
+            m_connMeta[dst] = s.edgeMeta[src];
+            dst++;
+        }
+        for (int k = 0; k < s.extraCounts[i]; k++)
+        {
+            int src = s.extraOffsets[i] + k;
+            m_connIdx[dst] = s.edgeIdx[src];
+            m_connBad[dst] = s.edgeBad[src];
+            m_connLadder[dst] = s.edgeLadder[src];
+            m_connMeta[dst] = s.edgeMeta[src];
+            dst++;
+        }
+    }
+    FreeNavLoadScratch(s, areaCount);
 
     // Classify every resolved connection once. Portal queries are hot paths
     // (steering, doorway lanes and stuck recovery), so they must not re-derive
