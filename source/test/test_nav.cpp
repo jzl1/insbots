@@ -616,6 +616,9 @@ int main(){
       { printf("FAIL: full same-level overlap was not malformed\n"); return 1; }
       if (mEdges.GetPortal(10, 11, portal))
       { printf("FAIL: full same-level overlap exposed as portal\n"); return 1; }
+      if (mEdges.FindArea(Vector(850, 50, 0)) != 10
+          || mEdges.FindNearestArea(Vector(850, 50, 0)) != 10)
+      { printf("FAIL: equal-area lookup tie did not choose the lower index\n"); return 1; }
 
       if (mEdges.GetTransitionWaypoint(12, 13, Vector(1050, 50, 40), transition))
       { printf("FAIL: stacked drop produced a separated-drop waypoint\n"); return 1; }

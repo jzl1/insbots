@@ -931,6 +931,8 @@ bool CNavMesh::Load(const char *path)
     BuildGrid();
     return true;
 }
+static const float NAV_LOOKUP_TIE_EPS = 0.001f;
+
 int CNavMesh::FindArea(const Vector &pos) const
 {
     INSPROF_SCOPE(INSPROF_FINDAREA);
@@ -970,7 +972,9 @@ int CNavMesh::FindArea(const Vector &pos) const
                     float surfaceZ = GetZ(i, pos.x, pos.y);
                     if (surfaceZ > testZ) continue;          // area is above the bot
                     if (surfaceZ < pos.z - 120.0f) continue; // too far beneath the bot
-                    if (surfaceZ > bestSurfaceZ)
+                    if (surfaceZ > bestSurfaceZ + NAV_LOOKUP_TIE_EPS
+                        || (fabsf(surfaceZ - bestSurfaceZ) <= NAV_LOOKUP_TIE_EPS
+                            && (best < 0 || i < best)))
                     {
                         bestSurfaceZ = surfaceZ;
                         best = i;
@@ -991,7 +995,9 @@ int CNavMesh::FindArea(const Vector &pos) const
             float surfaceZ = GetZ(i, pos.x, pos.y);
             if (surfaceZ > testZ) continue;          // area is above the bot
             if (surfaceZ < pos.z - 120.0f) continue; // too far beneath the bot
-            if (surfaceZ > bestSurfaceZ)
+            if (surfaceZ > bestSurfaceZ + NAV_LOOKUP_TIE_EPS
+                || (fabsf(surfaceZ - bestSurfaceZ) <= NAV_LOOKUP_TIE_EPS
+                    && (best < 0 || i < best)))
             {
                 bestSurfaceZ = surfaceZ;
                 best = i;
@@ -1066,9 +1072,19 @@ int CNavMesh::FindArea(const Vector &pos) const
                         Vector closest(x, y, GetZ(i, x, y));
                         Vector d2 = closest - pos;
                         float ds = d2.x * d2.x + d2.y * d2.y + d2.z * d2.z * 4.0f;
-                        if (ds >= cand[3].ds) continue;
+                        bool betterTail = ds < cand[3].ds - NAV_LOOKUP_TIE_EPS
+                            || (fabsf(ds - cand[3].ds) <= NAV_LOOKUP_TIE_EPS
+                                && (cand[3].idx < 0 || i < cand[3].idx));
+                        if (!betterTail) continue;
                         int j = 3;
-                        while (j > 0 && ds < cand[j - 1].ds) { cand[j] = cand[j - 1]; j--; }
+                        while (j > 0
+                               && (ds < cand[j - 1].ds - NAV_LOOKUP_TIE_EPS
+                                   || (fabsf(ds - cand[j - 1].ds) <= NAV_LOOKUP_TIE_EPS
+                                       && (cand[j - 1].idx < 0 || i < cand[j - 1].idx))))
+                        {
+                            cand[j] = cand[j - 1];
+                            j--;
+                        }
                         cand[j].idx = i;
                         cand[j].ds = ds;
                     }
@@ -1090,9 +1106,19 @@ int CNavMesh::FindArea(const Vector &pos) const
             Vector closest(x, y, GetZ(i, x, y));
             Vector d = closest - pos;
             float ds = d.x * d.x + d.y * d.y + d.z * d.z * 4.0f;
-            if (ds >= cand[3].ds) continue;
+            bool betterTail = ds < cand[3].ds - NAV_LOOKUP_TIE_EPS
+                || (fabsf(ds - cand[3].ds) <= NAV_LOOKUP_TIE_EPS
+                    && (cand[3].idx < 0 || i < cand[3].idx));
+            if (!betterTail) continue;
             int j = 3;
-            while (j > 0 && ds < cand[j - 1].ds) { cand[j] = cand[j - 1]; j--; }
+            while (j > 0
+                   && (ds < cand[j - 1].ds - NAV_LOOKUP_TIE_EPS
+                       || (fabsf(ds - cand[j - 1].ds) <= NAV_LOOKUP_TIE_EPS
+                           && (cand[j - 1].idx < 0 || i < cand[j - 1].idx))))
+            {
+                cand[j] = cand[j - 1];
+                j--;
+            }
             cand[j].idx = i;
             cand[j].ds = ds;
         }
@@ -1219,7 +1245,10 @@ int CNavMesh::FindNearestArea(const Vector &pos) const
                         Vector closest(x, y, GetZ(i, x, y));
                         Vector d2 = closest - pos;
                         float ds = d2.x * d2.x + d2.y * d2.y + d2.z * d2.z * 4.0f;
-                        if (ds < bestD) { bestD = ds; best = i; }
+                        if (ds < bestD - NAV_LOOKUP_TIE_EPS
+                            || (fabsf(ds - bestD) <= NAV_LOOKUP_TIE_EPS
+                                && (best < 0 || i < best)))
+                        { bestD = ds; best = i; }
                     }
                 }
             }
@@ -1239,7 +1268,10 @@ int CNavMesh::FindNearestArea(const Vector &pos) const
             Vector closest(x, y, GetZ(i, x, y));
             Vector d = closest - pos;
             float ds = d.x * d.x + d.y * d.y + d.z * d.z * 4.0f;
-            if (ds < bestD) { bestD = ds; best = i; }
+            if (ds < bestD - NAV_LOOKUP_TIE_EPS
+                || (fabsf(ds - bestD) <= NAV_LOOKUP_TIE_EPS
+                    && (best < 0 || i < best)))
+            { bestD = ds; best = i; }
         }
     }
     return best;

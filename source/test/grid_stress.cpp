@@ -14,6 +14,8 @@ struct Vector { float x,y,z; Vector(){} Vector(float a,float b,float c):x(a),y(b
 #include "../src/nav.h"
 #include "../src/nav.cpp"
 
+static const float kLookupTieEps = 0.001f;
+
 // exact copies of the pre-grid implementations
 static int LinearFindArea(const CNavMesh &m, const Vector &pos)
 {
@@ -28,7 +30,10 @@ static int LinearFindArea(const CNavMesh &m, const Vector &pos)
         float surfaceZ = m.GetZ(i, pos.x, pos.y);
         if (surfaceZ > testZ) continue;
         if (surfaceZ < pos.z - 120.0f) continue;
-        if (surfaceZ > bestSurfaceZ) { bestSurfaceZ = surfaceZ; best = i; }
+        if (surfaceZ > bestSurfaceZ + kLookupTieEps
+            || (fabsf(surfaceZ - bestSurfaceZ) <= kLookupTieEps
+                && (best < 0 || i < best)))
+        { bestSurfaceZ = surfaceZ; best = i; }
     }
     if (best >= 0) return best;
     float bestD = 3.4e38f;
@@ -41,7 +46,9 @@ static int LinearFindArea(const CNavMesh &m, const Vector &pos)
         Vector closest(x, y, m.GetZ(i, x, y));
         Vector d = closest - pos;
         float ds = d.x*d.x + d.y*d.y + d.z*d.z*4.0f;
-        if (ds < bestD) { bestD = ds; best = i; }
+        if (ds < bestD - kLookupTieEps
+            || (fabsf(ds - bestD) <= kLookupTieEps && (best < 0 || i < best)))
+        { bestD = ds; best = i; }
     }
     return best;
 }
@@ -59,9 +66,22 @@ static int LinearNearest(const CNavMesh &m, const Vector &pos)
         Vector closest(x, y, m.GetZ(i, x, y));
         Vector d = closest - pos;
         float ds = d.x*d.x + d.y*d.y + d.z*d.z*4.0f;
-        if (ds < bestD) { bestD = ds; best = i; }
+        if (ds < bestD - kLookupTieEps
+            || (fabsf(ds - bestD) <= kLookupTieEps && (best < 0 || i < best)))
+        { bestD = ds; best = i; }
     }
     return best;
+}
+
+static float AreaDistanceSq(const CNavMesh &m, int idx, const Vector &pos)
+{
+    const NavAreaData *a = m.Area(idx);
+    float x = pos.x, y = pos.y;
+    if (x < a->lo.x) x = a->lo.x; else if (x > a->hi.x) x = a->hi.x;
+    if (y < a->lo.y) y = a->lo.y; else if (y > a->hi.y) y = a->hi.y;
+    Vector closest(x, y, m.GetZ(idx, x, y));
+    Vector d = closest - pos;
+    return d.x*d.x + d.y*d.y + d.z*d.z*4.0f;
 }
 
 int main(int argc, char **argv)
@@ -70,6 +90,15 @@ int main(int argc, char **argv)
     CNavMesh m;
     if (!m.Load(path)) { printf("FAIL: load %s\n", path); return 1; }
     printf("loaded %d areas, %d ladders, %d sniper spots\n", m.Count(), m.LadderCount(), m.GetTotalSniperSpotCount());
+    if (strstr(path, "ins_sinjar.nav"))
+    {
+        Vector corner(575.0f, 325.0f, -366.53f);
+        int gridCorner = m.FindArea(corner);
+        int linearCorner = LinearFindArea(m, corner);
+        printf("Sinjar corner (575, 325, -366.53): grid=%d linear=%d\n",
+               gridCorner, linearCorner);
+        if (gridCorner != linearCorner || gridCorner < 0) return 3;
+    }
 
     float minX=1e30f,minY=1e30f,maxX=-1e30f,maxY=-1e30f;
     std::vector<Vector> pts;
@@ -123,7 +152,7 @@ int main(int argc, char **argv)
         pts.push_back(Vector(bx, by, pz));
     }
 
-    int mismatches = 0, firstBad = -1;
+    int mismatches = 0, areaMismatches = 0, nearestMismatches = 0, firstBad = -1;
     for (size_t i = 0; i < pts.size(); i++)
     {
         int g = m.FindArea(pts[i]);
@@ -131,7 +160,8 @@ int main(int argc, char **argv)
         if (g != l)
         {
             mismatches++;
-            if (firstBad < 0)
+            areaMismatches++;
+            if (areaMismatches <= 3)
             {
                 firstBad = (int)i;
                 const NavAreaData *ga = g >= 0 ? m.Area(g) : 0;
@@ -139,6 +169,10 @@ int main(int argc, char **argv)
                 printf("first mismatch p=(%.2f %.2f %.2f) g=%d l=%d\n", pts[i].x, pts[i].y, pts[i].z, g, l);
                 if (ga) printf("  grid area: lo=(%.1f %.1f %.1f) hi=(%.1f %.1f %.1f) id=%u\n", ga->lo.x, ga->lo.y, ga->lo.z, ga->hi.x, ga->hi.y, ga->hi.z, ga->id);
                 if (la) printf("  lin  area: lo=(%.1f %.1f %.1f) hi=(%.1f %.1f %.1f) id=%u\n", la->lo.x, la->lo.y, la->lo.z, la->hi.x, la->hi.y, la->hi.z, la->id);
+                if (ga) printf("  surface: grid=%.9f linear=%.9f delta=%.9g\n",
+                               m.GetZ(g, pts[i].x, pts[i].y),
+                               m.GetZ(l, pts[i].x, pts[i].y),
+                               m.GetZ(g, pts[i].x, pts[i].y) - m.GetZ(l, pts[i].x, pts[i].y));
                 printf("  grid: min=(%.1f %.1f) cell=%.1f w=%d h=%d\n", m.m_gridMinX, m.m_gridMinY, m.m_gridCell, m.m_gridW, m.m_gridH);
                 int cx = (int)((pts[i].x - m.m_gridMinX) / m.m_gridCell);
                 int cy = (int)((pts[i].y - m.m_gridMinY) / m.m_gridCell);
@@ -166,9 +200,30 @@ int main(int argc, char **argv)
         }
         int gn = m.FindNearestArea(pts[i]);
         int ln = LinearNearest(m, pts[i]);
-        if (gn != ln) { mismatches++; if (firstBad < 0) firstBad = (int)i; }
+        if (gn != ln)
+        {
+            mismatches++;
+            nearestMismatches++;
+            if (nearestMismatches <= 3)
+            {
+                firstBad = (int)i;
+                printf("first nearest mismatch p=(%.2f %.2f %.2f) g=%d l=%d\n",
+                       pts[i].x, pts[i].y, pts[i].z, gn, ln);
+                const NavAreaData *ga = gn >= 0 ? m.Area(gn) : 0;
+                const NavAreaData *la = ln >= 0 ? m.Area(ln) : 0;
+                if (ga) printf("  grid area: id=%u lo=(%.1f %.1f %.1f) hi=(%.1f %.1f %.1f)\n",
+                               ga->id, ga->lo.x, ga->lo.y, ga->lo.z, ga->hi.x, ga->hi.y, ga->hi.z);
+                if (la) printf("  lin  area: id=%u lo=(%.1f %.1f %.1f) hi=(%.1f %.1f %.1f)\n",
+                               la->id, la->lo.x, la->lo.y, la->lo.z, la->hi.x, la->hi.y, la->hi.z);
+                if (ga && la) printf("  distance: grid=%.9f linear=%.9f delta=%.9g\n",
+                                     AreaDistanceSq(m, gn, pts[i]),
+                                     AreaDistanceSq(m, ln, pts[i]),
+                                     AreaDistanceSq(m, gn, pts[i]) - AreaDistanceSq(m, ln, pts[i]));
+            }
+        }
     }
-    printf("tested %d point-pairs, mismatches=%d", (int)pts.size(), mismatches);
+    printf("tested %d point-pairs, mismatches=%d (area=%d nearest=%d)",
+           (int)pts.size(), mismatches, areaMismatches, nearestMismatches);
     if (firstBad >= 0)
         printf(" first at %d: (%.2f %.2f %.2f)", firstBad, pts[firstBad].x, pts[firstBad].y, pts[firstBad].z);
     printf("\n");
