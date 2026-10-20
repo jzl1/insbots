@@ -1324,6 +1324,158 @@ bool CNavMesh::GetEdgeMeta(int fromIdx, int toIdx, NavEdgeMeta &out) const
     return false;
 }
 
+bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
+                                     Vector &landing, Vector &axis,
+                                     float &halfSpan) const
+{
+    const NavAreaData *from = Area(fromIdx);
+    const NavAreaData *to = Area(toIdx);
+    if (!from || !to) return false;
+    NavEdgeMeta meta;
+    if (!GetEdgeMeta(fromIdx, toIdx, meta) || !meta.valid
+        || meta.kind != NAV_EDGE_DROP || meta.zDelta >= -24.0f)
+        return false;
+
+    float nx = meta.normalX;
+    float ny = meta.normalY;
+    float normalLen = sqrtf(nx * nx + ny * ny);
+    if (normalLen < 0.5f) return false;
+    nx /= normalLen;
+    ny /= normalLen;
+
+    float gap = 0.0f;
+    float inset = 0.0f;
+    landing.x = meta.midX;
+    landing.y = meta.midY;
+    if (ny < -0.5f)
+    {
+        gap = from->lo.y - to->hi.y;
+        inset = (to->hi.y - to->lo.y) * 0.5f;
+        if (inset > 18.0f) inset = 18.0f;
+        landing.y = to->hi.y - inset;
+    }
+    else if (ny > 0.5f)
+    {
+        gap = to->lo.y - from->hi.y;
+        inset = (to->hi.y - to->lo.y) * 0.5f;
+        if (inset > 18.0f) inset = 18.0f;
+        landing.y = to->lo.y + inset;
+    }
+    else if (nx < -0.5f)
+    {
+        gap = from->lo.x - to->hi.x;
+        inset = (to->hi.x - to->lo.x) * 0.5f;
+        if (inset > 18.0f) inset = 18.0f;
+        landing.x = to->hi.x - inset;
+    }
+    else if (nx > 0.5f)
+    {
+        gap = to->lo.x - from->hi.x;
+        inset = (to->hi.x - to->lo.x) * 0.5f;
+        if (inset > 18.0f) inset = 18.0f;
+        landing.x = to->lo.x + inset;
+    }
+    else
+        return false;
+
+    // Match the long-standing Haditha repair envelope: a real short gap,
+    // narrow enough for one hull, with a meaningful drop.
+    if (gap <= 0.0f || gap > 64.0f) return false;
+    if (meta.halfSpan < 8.0f || meta.halfSpan >= 36.0f) return false;
+
+    takeoff.x = meta.midX;
+    takeoff.y = meta.midY;
+    takeoff.z = meta.midZ;
+    landing.z = GetZ(toIdx, landing.x, landing.y);
+    if (takeoff.z - landing.z < 24.0f) return false;
+    axis = Vector(meta.axisX, meta.axisY, 0.0f);
+    halfSpan = meta.halfSpan;
+    return true;
+}
+
+bool CNavMesh::GetTransitionWaypoint(int fromIdx, int toIdx, const Vector &pos,
+                                     NavTransitionWaypoint &out) const
+{
+    memset(&out, 0, sizeof(out));
+    if (!GetTransitionGeometry(fromIdx, toIdx, out.takeoff, out.landing,
+                               out.axis, out.halfSpan))
+        return false;
+    NavEdgeMeta meta;
+    if (!GetEdgeMeta(fromIdx, toIdx, meta)) return false;
+    float nx = meta.normalX;
+    float ny = meta.normalY;
+    float normalLen = sqrtf(nx * nx + ny * ny);
+    if (normalLen < 0.5f) return false;
+    nx /= normalLen;
+    ny /= normalLen;
+    float along = (out.takeoff.x - pos.x) * nx + (out.takeoff.y - pos.y) * ny;
+    float lateral = fabsf((pos.x - out.takeoff.x) * -ny
+                        + (pos.y - out.takeoff.y) *  nx);
+    out.virtualApproach = along > 32.0f || lateral > 8.0f;
+    if (out.virtualApproach)
+    {
+        const NavAreaData *from = Area(fromIdx);
+        out.point.x = out.takeoff.x - nx * 28.0f;
+        out.point.y = out.takeoff.y - ny * 28.0f;
+        if (from)
+        {
+            if (out.point.x < from->lo.x) out.point.x = from->lo.x;
+            else if (out.point.x > from->hi.x) out.point.x = from->hi.x;
+            if (out.point.y < from->lo.y) out.point.y = from->lo.y;
+            else if (out.point.y > from->hi.y) out.point.y = from->hi.y;
+        }
+        out.point.z = GetZ(fromIdx, out.point.x, out.point.y);
+    }
+    else
+        out.point = out.landing;
+    return true;
+}
+
+bool CNavMesh::IsOnAreaLanding(int areaIdx, const Vector &pos, float maxZDelta) const
+{
+    const NavAreaData *a = Area(areaIdx);
+    if (!a) return false;
+    if (pos.x < a->lo.x || pos.x > a->hi.x
+        || pos.y < a->lo.y || pos.y > a->hi.y)
+        return false;
+    float floorZ = GetZ(areaIdx, pos.x, pos.y);
+    return fabsf(floorZ - pos.z) <= maxZDelta;
+}
+
+bool CNavMesh::CrossedEdgeIntoArea(int fromIdx, int toIdx, const Vector &pos) const
+{
+    const NavAreaData *from = Area(fromIdx);
+    const NavAreaData *to = Area(toIdx);
+    if (!from || !to) return false;
+    NavEdgeMeta meta;
+    if (!GetEdgeMeta(fromIdx, toIdx, meta) || !meta.valid) return false;
+
+    if (meta.kind == NAV_EDGE_DROP || meta.kind == NAV_EDGE_JUMP)
+        return IsOnAreaLanding(toIdx, pos, 8.0f);
+    if (meta.kind != NAV_EDGE_WALK) return false;
+
+    if (pos.x < to->lo.x - 24.0f || pos.x > to->hi.x + 24.0f
+        || pos.y < to->lo.y - 24.0f || pos.y > to->hi.y + 24.0f)
+        return false;
+    float floorZ = GetZ(toIdx, pos.x, pos.y);
+    if (fabsf(floorZ - pos.z) > 64.0f) return false;
+
+    float nx = meta.normalX;
+    float ny = meta.normalY;
+    float normalLen = sqrtf(nx * nx + ny * ny);
+    if (normalLen < 0.5f)
+    {
+        nx = meta.axisY;
+        ny = -meta.axisX;
+        normalLen = sqrtf(nx * nx + ny * ny);
+    }
+    if (normalLen < 0.5f) return false;
+    nx /= normalLen;
+    ny /= normalLen;
+    float side = (pos.x - meta.midX) * nx + (pos.y - meta.midY) * ny;
+    return side > 1.0f;
+}
+
 int CNavMesh::RandomArea() const
 {
     if (!m_count) return -1;

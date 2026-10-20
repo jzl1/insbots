@@ -76,6 +76,16 @@ struct NavEdgeMeta
     float         zDelta;
 };
 
+struct NavTransitionWaypoint
+{
+    Vector takeoff;
+    Vector landing;
+    Vector point;
+    Vector axis;
+    float  halfSpan;
+    bool   virtualApproach;
+};
+
 struct NavAreaData
 {
     unsigned int   id;
@@ -196,6 +206,22 @@ public:
     // returns malformed records so callers can inspect why a link has no
     // ordinary portal; check NavEdgeMeta::valid before treating it as usable.
     bool  GetEdgeMeta(int fromIdx, int toIdx, NavEdgeMeta &out) const;
+
+    // Plans a conservative approach to a short, separated drop. The returned
+    // point keeps the source-floor Z while the bot is still lining up, then
+    // switches to a landing point inside the destination once committed.
+    bool  GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
+                                Vector &landing, Vector &axis,
+                                float &halfSpan) const;
+    bool  GetTransitionWaypoint(int fromIdx, int toIdx, const Vector &pos,
+                                NavTransitionWaypoint &out) const;
+
+    // Completion test for the exact source->destination edge. Walk edges use
+    // the shared boundary plane; drop/jump edges require feet on the landing.
+    bool  CrossedEdgeIntoArea(int fromIdx, int toIdx, const Vector &pos) const;
+
+    // Exact landing-surface check used by non-walk transition completion.
+    bool  IsOnAreaLanding(int areaIdx, const Vector &pos, float maxZDelta = 8.0f) const;
 
     const NavLadderData *Ladder(int idx) const
         { return (idx >= 0 && idx < m_ladderCount) ? &m_ladders[idx] : 0; }

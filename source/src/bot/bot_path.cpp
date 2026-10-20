@@ -131,100 +131,18 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
 }
 
 // Some generated NAV links intentionally cross a short floor gap/drop but the
-// two area rectangles do not touch, so GetPortalMerged cannot return a shared
-// edge. Treat those one-axis, short-gap links as virtual portals. This gives
-// steering an actual mouth to line up with instead of aiming diagonally at the
-// landing area's center through the wall beside the opening.
+// two area rectangles do not touch. The typed edge record classifies these as
+// drops; expose the source-side takeoff and a conservative landing point so
+// steering can line up with the real mouth instead of the landing center.
 bool GetSeparatedTransitionPortal(int fromIdx, int toIdx,
                                          Vector &mid, Vector &axis,
                                          float &halfSpan, Vector *insideDest)
 {
-    const NavAreaData *from = g_NavMesh.Area(fromIdx);
-    const NavAreaData *to = g_NavMesh.Area(toIdx);
-    if (!from || !to) return false;
-    // Keep this repair scoped to the verified malformed Haditha link. Applying
-    // synthetic takeoff points to every map's no-portal jump/drop changes
-    // traversal semantics for links whose BSP geometry has not been checked.
-    if (!IsHadithaMapName(g_Bots.m_mapname)
-        || from->id != 464 || to->id != 3321)
+    Vector landing;
+    if (!g_NavMesh.GetTransitionGeometry(fromIdx, toIdx, mid, landing,
+                                         axis, halfSpan))
         return false;
-
-    float overlapLo, overlapHi, gap, destDepth;
-    Vector travel(0.0f, 0.0f, 0.0f);
-    if (from->hi.y < to->lo.y || to->hi.y < from->lo.y)
-    {
-        overlapLo = from->lo.x > to->lo.x ? from->lo.x : to->lo.x;
-        overlapHi = from->hi.x < to->hi.x ? from->hi.x : to->hi.x;
-        if (overlapHi <= overlapLo) return false;
-        axis = Vector(1.0f, 0.0f, 0.0f);
-        mid.x = (overlapLo + overlapHi) * 0.5f;
-        if (from->hi.y < to->lo.y)
-        {
-            gap = to->lo.y - from->hi.y;
-            travel.y = 1.0f;
-            mid.y = from->hi.y;
-            destDepth = (to->hi.y - to->lo.y) * 0.5f;
-            if (destDepth > 18.0f) destDepth = 18.0f;
-            if (insideDest) *insideDest = Vector(mid.x, to->lo.y + destDepth, 0.0f);
-        }
-        else
-        {
-            gap = from->lo.y - to->hi.y;
-            travel.y = -1.0f;
-            mid.y = from->lo.y;
-            destDepth = (to->hi.y - to->lo.y) * 0.5f;
-            if (destDepth > 18.0f) destDepth = 18.0f;
-            if (insideDest) *insideDest = Vector(mid.x, to->hi.y - destDepth, 0.0f);
-        }
-    }
-    else if (from->hi.x < to->lo.x || to->hi.x < from->lo.x)
-    {
-        overlapLo = from->lo.y > to->lo.y ? from->lo.y : to->lo.y;
-        overlapHi = from->hi.y < to->hi.y ? from->hi.y : to->hi.y;
-        if (overlapHi <= overlapLo) return false;
-        axis = Vector(0.0f, 1.0f, 0.0f);
-        mid.y = (overlapLo + overlapHi) * 0.5f;
-        if (from->hi.x < to->lo.x)
-        {
-            gap = to->lo.x - from->hi.x;
-            travel.x = 1.0f;
-            mid.x = from->hi.x;
-            destDepth = (to->hi.x - to->lo.x) * 0.5f;
-            if (destDepth > 18.0f) destDepth = 18.0f;
-            if (insideDest) *insideDest = Vector(to->lo.x + destDepth, mid.y, 0.0f);
-        }
-        else
-        {
-            gap = from->lo.x - to->hi.x;
-            travel.x = -1.0f;
-            mid.x = from->lo.x;
-            destDepth = (to->hi.x - to->lo.x) * 0.5f;
-            if (destDepth > 18.0f) destDepth = 18.0f;
-            if (insideDest) *insideDest = Vector(to->hi.x - destDepth, mid.y, 0.0f);
-        }
-    }
-    else
-        return false; // overlapping/stacked or diagonal: no unambiguous mouth
-
-    // Only bridge the small discontinuities nav_generate uses for jumps and
-    // drops. A longer missing edge should remain visible to stuck recovery.
-    if (gap <= 0.0f || gap > 64.0f) return false;
-    halfSpan = (overlapHi - overlapLo) * 0.5f;
-    if (halfSpan < 8.0f || halfSpan * 2.0f >= 72.0f) return false;
-    mid.z = g_NavMesh.GetZ(fromIdx, mid.x, mid.y);
-    if (insideDest)
-        insideDest->z = g_NavMesh.GetZ(toIdx, insideDest->x, insideDest->y);
-    Vector landingProbe;
-    if (insideDest) landingProbe = *insideDest;
-    else
-    {
-        landingProbe = to->center;
-        landingProbe.z = g_NavMesh.GetZ(toIdx, landingProbe.x, landingProbe.y);
-    }
-    // This correction is for tight one-way drops like Haditha's lower-level
-    // doorway. Flat gaps and upward jumps need different takeoff physics and
-    // retain the ordinary fallback/recovery behavior.
-    if (mid.z - landingProbe.z < 24.0f) return false;
+    if (insideDest) *insideDest = landing;
     return true;
 }
 
@@ -351,8 +269,11 @@ float OpenHoldYaw(const Vector &pos, float preferredYaw)
 // at a generated terrain seam. Keep the current path while the player's feet
 // are still on either surface of its active edge; this prevents one ambiguous
 // lookup from discarding and rebuilding an otherwise valid slope route.
-static bool PositionOnAreaSurface(int areaIdx, const Vector &pos)
+static bool PositionOnAreaSurface(int areaIdx, const Vector &pos,
+                                  bool requireLanding = false)
 {
+    if (requireLanding)
+        return g_NavMesh.IsOnAreaLanding(areaIdx, pos, 8.0f);
     const NavAreaData *a = g_NavMesh.Area(areaIdx);
     if (!a || pos.x < a->lo.x - 24.0f || pos.x > a->hi.x + 24.0f
         || pos.y < a->lo.y - 24.0f || pos.y > a->hi.y + 24.0f)
@@ -384,28 +305,28 @@ bool PositionOnLadderLanding(int areaIdx, const Vector &pos)
 static bool CrossedExactPortalIntoArea(int fromIdx, int toIdx,
                                        const Vector &pos)
 {
-    if (!PositionOnAreaSurface(toIdx, pos)) return false;
     const NavAreaData *from = g_NavMesh.Area(fromIdx);
     const NavAreaData *to = g_NavMesh.Area(toIdx);
     if (!from || !to) return false;
-    Vector portal;
-    if (!g_NavMesh.GetPortal(fromIdx, toIdx, portal)) return false;
+    NavEdgeMeta meta;
+    if (!g_NavMesh.GetEdgeMeta(fromIdx, toIdx, meta) || !meta.valid)
+        return false;
 
-    float lx = from->lo.x > to->lo.x ? from->lo.x : to->lo.x;
-    float hx = from->hi.x < to->hi.x ? from->hi.x : to->hi.x;
-    float ly = from->lo.y > to->lo.y ? from->lo.y : to->lo.y;
-    float hy = from->hi.y < to->hi.y ? from->hi.y : to->hi.y;
-    bool vertical = (hx - lx) <= (hy - ly);
-    Vector normal = vertical ? Vector(1.0f, 0.0f, 0.0f)
-                             : Vector(0.0f, 1.0f, 0.0f);
-    Vector travel = to->center - from->center;
-    if (travel.x * normal.x + travel.y * normal.y < 0.0f)
-    {
-        normal.x = -normal.x;
-        normal.y = -normal.y;
-    }
-    float side = (pos.x - portal.x) * normal.x
-               + (pos.y - portal.y) * normal.y;
+    // A drop/jump is complete only when the feet are on the destination
+    // surface. The old +/-64u surface window let a shallow stacked drop clear
+    // while the bot was still standing on the upper floor.
+    if (meta.kind == NAV_EDGE_DROP || meta.kind == NAV_EDGE_JUMP)
+        return PositionOnAreaSurface(toIdx, pos, true);
+    if (meta.kind != NAV_EDGE_WALK) return false;
+    if (!PositionOnAreaSurface(toIdx, pos)) return false;
+
+    float nx = meta.normalX;
+    float ny = meta.normalY;
+    float nl = sqrtf(nx * nx + ny * ny);
+    if (nl < 0.5f) return false;
+    nx /= nl; ny /= nl;
+    float side = (pos.x - meta.midX) * nx
+               + (pos.y - meta.midY) * ny;
     return side > 1.0f;
 }
 
@@ -772,6 +693,11 @@ bool CInsBot::AdvanceWaypoint()
             && SourceTurnForEdge(m_path[m_pathCursor - 1], toIdx, pos);
         bool reached = false;
         bool havePortal = false;
+        NavEdgeMeta edgeMeta;
+        bool haveEdgeMeta = m_pathCursor > 0
+            && g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1], toIdx, edgeMeta);
+        bool landingOnlyEdge = haveEdgeMeta && edgeMeta.valid
+            && (edgeMeta.kind == NAV_EDGE_DROP || edgeMeta.kind == NAV_EDGE_JUMP);
         Vector pm, paxis; float ph;
         if (m_pathCursor > 0)
             havePortal = g_NavMesh.GetPortalMerged(m_path[m_pathCursor - 1],
@@ -802,10 +728,14 @@ bool CInsBot::AdvanceWaypoint()
         }
         else
         {
-            reached = (actualArea == toIdx)
-                   || (m_pathCursor > 0
-                       && CrossedExactPortalIntoArea(m_path[m_pathCursor - 1],
-                                                     toIdx, pos));
+            if (landingOnlyEdge)
+                reached = CrossedExactPortalIntoArea(m_path[m_pathCursor - 1],
+                                                     toIdx, pos);
+            else
+                reached = (actualArea == toIdx)
+                       || (m_pathCursor > 0
+                           && CrossedExactPortalIntoArea(m_path[m_pathCursor - 1],
+                                                         toIdx, pos));
         }
         // Typed ladder completion belongs to TraverseLadder's physical FSM.
         // FindArea may accept a landing surface while the feet are still up to
@@ -916,38 +846,17 @@ bool CInsBot::AdvanceWaypoint()
     }
     if (!haveWp && m_pathCursor >= 1)
     {
-        Vector landing;
-        if (GetSeparatedTransitionPortal(m_path[m_pathCursor - 1],
-                                         m_path[m_pathCursor], wp,
-                                         spreadAxis, spreadHalf, &landing))
+        NavTransitionWaypoint transition;
+        if (g_NavMesh.GetTransitionWaypoint(m_path[m_pathCursor - 1],
+                                            m_path[m_pathCursor], pos,
+                                            transition))
         {
             virtualWp = true;
             haveWp = true;
-            const NavAreaData *fromA = g_NavMesh.Area(m_path[m_pathCursor - 1]);
-            const NavAreaData *toA = g_NavMesh.Area(m_path[m_pathCursor]);
-            Vector travel = toA->center - fromA->center;
-            float tl = sqrtf(travel.x * travel.x + travel.y * travel.y);
-            if (tl > 1.0f)
-            {
-                travel.x /= tl; travel.y /= tl;
-                float along = (wp.x - pos.x) * travel.x + (wp.y - pos.y) * travel.y;
-                float lateral = fabsf((pos.x - wp.x) * -travel.y
-                                    + (pos.y - wp.y) *  travel.x);
-                // First center the hull just inside the source side. Once it
-                // is lined up, commit across the gap to a point inside the
-                // landing tile. This prevents diagonal corner-cutting.
-                if (along > 32.0f || lateral > 8.0f)
-                {
-                    wp.x -= travel.x * 28.0f;
-                    wp.y -= travel.y * 28.0f;
-                    wp.z = g_NavMesh.GetZ(m_path[m_pathCursor - 1], wp.x, wp.y);
-                    virtualApproach = true;
-                }
-                else
-                    wp = landing;
-            }
-            else
-                wp = landing;
+            wp = transition.point;
+            spreadAxis = transition.axis;
+            spreadHalf = transition.halfSpan;
+            virtualApproach = transition.virtualApproach;
         }
     }
     if (!haveWp)
@@ -1191,17 +1100,23 @@ bool CInsBot::AdvanceWaypoint()
             wp.y += laneAxis.y * off;
         }
         }
-        // Keep the aim inside the destination area so GetZ below always sees
-        // a real floor point (merged openings can extend past a slice area).
+        // Keep the aim inside the owning area. A virtual drop approach belongs
+        // to the source floor until the bot is committed across the gap; using
+        // destination Z here made the approach point float below the ledge.
         const NavAreaData *destA = g_NavMesh.Area(m_path[m_pathCursor]);
-        if (destA && !virtualApproach)
+        const NavAreaData *sourceA = m_pathCursor > 0
+            ? g_NavMesh.Area(m_path[m_pathCursor - 1]) : 0;
+        const NavAreaData *clampA = virtualApproach ? sourceA : destA;
+        if (clampA)
         {
-            if (wp.x < destA->lo.x) wp.x = destA->lo.x;
-            else if (wp.x > destA->hi.x) wp.x = destA->hi.x;
-            if (wp.y < destA->lo.y) wp.y = destA->lo.y;
-            else if (wp.y > destA->hi.y) wp.y = destA->hi.y;
+            if (wp.x < clampA->lo.x) wp.x = clampA->lo.x;
+            else if (wp.x > clampA->hi.x) wp.x = clampA->hi.x;
+            if (wp.y < clampA->lo.y) wp.y = clampA->lo.y;
+            else if (wp.y > clampA->hi.y) wp.y = clampA->hi.y;
         }
-        wp.z = g_NavMesh.GetZ(m_path[m_pathCursor], wp.x, wp.y);
+        wp.z = g_NavMesh.GetZ(virtualApproach ? m_path[m_pathCursor - 1]
+                                             : m_path[m_pathCursor],
+                              wp.x, wp.y);
     }
     // ---- elevation-drop lookahead ----
     // If the waypoint sits notably below the bot's feet, the path drops off a

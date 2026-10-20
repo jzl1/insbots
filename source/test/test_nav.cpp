@@ -45,7 +45,7 @@ static bool WriteEdgeGeometryFixture(const char *path)
     if (!f) return false;
     put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
     put16(f, 0);
-    put32(f, 12);
+    put32(f, 14);
 
     unsigned int conn[4][3];
     int counts[4];
@@ -82,10 +82,10 @@ static bool WriteEdgeGeometryFixture(const char *path)
     // Separated short drop (indices 8 -> 9).
     memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
     conn[NAV_EAST][0] = 402; counts[NAV_EAST] = 1;
-    WriteAreaV9(f, 401, 500, 0, 100, 600, 100, 100, conn, counts);
+    WriteAreaV9(f, 401, 500, 0, 100, 600, 50, 100, conn, counts);
     memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
     conn[NAV_WEST][0] = 401; counts[NAV_WEST] = 1;
-    WriteAreaV9(f, 402, 620, 0, 0, 720, 100, 0, conn, counts);
+    WriteAreaV9(f, 402, 620, 0, 0, 720, 50, 0, conn, counts);
 
     // Fully overlapping same-elevation rectangles are malformed, not walk.
     memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
@@ -94,6 +94,15 @@ static bool WriteEdgeGeometryFixture(const char *path)
     memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
     conn[NAV_WEST][0] = 501; counts[NAV_WEST] = 1;
     WriteAreaV9(f, 502, 800, 0, 0, 900, 100, 0, conn, counts);
+
+    // Shallow fully stacked drop (indices 12 -> 13). The upper floor is only
+    // 40u above the landing, inside the old +/-64u surface tolerance.
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_EAST][0] = 602; counts[NAV_EAST] = 1;
+    WriteAreaV9(f, 601, 1000, 0, 40, 1100, 100, 40, conn, counts);
+    memset(conn, 0, sizeof(conn)); memset(counts, 0, sizeof(counts));
+    conn[NAV_WEST][0] = 601; counts[NAV_WEST] = 1;
+    WriteAreaV9(f, 602, 1000, 0, 0, 1100, 100, 0, conn, counts);
 
     put32(f, 0); // no ladders
     fclose(f);
@@ -503,20 +512,42 @@ int main(){
       { printf("FAIL: stacked downward edge exposed as portal\n"); return 1; }
 
       if (!mEdges.GetEdgeMeta(8, 9, meta) || !meta.valid || meta.kind != NAV_EDGE_DROP
-          || fabsf(meta.midX - 600.0f) > 0.01f || fabsf(meta.midY - 50.0f) > 0.01f
+          || fabsf(meta.midX - 600.0f) > 0.01f || fabsf(meta.midY - 25.0f) > 0.01f
           || fabsf(meta.midZ - 100.0f) > 0.01f || fabsf(meta.zDelta + 100.0f) > 0.01f
-          || fabsf(meta.halfSpan - 50.0f) > 0.01f)
+          || fabsf(meta.halfSpan - 25.0f) > 0.01f)
       { printf("FAIL: separated drop geometry\n"); return 1; }
       if (mEdges.GetPortal(8, 9, portal))
       { printf("FAIL: separated drop exposed as walk portal\n"); return 1; }
       if (mEdges.GetPortalMerged(8, 9, mid, axis, halfSpan))
       { printf("FAIL: separated drop exposed as merged portal\n"); return 1; }
+      NavTransitionWaypoint transition;
+      if (!mEdges.GetTransitionWaypoint(8, 9, Vector(500, 25, 100), transition)
+          || !transition.virtualApproach
+          || fabsf(transition.point.x - 572.0f) > 0.01f
+          || fabsf(transition.point.y - 25.0f) > 0.01f
+          || fabsf(transition.point.z - 100.0f) > 0.01f)
+      { printf("FAIL: virtual approach did not preserve source-floor Z\n"); return 1; }
+      if (!mEdges.GetTransitionWaypoint(8, 9, Vector(590, 25, 100), transition)
+          || transition.virtualApproach
+          || fabsf(transition.point.z) > 0.01f)
+      { printf("FAIL: committed transition did not use landing Z\n"); return 1; }
 
       if (!mEdges.GetEdgeMeta(10, 11, meta) || meta.valid
           || meta.kind != NAV_EDGE_MALFORMED)
       { printf("FAIL: full same-level overlap was not malformed\n"); return 1; }
       if (mEdges.GetPortal(10, 11, portal))
       { printf("FAIL: full same-level overlap exposed as portal\n"); return 1; }
+
+      if (mEdges.GetTransitionWaypoint(12, 13, Vector(1050, 50, 40), transition))
+      { printf("FAIL: stacked drop produced a separated-drop waypoint\n"); return 1; }
+      if (mEdges.CrossedEdgeIntoArea(12, 13, Vector(1050, 50, 40)))
+      { printf("FAIL: shallow stacked drop advanced while still on upper floor\n"); return 1; }
+      if (!mEdges.CrossedEdgeIntoArea(12, 13, Vector(1050, 50, 0)))
+      { printf("FAIL: shallow stacked drop did not complete on landing\n"); return 1; }
+      if (mEdges.CrossedEdgeIntoArea(0, 1, Vector(90, 50, 0)))
+      { printf("FAIL: walk edge crossed before portal plane\n"); return 1; }
+      if (!mEdges.CrossedEdgeIntoArea(0, 1, Vector(110, 50, 0)))
+      { printf("FAIL: walk edge did not complete after crossing\n"); return 1; }
   }
   printf("VERIFIED: typed nav edges distinguish walk, ladder, drop, jump, and malformed geometry\n");
   remove(edgePath);
