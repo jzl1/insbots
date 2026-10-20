@@ -1,0 +1,14 @@
+# insbots nav fixups v1
+# Haditha: verified tight doorway approaches and east-room choke.
+edge tight 800 464
+edge tight 464 800
+edge tight 464 3274
+edge tight 3274 464
+edge tight 3274 235
+edge tight 235 3274
+edge tight 464 3321
+edge tight 3321 463
+edge east 3295 3315
+edge east 3295 320
+edge east 3315 320
+transition 464 3321 takeoff -2592.5 50 -136 landing -2592.5 -100 -188.5

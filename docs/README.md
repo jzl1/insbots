@@ -8,3 +8,4 @@ Technical guides and subsystem documentation for InsBots:
 * [Squad Orders](squad-orders.md) — Interactive orders menu (F3), formations, and covering fire.
 * [Slots & Reservations](slots-and-reservations.md) — Server reserves, class role locking, and `!request` takeover.
 * [Navigation & Objectives](navmesh-and-objectives.md) — Nav meshes, push-order capture, and pathing recovery.
+* [Nav Fixups](nav-fixups.md) — Optional per-map sidecars for tight edges and separated transitions.

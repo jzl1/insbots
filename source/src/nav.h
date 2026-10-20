@@ -180,6 +180,21 @@ private:
     NavSearchContext &operator=(const NavSearchContext &);
 };
 
+enum NavFixupKind
+{
+    NAV_FIXUP_TIGHT_EDGE = 0,
+    NAV_FIXUP_EAST_EDGE,
+    NAV_FIXUP_SEPARATED_TRANSITION
+};
+
+struct NavFixupRecord
+{
+    int            kind;
+    unsigned int   fromId, toId;
+    Vector         takeoff, landing;
+    bool           hasTakeoff, hasLanding;
+};
+
 class CNavMesh
 {
 public:
@@ -188,6 +203,7 @@ public:
                  m_areaIdTable(0), m_areaIdTableSize(0),
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
                  m_sccCount(0), m_sccReachWords(0), m_sccReach(0),
+                 m_fixups(0), m_fixupCount(0),
                  m_searchContext(), m_searchBusy(false),
                  m_costStamp(0), m_costSeq(0), m_costParams(), m_lastSearchStatus(NAV_SEARCH_OK)
     {
@@ -213,6 +229,7 @@ public:
     CNavMesh &operator=(const CNavMesh &) = delete;
 
     bool  Load(const char *path);       // absolute or game-relative path
+    bool  LoadFixups(const char *path); // optional sidecar; false means no fixups
     void  Free();
     bool  IsLoaded() const;
     int   Count() const { return m_count; }
@@ -242,6 +259,11 @@ public:
     // when start/goal is invalid or no route exists.
     float GetPathCost(int startIdx, int goalIdx, int seed = 0);
     NavSearchStatus LastSearchStatus() const { return m_lastSearchStatus; }
+    bool HasFixups() const { return m_fixupCount > 0; }
+    bool HasFixupKind(int kind) const;
+    bool HasFixupEdge(int kind, int fromIdx, int toIdx) const;
+    bool GetFixupTransition(int fromIdx, int toIdx,
+                            Vector &takeoff, Vector &landing) const;
 
     // Follows outgoing NAV connections starting at 'startIdx' and returns the
     // reachable area whose surface/center is closest to 'desired'. Chooses the
@@ -357,6 +379,8 @@ private:
     int            m_sccCount;
     int            m_sccReachWords;
     unsigned int  *m_sccReach;
+    NavFixupRecord *m_fixups;
+    int             m_fixupCount;
 
     NavSearchContext m_searchContext;
     bool             m_searchBusy;
@@ -385,6 +409,7 @@ private:
     bool BuildEdgeMetadata(int fromIdx, int connSlot, NavEdgeMeta &out) const;
     bool BuildAreaIdMap();
     bool LoadInPlace(const char *path);
+    void ClearFixups();
     void TakeState(CNavMesh &source);
     float EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const;
     bool SccReachable(int fromScc, int toScc) const;

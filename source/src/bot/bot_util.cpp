@@ -102,32 +102,16 @@ float xyd(const Vector &a, const Vector &b)
 
 bool IsHadithaMapName(const char *name)
 {
-    if (!name || !name[0]) return false;
-    return !_stricmp(name, "ins_haditha") || !_stricmp(name, "ins_haditha_night");
+    (void)name;
+    return g_NavMesh.HasFixupKind(NAV_FIXUP_TIGHT_EDGE);
 }
 
 bool IsHadithaTightDoorEdge(int fromIdx, int toIdx)
 {
-    if (!IsHadithaMapName(g_Bots.m_mapname)) return false;
-    const NavAreaData *from = g_NavMesh.Area(fromIdx);
-    const NavAreaData *to = g_NavMesh.Area(toIdx);
-    if (!from || !to) return false;
-    unsigned int a = from->id, b = to->id;
-    return (a == 800  && b == 464)  || (a == 464  && b == 800)
-        || (a == 464  && b == 3274) || (a == 3274 && b == 464)
-        || (a == 3274 && b == 235)  || (a == 235  && b == 3274)
-        || (a == 464  && b == 3321)
-        || (a == 3321 && b == 463);
+    return g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx);
 }
 
 bool IsHadithaEastDoorEdge(int fromIdx, int toIdx)
 {
-    if (!IsHadithaMapName(g_Bots.m_mapname)) return false;
-    const NavAreaData *from = g_NavMesh.Area(fromIdx);
-    const NavAreaData *to = g_NavMesh.Area(toIdx);
-    if (!from || !to) return false;
-    unsigned int a = from->id, b = to->id;
-    return (a == 3295 && b == 3315)
-        || (a == 3295 && b == 320)
-        || (a == 3315 && b == 320);
+    return g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx);
 }

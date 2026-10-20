@@ -478,6 +478,47 @@ int main(){
       if (m.BuildPath(s, g, path, 64) <= 0 || m.m_searchContext.mark != 1)
       { printf("FAIL: search generation wrap\n"); return 1; }
   }
+  {
+      const char *fixupPath = "test_nav_fixups.tmp";
+      const char *badFixupPath = "test_nav_fixups_bad.tmp";
+      if (m.LoadFixups("test_nav_fixups_missing.tmp") || m.HasFixups())
+      { printf("FAIL: missing fixup file changed state\n"); return 1; }
+      FILE *fx = fopen(fixupPath, "w");
+      if (!fx) { printf("FAIL: write fixup file\n"); return 1; }
+      fprintf(fx, "# insbots nav fixups v1\n"
+                  "edge tight 1 2\n"
+                  "edge east 2 3\n"
+                  "transition 1 2 takeoff 10 20 30 landing 40 50 60\n");
+      fclose(fx);
+      int id1 = m.IndexOfId(1), id2 = m.IndexOfId(2), id3 = m.IndexOfId(3);
+      if (!m.LoadFixups(fixupPath) || !m.HasFixupKind(NAV_FIXUP_TIGHT_EDGE)
+          || !m.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, id1, id2)
+          || !m.HasFixupEdge(NAV_FIXUP_EAST_EDGE, id2, id3))
+      { printf("FAIL: valid fixup parsing\n"); return 1; }
+      Vector fixTakeoff, fixLanding;
+      if (!m.GetFixupTransition(id1, id2, fixTakeoff, fixLanding)
+          || fixTakeoff.x != 10.0f || fixTakeoff.y != 20.0f || fixTakeoff.z != 30.0f
+          || fixLanding.x != 40.0f || fixLanding.y != 50.0f || fixLanding.z != 60.0f)
+      { printf("FAIL: fixup transition hints\n"); return 1; }
+      FILE *badFx = fopen(badFixupPath, "w");
+      if (!badFx) { printf("FAIL: write bad fixup file\n"); return 1; }
+      fprintf(badFx, "# insbots nav fixups v1\nedge tight 9999 1\n");
+      fclose(badFx);
+      if (m.LoadFixups(badFixupPath) || m.HasFixups())
+      { printf("FAIL: malformed fixup accepted\n"); return 1; }
+      remove(fixupPath); remove(badFixupPath);
+
+      const char *autoFixupPath = "test_nav.tmp.fixups";
+      FILE *autoFx = fopen(autoFixupPath, "w");
+      if (!autoFx) { printf("FAIL: write auto fixup file\n"); return 1; }
+      fprintf(autoFx, "# insbots nav fixups v1\nedge tight 1 2\n");
+      fclose(autoFx);
+      CNavMesh mAuto;
+      if (!mAuto.Load(navPath) || !mAuto.HasFixups()
+          || !mAuto.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, 1, 2))
+      { printf("FAIL: automatic fixup sidecar load\n"); return 1; }
+      remove(autoFixupPath);
+  }
 
   // Ladder records become typed directed A* edges without masquerading as
   // ordinary shared-edge portals.

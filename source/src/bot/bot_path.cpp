@@ -139,9 +139,32 @@ bool GetSeparatedTransitionPortal(int fromIdx, int toIdx,
                                          float &halfSpan, Vector *insideDest)
 {
     Vector landing;
+    Vector hintTakeoff, hintLanding;
+    const bool hasHint = g_NavMesh.GetFixupTransition(
+        fromIdx, toIdx, hintTakeoff, hintLanding);
     if (!g_NavMesh.GetTransitionGeometry(fromIdx, toIdx, mid, landing,
                                          axis, halfSpan))
-        return false;
+    {
+        if (!hasHint) return false;
+        mid = hintTakeoff;
+        landing = hintLanding;
+        axis = landing - mid;
+        float axisLen = sqrtf(axis.x * axis.x + axis.y * axis.y);
+        if (axisLen < 0.5f) return false;
+        axis.x /= axisLen; axis.y /= axisLen; axis.z = 0.0f;
+        halfSpan = 16.0f;
+    }
+    else if (hasHint)
+    {
+        mid = hintTakeoff;
+        landing = hintLanding;
+        axis = landing - mid;
+        float axisLen = sqrtf(axis.x * axis.x + axis.y * axis.y);
+        if (axisLen >= 0.5f)
+        {
+            axis.x /= axisLen; axis.y /= axisLen; axis.z = 0.0f;
+        }
+    }
     if (insideDest) *insideDest = landing;
     return true;
 }
@@ -263,7 +286,7 @@ float OpenHoldYaw(const Vector &pos, float preferredYaw)
 }
 
 // The second reported choke is the 25u corner immediately before the broad
-// id320 room. Depending on which of the two tiny source tiles FindArea picks,
+// destination room. Depending on which of the two tiny source tiles FindArea picks,
 // the active edge can be the short south step or either eastward exit.
 // Exact FindArea selection can legitimately choose a third overlapping tile
 // at a generated terrain seam. Keep the current path while the player's feet

@@ -277,6 +277,7 @@ void CNavMesh::Free()
     if (m_connMeta) free(m_connMeta);
     if (m_areaIdTable) free(m_areaIdTable);
     if (m_sccReach) free(m_sccReach);
+    if (m_fixups) free(m_fixups);
     if (m_sniperSpots) free(m_sniperSpots);
     if (m_ladders) free(m_ladders);
     if (m_gridStart) free(m_gridStart);
@@ -286,6 +287,7 @@ void CNavMesh::Free()
     m_connCount = 0;
     m_areaIdTable = 0; m_areaIdTableSize = 0;
     m_sccCount = 0; m_sccReachWords = 0; m_sccReach = 0;
+    m_fixups = 0; m_fixupCount = 0;
     m_sniperSpots = 0; m_sniperSpotCount = 0;
     m_gridStart = 0; m_gridCells = 0;
     m_gridW = m_gridH = 0;
@@ -356,6 +358,153 @@ int CNavMesh::IndexOfId(unsigned int id) const
         slot = (slot + 1) & (unsigned int)(m_areaIdTableSize - 1);
     }
     return -1;
+}
+
+void CNavMesh::ClearFixups()
+{
+    if (m_fixups) free(m_fixups);
+    m_fixups = 0;
+    m_fixupCount = 0;
+}
+
+bool CNavMesh::LoadFixups(const char *path)
+{
+    ClearFixups();
+    if (!path || !path[0] || !m_areas || !m_areaIdTable) return false;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+
+    NavFixupRecord records[128];
+    int count = 0;
+    bool header = false;
+    char line[512];
+    bool valid = true;
+    while (fgets(line, sizeof(line), fp))
+    {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p || *p == '\r' || *p == '\n') continue;
+        if (*p == '#')
+        {
+            if (strstr(p, "insbots nav fixups v1")) header = true;
+            continue;
+        }
+        if (!header || count >= (int)(sizeof(records) / sizeof(records[0])))
+        {
+            valid = false;
+            break;
+        }
+
+        char kindName[32] = {0};
+        unsigned int fromId = 0, toId = 0;
+        int kind = -1;
+        if (sscanf(p, "edge %31s %u %u", kindName, &fromId, &toId) == 3)
+        {
+            if (!strcmp(kindName, "tight")) kind = NAV_FIXUP_TIGHT_EDGE;
+            else if (!strcmp(kindName, "east")) kind = NAV_FIXUP_EAST_EDGE;
+            else valid = false;
+        }
+        else if (sscanf(p, "transition %u %u", &fromId, &toId) == 2)
+        {
+            kind = NAV_FIXUP_SEPARATED_TRANSITION;
+        }
+        else
+        {
+            valid = false;
+        }
+        if (!valid) break;
+        if (IndexOfId(fromId) < 0 || IndexOfId(toId) < 0)
+        {
+            valid = false;
+            break;
+        }
+
+        NavFixupRecord &rec = records[count];
+        memset(&rec, 0, sizeof(rec));
+        rec.kind = kind;
+        rec.fromId = fromId;
+        rec.toId = toId;
+        if (kind == NAV_FIXUP_SEPARATED_TRANSITION)
+        {
+            char *takeoff = strstr(p, "takeoff");
+            if (takeoff)
+            {
+                if (sscanf(takeoff, "takeoff %f %f %f",
+                           &rec.takeoff.x, &rec.takeoff.y, &rec.takeoff.z) != 3)
+                { valid = false; break; }
+                rec.hasTakeoff = true;
+            }
+            char *landing = strstr(p, "landing");
+            if (landing)
+            {
+                if (sscanf(landing, "landing %f %f %f",
+                           &rec.landing.x, &rec.landing.y, &rec.landing.z) != 3)
+                { valid = false; break; }
+                rec.hasLanding = true;
+            }
+        }
+        count++;
+    }
+    fclose(fp);
+    if (!valid || !header || count == 0)
+    {
+        NAVLOAD_ERR("[insbots] nav fixups ignored: malformed %s\n", path);
+        return false;
+    }
+
+    m_fixups = (NavFixupRecord *)malloc((size_t)count * sizeof(NavFixupRecord));
+    if (!m_fixups)
+    {
+        NAVLOAD_ERR("[insbots] nav fixups ignored: allocation failed for %s\n", path);
+        return false;
+    }
+    memcpy(m_fixups, records, (size_t)count * sizeof(NavFixupRecord));
+    m_fixupCount = count;
+    return true;
+}
+
+bool CNavMesh::HasFixupKind(int kind) const
+{
+    for (int i = 0; i < m_fixupCount; i++)
+        if (m_fixups[i].kind == kind) return true;
+    return false;
+}
+
+bool CNavMesh::HasFixupEdge(int kind, int fromIdx, int toIdx) const
+{
+    const NavAreaData *from = Area(fromIdx);
+    const NavAreaData *to = Area(toIdx);
+    if (!from || !to) return false;
+    for (int i = 0; i < m_fixupCount; i++)
+    {
+        const NavFixupRecord &rec = m_fixups[i];
+        if (rec.kind == kind && rec.fromId == from->id && rec.toId == to->id)
+            return true;
+    }
+    return false;
+}
+
+bool CNavMesh::GetFixupTransition(int fromIdx, int toIdx,
+                                  Vector &takeoff, Vector &landing) const
+{
+    const NavAreaData *from = Area(fromIdx);
+    const NavAreaData *to = Area(toIdx);
+    if (!from || !to) return false;
+    for (int i = 0; i < m_fixupCount; i++)
+    {
+        const NavFixupRecord &rec = m_fixups[i];
+        if (rec.kind != NAV_FIXUP_SEPARATED_TRANSITION
+            || rec.fromId != from->id || rec.toId != to->id)
+            continue;
+        if (rec.hasTakeoff && rec.hasLanding)
+        {
+            takeoff = rec.takeoff;
+            landing = rec.landing;
+            return true;
+        }
+        return false;
+    }
+    return false;
 }
 
 // uniform spatial index (512u cells) over area 2D bounds. FindArea /
@@ -505,6 +654,12 @@ bool CNavMesh::Load(const char *path)
 {
     CNavMesh candidate;
     if (!candidate.LoadInPlace(path)) return false;
+    if (path && strlen(path) + 8 < 1024)
+    {
+        char fixupPath[1024];
+        sprintf(fixupPath, "%s.fixups", path);
+        candidate.LoadFixups(fixupPath); // optional; failure means generic behavior
+    }
     Free();
     TakeState(candidate);
     return true;
@@ -528,6 +683,8 @@ void CNavMesh::TakeState(CNavMesh &source)
     m_sccCount = source.m_sccCount;
     m_sccReachWords = source.m_sccReachWords;
     m_sccReach = source.m_sccReach;
+    m_fixups = source.m_fixups;
+    m_fixupCount = source.m_fixupCount;
     m_gridW = source.m_gridW;
     m_gridH = source.m_gridH;
     m_gridMinX = source.m_gridMinX;
@@ -558,6 +715,8 @@ void CNavMesh::TakeState(CNavMesh &source)
     source.m_sccCount = 0;
     source.m_sccReachWords = 0;
     source.m_sccReach = 0;
+    source.m_fixups = 0;
+    source.m_fixupCount = 0;
     source.m_gridW = source.m_gridH = 0;
     source.m_gridMinX = source.m_gridMinY = 0.0f;
     source.m_gridCell = 0.0f;
@@ -1932,8 +2091,8 @@ bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
     else
         return false;
 
-    // Match the long-standing Haditha repair envelope: a real short gap,
-    // narrow enough for one hull, with a meaningful drop.
+    // Generic short-gap transition envelope: a real gap, narrow enough for one
+    // hull, with a meaningful drop.
     if (gap <= 0.0f || gap > 64.0f) return false;
     if (meta.halfSpan < 8.0f || meta.halfSpan >= 36.0f) return false;
 
