@@ -81,12 +81,30 @@ struct NavAreaData
     unsigned int   openMark, closedMark;
 };
 
+struct NavCostParams
+{
+    float jumpPenalty;
+    float crouchPenalty;
+    float avoidPenalty;
+    float ladderPenalty;
+    float ladderUpPenalty;
+    float dangerPenalty;
+    bool  dangerEnabled;
+
+    NavCostParams()
+        : jumpPenalty(4000.0f), crouchPenalty(2500.0f), avoidPenalty(3000.0f),
+          ladderPenalty(3000.0f), ladderUpPenalty(500.0f), dangerPenalty(6000.0f),
+          dangerEnabled(false)
+    {
+    }
+};
+
 class CNavMesh
 {
 public:
     CNavMesh() : m_areas(0), m_count(0), m_mark(0), m_ladders(0), m_ladderCount(0), m_sniperSpots(0), m_sniperSpotCount(0),
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
-                 m_costStamp(0), m_costSeq(0)
+                 m_costStamp(0), m_costSeq(0), m_costParams()
     {
         for (int i = 0; i < 64; i++)
         {
@@ -219,7 +237,9 @@ private:
     CostEntry      m_costCache[256];
     unsigned int   m_costStamp;
     unsigned int m_costSeq;
+    NavCostParams  m_costParams;
     void InvalidateCostCache() { m_costSeq = 0; if (++m_costStamp == 0) m_costStamp = 1; }
+    void RefreshCostParamsFromGlobals();
 
     int  IndexOfId(unsigned int id) const;
     void BuildGrid();

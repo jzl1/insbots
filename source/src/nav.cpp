@@ -56,6 +56,30 @@ static int    s_dangerCount = 0;
 float g_navDangerPenalty = 6000.0f; // added per area inside a danger zone
 bool  g_navDangerEnabled = false;   // set per-bot right before BuildPath
 
+void CNavMesh::RefreshCostParamsFromGlobals()
+{
+    NavCostParams next;
+    next.jumpPenalty = g_navJumpPenalty;
+    next.crouchPenalty = g_navCrouchPenalty;
+    next.avoidPenalty = g_navAvoidPenalty;
+    next.ladderPenalty = g_navLadderPenalty;
+    next.ladderUpPenalty = g_navLadderUpPenalty;
+    next.dangerPenalty = g_navDangerPenalty;
+    next.dangerEnabled = g_navDangerEnabled;
+
+    if (next.jumpPenalty != m_costParams.jumpPenalty
+        || next.crouchPenalty != m_costParams.crouchPenalty
+        || next.avoidPenalty != m_costParams.avoidPenalty
+        || next.ladderPenalty != m_costParams.ladderPenalty
+        || next.ladderUpPenalty != m_costParams.ladderUpPenalty
+        || next.dangerPenalty != m_costParams.dangerPenalty
+        || next.dangerEnabled != m_costParams.dangerEnabled)
+    {
+        m_costParams = next;
+        InvalidateCostCache();
+    }
+}
+
 void NavClearDangerZones()
 {
     s_dangerCount = 0;
@@ -1303,6 +1327,7 @@ int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int se
     if (!path || maxLen <= 0) return 0;
     if (startIdx == goalIdx) { path[0] = startIdx; return 1; }
 
+    RefreshCostParamsFromGlobals();
     m_mark++;
     const Vector &goalPos = m_areas[goalIdx].center;
 
@@ -1402,8 +1427,8 @@ int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int se
                 float climbLen = ladder ? ladder->length : 0.0f;
                 float minClimb = fabsf(step.z);
                 if (climbLen < minClimb) climbLen = minClimb;
-                cost = climbLen + g_navLadderPenalty;
-                if (ladderUp) cost += g_navLadderUpPenalty;
+                cost = climbLen + m_costParams.ladderPenalty;
+                if (ladderUp) cost += m_costParams.ladderUpPenalty;
             }
             else
             {
@@ -1413,15 +1438,15 @@ int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int se
             // AVOID jump/crouch areas: large additive penalties so bots route
             // around anything needing a jump or a crouch when a flat path exists,
             // but still use them if it's the only way. Tunable via the globals.
-            if (A[nb].attributes & NAVATTR_CROUCH) cost += g_navCrouchPenalty;
-            if (A[nb].attributes & NAVATTR_JUMP)   cost += g_navJumpPenalty;
-            if (A[nb].attributes & NAVATTR_AVOID)  cost += g_navAvoidPenalty;
+            if (A[nb].attributes & NAVATTR_CROUCH) cost += m_costParams.crouchPenalty;
+            if (A[nb].attributes & NAVATTR_JUMP)   cost += m_costParams.jumpPenalty;
+            if (A[nb].attributes & NAVATTR_AVOID)  cost += m_costParams.avoidPenalty;
             // Dynamic firefight avoidance for capture-committed bots: areas
             // inside an active engagement pay a large additive cost so A*
             // prefers a flat detour around the fight. z distance is weighted
             // so a firefight on another floor does not block travel above or
             // below it. Zones are rebuilt every frame by the roster.
-            if (g_navDangerEnabled && g_navDangerPenalty > 0.0f && s_dangerCount > 0)
+            if (m_costParams.dangerEnabled && m_costParams.dangerPenalty > 0.0f && s_dangerCount > 0)
             {
                 const Vector &p = A[nb].center;
                 for (int z = 0; z < s_dangerCount; z++)
@@ -1432,7 +1457,7 @@ int CNavMesh::BuildPath(int startIdx, int goalIdx, int *path, int maxLen, int se
                     float r  = s_dangerRadius[z];
                     if (dx*dx + dy*dy + dz*dz*4.0f < r*r)
                     {
-                        cost += g_navDangerPenalty;
+                        cost += m_costParams.dangerPenalty;
                         break;
                     }
                 }
@@ -1495,12 +1520,14 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
         return -1.0f;
     if (startIdx == goalIdx) return 0.0f;
 
+    RefreshCostParamsFromGlobals();
+
     // Deterministic (seed 0, no danger zones) queries are cached: capture
     // refill and objective picking re-ask the same pairs dozens of times per
     // second, and each miss on a 25k-area mesh is a full A*. Costs only change
     // when learned links change or the mesh reloads, both of which bump the
     // stamp. Per-bot jitter (seed) and danger routing are never cached.
-    if (seed == 0 && !g_navDangerEnabled)
+    if (seed == 0 && !m_costParams.dangerEnabled)
     {
         for (int i = 0; i < 256; i++)
         {
@@ -1557,7 +1584,7 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
         if (cur == goalIdx)
         {
             float result = A[cur].g;
-            if (seed == 0 && !g_navDangerEnabled)
+            if (seed == 0 && !m_costParams.dangerEnabled)
             {
                 int slot = -1;
                 unsigned int oldestSeq = 0xFFFFFFFFu;
@@ -1600,16 +1627,32 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
                 float climbLen = ladder ? ladder->length : 0.0f;
                 float minClimb = fabsf(step.z);
                 if (climbLen < minClimb) climbLen = minClimb;
-                cost = climbLen + g_navLadderPenalty;
-                if (ladderUp) cost += g_navLadderUpPenalty;
+                cost = climbLen + m_costParams.ladderPenalty;
+                if (ladderUp) cost += m_costParams.ladderUpPenalty;
             }
             else
             {
                 if (step.z < -120.0f) cost += 400.0f;
             }
-            if (A[nb].attributes & NAVATTR_CROUCH) cost += g_navCrouchPenalty;
-            if (A[nb].attributes & NAVATTR_JUMP)   cost += g_navJumpPenalty;
-            if (A[nb].attributes & NAVATTR_AVOID)  cost += g_navAvoidPenalty;
+            if (A[nb].attributes & NAVATTR_CROUCH) cost += m_costParams.crouchPenalty;
+            if (A[nb].attributes & NAVATTR_JUMP)   cost += m_costParams.jumpPenalty;
+            if (A[nb].attributes & NAVATTR_AVOID)  cost += m_costParams.avoidPenalty;
+            if (m_costParams.dangerEnabled && m_costParams.dangerPenalty > 0.0f && s_dangerCount > 0)
+            {
+                const Vector &p = A[nb].center;
+                for (int z = 0; z < s_dangerCount; z++)
+                {
+                    float dx = p.x - s_dangerPos[z].x;
+                    float dy = p.y - s_dangerPos[z].y;
+                    float dz = p.z - s_dangerPos[z].z;
+                    float r  = s_dangerRadius[z];
+                    if (dx*dx + dy*dy + dz*dz*4.0f < r*r)
+                    {
+                        cost += m_costParams.dangerPenalty;
+                        break;
+                    }
+                }
+            }
             unsigned char bad = A[cur].connBad ? A[cur].connBad[k] : 0;
             if (bad >= 2)
             {
@@ -1649,7 +1692,7 @@ float CNavMesh::GetPathCost(int startIdx, int goalIdx, int seed)
             }
         }
     }
-    if (seed == 0 && !g_navDangerEnabled)
+    if (seed == 0 && !m_costParams.dangerEnabled)
     {
         int slot = -1;
         unsigned int oldestSeq = 0xFFFFFFFFu;

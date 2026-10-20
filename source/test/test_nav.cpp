@@ -336,6 +336,24 @@ int main(){
   printf("VERIFIED: NAVATTR_AVOID (0x0080) successfully detours around avoid areas!\n");
   remove(avoidForkPath);
 
+  // Cost-cache coherency: changing a runtime penalty must invalidate the
+  // cached path cost for an otherwise identical query.
+  const char *costCachePath = "test_nav_cost_cache.tmp";
+  if (!WriteForkFixture(costCachePath, NAVATTR_JUMP)) { printf("FAIL: write cost fixture\n"); return 1; }
+  CNavMesh mCost;
+  if (!mCost.Load(costCachePath)) { printf("FAIL: cost fixture load\n"); return 1; }
+  g_navJumpPenalty = 0.0f;
+  float lowCost = mCost.GetPathCost(0, 3, 0);
+  g_navJumpPenalty = 10000.0f;
+  float highCost = mCost.GetPathCost(0, 3, 0);
+  if (lowCost < 0.0f || highCost < 0.0f || lowCost == highCost)
+  {
+      printf("FAIL: stale path-cost cache low=%.3f high=%.3f\n", lowCost, highCost);
+      return 1;
+  }
+  printf("VERIFIED: path-cost cache invalidates after runtime penalty change (%.3f -> %.3f)\n", lowCost, highCost);
+  remove(costCachePath);
+
   printf("ALL OK\n");
   return 0;
 }
