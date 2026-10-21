@@ -14,9 +14,9 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (default: v0.21.0)'
+        description: 'Release Tag (default: v0.21.1)'
         required: false
-        default: 'v0.21.0'
+        default: 'v0.21.1'
         type: string
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then
             TAG="${{ inputs.release_tag }}"
           else
-            TAG="v0.21.0_${TIMESTAMP}"
+            TAG="v0.21.1_${TIMESTAMP}"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
@@ -220,14 +220,13 @@ jobs:
           prerelease: ${{ inputs.is_prerelease }}
           make_latest: true
           body: |
-            ### What's New in v0.21.0:
-            * **Humvee M249 Auto-Turrets:** Roof-mounted Humvees now carry an autonomous M249 that scans 360 degrees, acquires visible enemies, and fires at the M249's full 800 RPM with the player weapon's gunshot sound, spread, and red tracers. The turret arms for the team of the first player to sit in the driver seat, keeps defending after the driver dies, and shuts down when the truck is destroyed. Full admin control: `insbot turret status / add / register / remove / set`.
-            * **Round-Freeze Gate & Team Pre-Registration:** Turrets can be pre-registered to a team before anyone boards (`insbot turret register`), and stay dormant through the pre-round freeze window so a preset truck can never fire on players still locked in spawn (`turret_freeze_gate`).
-            * **Bot Anti-Vehicle Combat & Steering:** Bots now treat hostile Humvees as targets (`target_vehicles`: 0=ignore, 1=anti-armor only, 2=any weapon when no infantry threat is visible) and steer around driveable hulls and wrecks instead of walking into them or poisoning nav links (`avoid_vehicles`).
-            * **Vehicle Pose Interpolation Fix:** The server now advances `m_flAnimTime` on driveable vehicles so clients interpolate wheel spin and steering poses. This fixes the stuttering wheels, the stuck front-wheel steering angle, and the "burnout" look on stopped Humvees.
-            * **Push-Order Objective Targeting:** On Push maps, bots attack objectives in the engine's capture sequence instead of the nearest-to-home point (`push_order`).
-            * **Cover System Performance:** Exposure checks are spatially indexed (22.04us to 0.20us per call) and the threat mask widened from 8 to 12 sectors, cutting the false "protected" rate from 11.10% to 3.88%.
-            * **Source, Builds & Docs:** `bot.cpp` is split into 17 focused translation units (parallel MSVC builds, header-aware Linux builds), the repository ships a new `docs/` guide set and expanded unit tests, and the project is now licensed under GPL v3.0.
+            ### What's New in v0.21.1:
+            * **Faster Nav Loading & Search:** Flat edge storage, area-ID lookup maps, and a tuned spatial grid cut Sinjar load time from roughly 976 ms to under 20 ms, while shared A* search and per-instance scratch contexts reduce allocation and contention.
+            * **More Reliable Navigation:** Transactional mesh loading, component rejection, deterministic area lookup ties, loader hardening, and reachable-area fallback prevent failed reloads, stale caches, and wasted searches.
+            * **Typed Portal & Transition Geometry:** Walk, ladder, jump, drop, and malformed edges are classified explicitly; split doorway slices merge into a single opening, and virtual approach geometry preserves the correct source-floor Z.
+            * **Width-Aware Routing:** `avoid_narrow` (default 50) softly penalizes 32-99u openings, helping bots avoid single-file doorways without making narrow routes unreachable.
+            * **Map Fixups:** Per-map `.nav.fixups` sidecars support tight-edge and separated-transition corrections, with Haditha and Haditha Night shipped as examples.
+            * **Native Regression Coverage:** Expanded tests cover cache invalidation, component rejection, portal/drop geometry, virtual approach Z, `NO_JUMP`, transactional reload, and narrow-portal routing.
 
           files: |
             release_assets/insbots-windows-x86.zip
