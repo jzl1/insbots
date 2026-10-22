@@ -2203,12 +2203,21 @@ bool CNavMesh::GetTransitionWaypoint(int fromIdx, int toIdx, const Vector &pos,
     float along = (out.takeoff.x - pos.x) * nx + (out.takeoff.y - pos.y) * ny;
     float lateral = fabsf((pos.x - out.takeoff.x) * -ny
                         + (pos.y - out.takeoff.y) *  nx);
-    out.virtualApproach = along > 32.0f || lateral > 8.0f;
+    // The staging point sits 28u behind the takeoff. Use it only while it is
+    // safely ahead of the bot; when approaching off-axis near the lip, aim
+    // directly at the takeoff instead of steering back to that staging point.
+    bool useStaging = along > 48.0f;
+    out.virtualApproach = useStaging || (along > 0.0f && lateral > 8.0f);
     if (out.virtualApproach)
     {
         const NavAreaData *from = Area(fromIdx);
-        out.point.x = out.takeoff.x - nx * 28.0f;
-        out.point.y = out.takeoff.y - ny * 28.0f;
+        if (useStaging)
+        {
+            out.point.x = out.takeoff.x - nx * 28.0f;
+            out.point.y = out.takeoff.y - ny * 28.0f;
+        }
+        else
+            out.point = out.takeoff;
         if (from)
         {
             if (out.point.x < from->lo.x) out.point.x = from->lo.x;
