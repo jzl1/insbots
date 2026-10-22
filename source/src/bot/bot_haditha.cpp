@@ -66,10 +66,21 @@ static bool FindHadithaDoorInPath(const int *path, int pathLen, int cursor,
     if (doorFrom < 0) return false;
 
     Vector axis; float halfSpan = 0.0f;
-    if (!g_NavMesh.GetPortalMerged(doorFrom, doorTo, mouth, axis, halfSpan)
-        && !GetSeparatedTransitionPortal(doorFrom, doorTo,
-                                         mouth, axis, halfSpan, 0))
-        return false;
+    if (!g_NavMesh.GetPortalMerged(doorFrom, doorTo, mouth, axis, halfSpan))
+    {
+        // The sidecar normally supplies the exact takeoff/landing hints.  Keep
+        // the known map transition usable when the sidecar is absent.
+        const NavAreaData *from = g_NavMesh.Area(doorFrom);
+        const NavAreaData *to = g_NavMesh.Area(doorTo);
+        if (!from || !to || from->id != 464 || to->id != 3321
+            || !GetSeparatedTransitionPortal(doorFrom, doorTo,
+                                             mouth, axis, halfSpan, 0))
+        {
+            if (!from || !to || from->id != 464 || to->id != 3321)
+                return false;
+            mouth = Vector(-2592.5f, 50.0f, -136.0f);
+        }
+    }
 
     return true;
 }
@@ -144,10 +155,17 @@ bool CInsBot::TransferHadithaDoor(float now)
             if (fromIdx >= 0 && toIdx >= 0) break;
         }
         Vector axis; float halfSpan = 0.0f;
-        if (fromIdx < 0 || toIdx < 0
-            || !GetSeparatedTransitionPortal(fromIdx, toIdx,
-                                             mouth, axis, halfSpan, 0))
+        if (fromIdx < 0 || toIdx < 0)
             return false;
+        if (!GetSeparatedTransitionPortal(fromIdx, toIdx,
+                                          mouth, axis, halfSpan, 0))
+        {
+            const NavAreaData *from = g_NavMesh.Area(fromIdx);
+            const NavAreaData *to = g_NavMesh.Area(toIdx);
+            if (!from || !to || from->id != 464 || to->id != 3321)
+                return false;
+            mouth = Vector(-2592.5f, 50.0f, -136.0f);
+        }
     }
 
     Vector pos = m_info->GetAbsOrigin();
@@ -236,7 +254,16 @@ bool CInsBot::TransferHadithaEastDoor(float now)
     int sourceIdx = CurrentArea(pos);
     if (sourceIdx < 0) sourceIdx = g_NavMesh.FindNearestArea(pos);
     const NavAreaData *source = g_NavMesh.Area(sourceIdx);
-    if (!source || (source->id != 3295 && source->id != 3315)) return false;
+    if (!source) return false;
+
+    // The old mesh reaches the east room through 3289 -> 3319 -> 3293 ->
+    // 3315, not only through the 3295/3315 pair.  Accept the whole choke
+    // chain; the landing validation below still requires a full standing hull
+    // in area 320.
+    const bool eastSource = source->id == 3289 || source->id == 3319
+                         || source->id == 3293 || source->id == 3315
+                         || source->id == 3295;
+    if (!eastSource) return false;
 
     int destIdx = -1;
     for (int i = 0; i < g_NavMesh.Count(); i++)
@@ -245,7 +272,14 @@ bool CInsBot::TransferHadithaEastDoor(float now)
         if (area && area->id == 320) { destIdx = i; break; }
     }
     const NavAreaData *destArea = g_NavMesh.Area(destIdx);
-    if (!destArea || !g_NavMesh.HasConnection(sourceIdx, destIdx)) return false;
+    if (!destArea) return false;
+    // 3315 and 3295 have a direct link into 320.  The 3289/3319/3293 seam
+    // tiles do not; they are allowed to use the validated landing search
+    // because the choke chain itself is the transition.
+    const bool directToRoom = g_NavMesh.HasConnection(sourceIdx, destIdx);
+    const bool seamTile = source->id == 3289 || source->id == 3319
+                       || source->id == 3293;
+    if (!directToRoom && !seamTile) return false;
 
     // BSP-expanded standing-hull probes show the full id320 interior clear.
     // Use the far/east column first, then spread down its long Y axis when a
@@ -273,8 +307,15 @@ bool CInsBot::TransferHadithaEastDoor(float now)
             break;
         }
     }
-    if (!foundDest) return false;
+    if (!foundDest)
+    {
+        BotDbg("[insbots] %s Haditha east doorway no safe destination from area %u\n",
+               m_name, source->id);
+        return false;
+    }
 
+    BotDbg("[insbots] %s Haditha east doorway source area %u at (%.0f %.0f %.0f)\n",
+           m_name, source->id, pos.x, pos.y, pos.z);
     m_ctrl->SetAbsOrigin(dest);
     m_nextTeleportOk = now + 1.0f;
     OnRelocated("Haditha east doorway transfer");

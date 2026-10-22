@@ -407,6 +407,11 @@ bool CNavMesh::LoadFixups(const char *path)
             else if (!strcmp(kindName, "east")) kind = NAV_FIXUP_EAST_EDGE;
             else valid = false;
         }
+        else if (sscanf(p, "area avoid %u", &fromId) == 1)
+        {
+            kind = NAV_FIXUP_AVOID_AREA;
+            toId = 0;
+        }
         else if (sscanf(p, "transition %u %u", &fromId, &toId) == 2)
         {
             kind = NAV_FIXUP_SEPARATED_TRANSITION;
@@ -416,7 +421,8 @@ bool CNavMesh::LoadFixups(const char *path)
             valid = false;
         }
         if (!valid) break;
-        if (IndexOfId(fromId) < 0 || IndexOfId(toId) < 0)
+        if (IndexOfId(fromId) < 0
+            || (kind != NAV_FIXUP_AVOID_AREA && IndexOfId(toId) < 0))
         {
             valid = false;
             break;
@@ -463,6 +469,12 @@ bool CNavMesh::LoadFixups(const char *path)
     }
     memcpy(m_fixups, records, (size_t)count * sizeof(NavFixupRecord));
     m_fixupCount = count;
+    for (int i = 0; i < m_fixupCount; i++)
+    {
+        if (m_fixups[i].kind != NAV_FIXUP_AVOID_AREA) continue;
+        int idx = IndexOfId(m_fixups[i].fromId);
+        if (idx >= 0) m_areas[idx].attributes |= NAVATTR_AVOID;
+    }
     return true;
 }
 
@@ -2139,6 +2151,37 @@ bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
     if (takeoff.z - landing.z < 24.0f) return false;
     axis = Vector(meta.axisX, meta.axisY, 0.0f);
     halfSpan = meta.halfSpan;
+
+    // A sidecar transition records the physical takeoff and landing that were
+    // verified against the map. Prefer it over the generated rectangle overlap,
+    // which can sit well off the real mouth on malformed drop links. Reject a
+    // bad hint rather than steering bots toward a point outside either area.
+    Vector hintTakeoff, hintLanding;
+    if (GetFixupTransition(fromIdx, toIdx, hintTakeoff, hintLanding))
+    {
+        bool takeoffInside = hintTakeoff.x >= from->lo.x
+                          && hintTakeoff.x <= from->hi.x
+                          && hintTakeoff.y >= from->lo.y
+                          && hintTakeoff.y <= from->hi.y
+                          && fabsf(hintTakeoff.z
+                                   - GetZ(fromIdx, hintTakeoff.x, hintTakeoff.y)) <= 32.0f;
+        bool landingInside = hintLanding.x >= to->lo.x
+                          && hintLanding.x <= to->hi.x
+                          && hintLanding.y >= to->lo.y
+                          && hintLanding.y <= to->hi.y
+                          && fabsf(hintLanding.z
+                                   - GetZ(toIdx, hintLanding.x, hintLanding.y)) <= 32.0f;
+        if (takeoffInside && landingInside)
+        {
+            takeoff = hintTakeoff;
+            landing = hintLanding;
+            float dx = landing.x - takeoff.x;
+            float dy = landing.y - takeoff.y;
+            float len = sqrtf(dx * dx + dy * dy);
+            if (len >= 0.5f)
+                axis = Vector(dx / len, dy / len, 0.0f);
+        }
+    }
     return true;
 }
 

@@ -166,6 +166,7 @@ void CInsBot::ResetDoorwayRunway()
 
 void CInsBot::OnRelocated(const char *reason)
 {
+    InsBots_ResetPortalTransitSlot((int)(this - g_Bots.m_bots));
     ResetDoorwayRunway();
     m_bestDist = 3.4e38f;
 

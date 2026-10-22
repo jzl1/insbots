@@ -48,6 +48,685 @@ extern CfgVar                insbot_doorway_teleport_time;
 extern CfgVar                insbot_stuck_time;
 extern CfgVar                insbot_debug;
 
+enum
+{
+    PORTAL_TRANSIT_NONE = 0,
+    PORTAL_TRANSIT_OWNER,
+    PORTAL_TRANSIT_HOLD,
+};
+
+enum PortalTransitPhase
+{
+    PT_PHASE_NONE = 0,
+    PT_PHASE_APPROACH,
+    PT_PHASE_QUEUED,
+    PT_PHASE_COMMITTED,
+    PT_PHASE_LAND,
+    PT_PHASE_CLEAR,
+    PT_PHASE_RECOVERY,
+};
+
+struct PortalTransitSegment
+{
+    unsigned int key;
+    int startEdge, endEdge;
+    int startArea, endArea;
+    Vector entry, exit, normal, exitNormal, axis;
+    float entryHalf, exitHalf;
+    bool dropEntry, dropExit, jumpEntry;
+};
+
+struct PortalTransitEdgeInfo
+{
+    int fromArea, toArea;
+    Vector entry, exit, normal, axis;
+    float halfSpan;
+    bool drop, jump;
+};
+
+struct PortalTransitLease
+{
+    bool active;
+    unsigned int key;
+    int ownerSlot;          // roster slot + 1
+    unsigned int ownerPathSerial;
+    int startArea, endArea;
+    float grantTime;
+    float lastProgressTime;
+    Vector progressPos, entry, exit;
+};
+
+struct PortalTransitBotState
+{
+    int phase;
+    unsigned int key;
+    bool segmentValid;
+    PortalTransitSegment segment;
+    unsigned int pathSerial;
+    bool cacheValid;
+    unsigned int cachePathSerial;
+    int cacheCursor, cachePathLen;
+    float cacheTime;
+    PortalTransitSegment cached;
+    float phaseTime;
+    float lastProgressTime;
+    Vector progressPos;
+    float blockedUntil;
+    float recoveryUntil;
+    unsigned int lastCompletedKey;
+    float completedUntil;
+};
+
+static PortalTransitLease s_portalLeases[96];
+static PortalTransitBotState s_portalBots[64];
+
+static float PortalHorizontalDist(const Vector &a, const Vector &b);
+static bool PortalLandingClear(const PortalTransitSegment &seg, int ignoreSlot);
+static void ReleasePortalTransitLease(PortalTransitLease *lease);
+
+static const float PT_ACQUIRE_RADIUS  = 140.0f;
+static const float PT_COMMIT_RADIUS   = 40.0f;
+static const float PT_HOLD_BEHIND     = 72.0f;
+static const float PT_QUEUE_GAP       = 58.0f;
+static const float PT_GROUP_RADIUS    = 96.0f;
+static const float PT_STAGE_RADIUS    = 104.0f;
+static const float PT_QUEUE_WAIT_MAX  = 2.5f;
+static const float PT_LEASE_IDLE_MAX  = 3.0f;
+static const float PT_LEASE_LIFE_MAX  = 20.0f;
+static const float PT_LANDING_RESERVE_RADIUS = 48.0f;
+// Crowd grace removes player blocking; it must not also saturate movement.
+// Running these 25u NAV seams at 3x overshoots the tile and lands bots on
+// jamb ledges, so keep normal path speed and let the grace drain the column.
+static const float PT_CROWD_SPEED_SCALE = 1.0f;
+static const float PT_CROWD_APPROACH_SPEED_SCALE = 1.0f;
+
+void InsBots_ResetPortalTransit()
+{
+    memset(s_portalLeases, 0, sizeof(s_portalLeases));
+    memset(s_portalBots, 0, sizeof(s_portalBots));
+}
+
+void InsBots_ResetPortalTransitSlot(int slot)
+{
+    if (slot < 0 || slot >= 64) return;
+    memset(&s_portalBots[slot], 0, sizeof(s_portalBots[slot]));
+    for (int i = 0; i < 96; i++)
+        if (s_portalLeases[i].active && s_portalLeases[i].ownerSlot == slot + 1)
+            ReleasePortalTransitLease(&s_portalLeases[i]);
+}
+
+static float PortalHorizontalDist(const Vector &a, const Vector &b)
+{
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static void PortalClampToArea(int areaIdx, Vector &p, float inset)
+{
+    const NavAreaData *a = g_NavMesh.Area(areaIdx);
+    if (!a) return;
+    float lx = a->lo.x + inset, hx = a->hi.x - inset;
+    float ly = a->lo.y + inset, hy = a->hi.y - inset;
+    if (lx > hx) { lx = hx = (a->lo.x + a->hi.x) * 0.5f; }
+    if (ly > hy) { ly = hy = (a->lo.y + a->hi.y) * 0.5f; }
+    if (p.x < lx) p.x = lx; else if (p.x > hx) p.x = hx;
+    if (p.y < ly) p.y = ly; else if (p.y > hy) p.y = hy;
+    p.z = g_NavMesh.GetZ(areaIdx, p.x, p.y);
+}
+
+static Vector PortalEdgeAxis(const NavAreaData *from, const NavAreaData *to)
+{
+    float lx = from->lo.x > to->lo.x ? from->lo.x : to->lo.x;
+    float hx = from->hi.x < to->hi.x ? from->hi.x : to->hi.x;
+    float ly = from->lo.y > to->lo.y ? from->lo.y : to->lo.y;
+    float hy = from->hi.y < to->hi.y ? from->hi.y : to->hi.y;
+    float ox = hx - lx, oy = hy - ly;
+    if (ox < 0.0f) ox = 0.0f;
+    if (oy < 0.0f) oy = 0.0f;
+    return (ox >= oy) ? Vector(1.0f, 0.0f, 0.0f) : Vector(0.0f, 1.0f, 0.0f);
+}
+
+// Resolve one NAV edge to its physical opening. Walk edges require a
+// full-hull-verified finite band; drops use the typed transition geometry.
+// No sidecar/fixup data is consulted here.
+static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &out)
+{
+    memset(&out, 0, sizeof(out));
+    const NavAreaData *from = g_NavMesh.Area(fromIdx);
+    const NavAreaData *to = g_NavMesh.Area(toIdx);
+    if (!from || !to) return false;
+
+    out.fromArea = fromIdx;
+    out.toArea = toIdx;
+
+    NavEdgeMeta meta;
+    bool haveMeta = g_NavMesh.GetEdgeMeta(fromIdx, toIdx, meta);
+    // A verified east-door edge is a flat narrow portal in the map even when
+    // the generated mesh carries a bogus elevation delta. Treat the sidecar
+    // classification as authoritative so bots do not jump into the frame.
+    if (haveMeta && meta.valid
+        && g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx)
+        && meta.halfSpan > 0.0f && meta.halfSpan < 40.0f)
+    {
+        float nx = meta.normalX;
+        float ny = meta.normalY;
+        float len = sqrtf(nx * nx + ny * ny);
+        if (len < 0.5f)
+        {
+            nx = to->center.x - from->center.x;
+            ny = to->center.y - from->center.y;
+            len = sqrtf(nx * nx + ny * ny);
+        }
+        if (len < 0.5f) return false;
+        out.entry = Vector(meta.midX, meta.midY, meta.midZ);
+        out.normal = Vector(nx / len, ny / len, 0.0f);
+        out.exit = out.entry + out.normal * 40.0f;
+        PortalClampToArea(toIdx, out.exit, 8.0f);
+        out.axis = Vector(meta.axisX, meta.axisY, 0.0f);
+        out.halfSpan = meta.halfSpan;
+        return true;
+    }
+    if (haveMeta && meta.valid && meta.kind == NAV_EDGE_DROP)
+    {
+        // A mapper-authored transition is authoritative for the physical
+        // mouth. Generated NAV overlap midpoints can sit several units away
+        // from the real opening on malformed drop links.
+        Vector hintTakeoff, hintLanding;
+        if (g_NavMesh.GetFixupTransition(fromIdx, toIdx,
+                                         hintTakeoff, hintLanding))
+        {
+            float dx = hintLanding.x - hintTakeoff.x;
+            float dy = hintLanding.y - hintTakeoff.y;
+            float len = sqrtf(dx * dx + dy * dy);
+            if (len < 0.5f)
+            {
+                dx = to->center.x - from->center.x;
+                dy = to->center.y - from->center.y;
+                len = sqrtf(dx * dx + dy * dy);
+            }
+            if (len < 0.5f) return false;
+            out.entry = hintTakeoff;
+            out.exit = hintLanding;
+            out.normal = Vector(dx / len, dy / len, 0.0f);
+            out.axis = Vector(meta.axisX, meta.axisY, 0.0f);
+            out.halfSpan = meta.halfSpan > 0.0f ? meta.halfSpan : 16.0f;
+            out.drop = true;
+            return true;
+        }
+
+        Vector takeoff, landing, axis;
+        float halfSpan = 0.0f;
+        if (!g_NavMesh.GetTransitionGeometry(fromIdx, toIdx, takeoff, landing,
+                                             axis, halfSpan))
+            return false;
+        if (halfSpan <= 0.0f || halfSpan >= 40.0f) return false;
+        float dx = landing.x - takeoff.x;
+        float dy = landing.y - takeoff.y;
+        float len = sqrtf(dx * dx + dy * dy);
+        if (len < 0.5f)
+        {
+            dx = to->center.x - from->center.x;
+            dy = to->center.y - from->center.y;
+            len = sqrtf(dx * dx + dy * dy);
+            if (len < 0.5f) return false;
+        }
+        out.entry = takeoff;
+        out.exit = landing;
+        out.normal = Vector(dx / len, dy / len, 0.0f);
+        out.axis = axis;
+        out.halfSpan = halfSpan;
+        out.drop = true;
+        return true;
+    }
+
+    if (haveMeta && meta.valid && meta.kind == NAV_EDGE_JUMP)
+    {
+        if (meta.halfSpan <= 0.0f || meta.halfSpan >= 40.0f) return false;
+        float dx = to->center.x - from->center.x;
+        float dy = to->center.y - from->center.y;
+        float len = sqrtf(dx * dx + dy * dy);
+        if (len < 0.5f) return false;
+        out.entry = Vector(meta.midX, meta.midY, meta.midZ);
+        out.normal = Vector(dx / len, dy / len, 0.0f);
+        out.exit = out.entry + out.normal * 40.0f;
+        PortalClampToArea(toIdx, out.exit, 8.0f);
+        out.axis = Vector(meta.axisX, meta.axisY, 0.0f);
+        out.halfSpan = meta.halfSpan;
+        out.jump = true;
+        return true;
+    }
+
+    Vector center;
+    float halfSpan = 0.0f;
+    Vector mergedAxis;
+    bool haveMergedAxis = false;
+    if (!ProbePhysicalPortal(fromIdx, toIdx, &center, &halfSpan))
+    {
+        // Some real 50u openings sit in an open room and fail the side-wall
+        // probe. The merged NAV opening is still narrower than two 32u hulls;
+        // accept it only when the generator marked an endpoint PRECISE, which
+        // keeps ordinary 25u open-ground tessellation out of the queue.
+        Vector mergedMid;
+        float mergedHalf = 0.0f;
+        if (g_NavMesh.GetPortalMerged(fromIdx, toIdx, mergedMid, mergedAxis,
+                                      mergedHalf)
+            && mergedHalf > 0.0f && mergedHalf < 32.0f)
+        {
+            bool precise = ((from->attributes & NAVATTR_PRECISE) != 0)
+                        || ((to->attributes & NAVATTR_PRECISE) != 0);
+            if (precise)
+            {
+                center = mergedMid;
+                halfSpan = mergedHalf;
+                haveMergedAxis = true;
+            }
+        }
+
+        // A sidecar-verified narrow edge is authoritative when the generic
+        // hull probe cannot resolve it. Use the raw typed edge geometry rather
+        // than merging with neighboring 25u tiles.
+        if (halfSpan <= 0.0f
+            && haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK
+            && meta.halfSpan > 0.0f && meta.halfSpan < 40.0f
+            && (g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx)
+                || g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx)))
+        {
+            center = Vector(meta.midX, meta.midY, meta.midZ);
+            halfSpan = meta.halfSpan;
+            mergedAxis = Vector(meta.axisX, meta.axisY, 0.0f);
+            haveMergedAxis = true;
+        }
+        if (halfSpan <= 0.0f) return false;
+    }
+    if ((halfSpan <= 0.0f || halfSpan >= 40.0f)
+        && haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK
+        && meta.halfSpan > 0.0f && meta.halfSpan < 40.0f
+        && (g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx)
+            || g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx)))
+    {
+        center = Vector(meta.midX, meta.midY, meta.midZ);
+        halfSpan = meta.halfSpan;
+        mergedAxis = Vector(meta.axisX, meta.axisY, 0.0f);
+        haveMergedAxis = true;
+    }
+    if (halfSpan <= 0.0f || halfSpan >= 40.0f) return false;
+
+    float dx = to->center.x - from->center.x;
+    float dy = to->center.y - from->center.y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.5f) return false;
+    out.entry = center;
+    out.normal = Vector(dx / len, dy / len, 0.0f);
+    out.exit = out.entry + out.normal * 40.0f;
+    PortalClampToArea(toIdx, out.exit, 8.0f);
+    out.axis = haveMergedAxis ? mergedAxis : PortalEdgeAxis(from, to);
+    out.halfSpan = halfSpan;
+    if (haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK
+        && meta.zDelta > 12.0f)
+        out.jump = true;
+    return true;
+}
+
+static bool PortalEdgesSameOpening(const PortalTransitEdgeInfo &a,
+                                   const PortalTransitEdgeInfo &b)
+{
+    if (fabsf(a.entry.z - b.entry.z) > 80.0f) return false;
+    if (PortalHorizontalDist(a.entry, b.entry) > PT_GROUP_RADIUS) return false;
+    float dot = a.normal.x * b.normal.x + a.normal.y * b.normal.y;
+    return dot >= 0.5f;
+}
+
+static unsigned int PortalQuantize(float v)
+{
+    return (unsigned int)(int)floorf(v * 4.0f + 0.5f);
+}
+
+static unsigned int PortalEdgeHash(const PortalTransitEdgeInfo &e)
+{
+    unsigned int h = 2166136261u;
+    h = (h ^ PortalQuantize(e.entry.x)) * 16777619u;
+    h = (h ^ PortalQuantize(e.entry.y)) * 16777619u;
+    h = (h ^ PortalQuantize(e.entry.z)) * 16777619u;
+    h = (h ^ PortalQuantize(e.exit.x)) * 16777619u;
+    h = (h ^ PortalQuantize(e.exit.y)) * 16777619u;
+    h = (h ^ PortalQuantize(e.exit.z)) * 16777619u;
+    h = (h ^ (unsigned int)(e.drop ? 1 : 0)) * 16777619u;
+    h = (h ^ (unsigned int)(e.jump ? 1 : 0)) * 16777619u;
+    return h;
+}
+
+// Build one physical transit segment around the active edge. Contiguous
+// single-file edges are merged only while their hull-verified openings are
+// collinear and close together, so the several 25u NAV tiles that describe one
+// doorway share one key while separate doorways stay separate.
+static bool BuildPortalTransitSegment(const int *path, int pathLen, int cursor,
+                                      PortalTransitSegment &out)
+{
+    memset(&out, 0, sizeof(out));
+    if (!path || pathLen <= 0 || cursor <= 0 || cursor >= pathLen) return false;
+
+    PortalTransitEdgeInfo active;
+    if (!GetTransitEdgeInfo(path[cursor - 1], path[cursor], active))
+        return false;
+
+    PortalTransitEdgeInfo before[16];
+    int beforeCount = 0;
+    int startEdge = cursor - 1;
+    while (startEdge > 0 && beforeCount < 16)
+    {
+        PortalTransitEdgeInfo prev;
+        if (!GetTransitEdgeInfo(path[startEdge - 1], path[startEdge], prev)) break;
+        if (!PortalEdgesSameOpening(active, prev)) break;
+        before[beforeCount++] = prev;
+        startEdge--;
+    }
+
+    PortalTransitEdgeInfo after[16];
+    int afterCount = 0;
+    int endEdge = cursor - 1;
+    while (endEdge + 1 < pathLen && afterCount < 16)
+    {
+        PortalTransitEdgeInfo next;
+        if (!GetTransitEdgeInfo(path[endEdge], path[endEdge + 1], next)) break;
+        if (!PortalEdgesSameOpening(active, next)) break;
+        after[afterCount++] = next;
+        endEdge++;
+    }
+
+    PortalTransitEdgeInfo all[33];
+    int count = 0;
+    for (int i = beforeCount - 1; i >= 0; i--)
+        all[count++] = before[i];
+    all[count++] = active;
+    for (int i = 0; i < afterCount; i++)
+        all[count++] = after[i];
+
+    out.startEdge = startEdge;
+    out.endEdge = endEdge;
+    out.startArea = path[startEdge];
+    out.endArea = path[endEdge + 1];
+    out.entry = all[0].entry;
+    out.exit = all[count - 1].exit;
+    out.normal = all[0].normal;
+    out.exitNormal = all[count - 1].normal;
+    out.axis = all[0].axis;
+    out.entryHalf = all[0].halfSpan;
+    out.exitHalf = all[count - 1].halfSpan;
+    out.dropEntry = all[0].drop;
+    out.dropExit = all[count - 1].drop;
+    out.jumpEntry = all[0].jump;
+
+    // Commutative sum/mix: opposite directions through the same opening get
+    // the same lease key, while duplicate slice hashes do not XOR-cancel back
+    // to the FNV offset (which would merge every two-slice doorway).
+    unsigned int keySum = 0;
+    unsigned int keyMix = 0;
+    for (int i = 0; i < count; i++)
+    {
+        unsigned int eh = PortalEdgeHash(all[i]);
+        keySum += eh;
+        keyMix ^= eh + 0x9e3779b9u + (eh << 6) + (eh >> 2);
+    }
+    out.key = 2166136261u ^ keySum ^ keyMix
+            ^ ((unsigned int)count * 0x85ebca6bu);
+    return true;
+}
+
+static PortalTransitLease *FindPortalTransitLease(unsigned int key)
+{
+    for (int i = 0; i < 96; i++)
+        if (s_portalLeases[i].active && s_portalLeases[i].key == key)
+            return &s_portalLeases[i];
+    return 0;
+}
+
+static PortalTransitLease *AllocatePortalTransitLease(unsigned int key)
+{
+    for (int i = 0; i < 96; i++)
+    {
+        if (!s_portalLeases[i].active)
+        {
+            memset(&s_portalLeases[i], 0, sizeof(s_portalLeases[i]));
+            s_portalLeases[i].active = true;
+            s_portalLeases[i].key = key;
+            return &s_portalLeases[i];
+        }
+    }
+    return 0;
+}
+
+static void ReleasePortalTransitLease(PortalTransitLease *lease)
+{
+    if (lease) memset(lease, 0, sizeof(*lease));
+}
+
+static bool PortalLeaseIsStale(const PortalTransitLease &lease, float now)
+{
+    int ownerSlot = lease.ownerSlot - 1;
+    if (ownerSlot < 0 || ownerSlot >= 64) return true;
+
+    CInsBot *owner = &g_Bots.m_bots[ownerSlot];
+    if (!owner->m_inUse || !owner->m_info || owner->m_info->IsDead())
+        return true;
+
+    const PortalTransitBotState &ownerState = s_portalBots[ownerSlot];
+    if (ownerState.phase < PT_PHASE_APPROACH
+        || ownerState.phase > PT_PHASE_CLEAR)
+        return true;
+    if (ownerState.pathSerial != lease.ownerPathSerial)
+        return true;
+
+    // An owner that stops running the transit update (route completed, mode
+    // changed, etc.) must not reserve the opening forever.
+    if (now - lease.lastProgressTime > PT_LEASE_IDLE_MAX
+        || now - lease.grantTime > PT_LEASE_LIFE_MAX)
+        return true;
+
+    // CLEAR is only bookkeeping. Once the owner is physically beyond the
+    // landing, any waiter may take the opening immediately.
+    if (ownerState.phase == PT_PHASE_CLEAR)
+    {
+        Vector p = owner->m_info->GetAbsOrigin();
+        float dx = p.x - lease.exit.x;
+        float dy = p.y - lease.exit.y;
+        float out = dx * ownerState.segment.exitNormal.x
+                  + dy * ownerState.segment.exitNormal.y;
+        if (out >= 24.0f || PortalHorizontalDist(p, lease.exit) >= 36.0f)
+            return true;
+    }
+    return false;
+}
+
+static bool PortalPathContainsSegment(const int *path, int pathLen, int cursor,
+                                      int startArea, int endArea)
+{
+    if (!path || pathLen <= 0 || cursor <= 0 || cursor >= pathLen) return false;
+    int lo = cursor - 20;
+    if (lo < 0) lo = 0;
+    int hi = cursor + 2;
+    if (hi >= pathLen) hi = pathLen - 1;
+    for (int i = lo; i <= hi; i++)
+    {
+        if (path[i] != startArea) continue;
+        for (int j = i + 1; j < pathLen && j <= i + 24; j++)
+        {
+            if (path[j] != endArea) continue;
+            int active = cursor - 1;
+            if (active >= i - 1 && active <= j - 1) return true;
+        }
+    }
+    return false;
+}
+
+// Pick a staging point on the already-planned approach path.  Queue distance
+// is measured backward from the portal entry, so bots form a column along
+// known walkable NAV centers instead of all backing into the same lip tile.
+static bool PortalQueueTarget(const PortalTransitSegment &seg, const int *path,
+                              int pathLen, int startEdge, float behindDist,
+                              Vector &out)
+{
+    Vector target = seg.entry;
+    if (!path || pathLen <= 0 || startEdge < 0 || startEdge >= pathLen)
+        return false;
+
+    float accumulated = 0.0f;
+    Vector cursor = seg.entry;
+    for (int i = startEdge; i >= 0; i--)
+    {
+        const NavAreaData *area = g_NavMesh.Area(path[i]);
+        if (!area) continue;
+        Vector next = area->center;
+        float dx = next.x - cursor.x;
+        float dy = next.y - cursor.y;
+        float dz = next.z - cursor.z;
+        float len = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (len < 0.5f) continue;
+        if (accumulated + len >= behindDist)
+        {
+            float t = (behindDist - accumulated) / len;
+            out = cursor + Vector(dx * t, dy * t, dz * t);
+            return true;
+        }
+        accumulated += len;
+        cursor = next;
+    }
+    return false;
+}
+
+// Repaths often begin at the portal's source area, leaving no approach history
+// in m_path. Build a small staging tree from connected NAV areas on the near
+// side instead; their centers are already verified walkable.
+static bool PortalNeighborQueueTarget(const PortalTransitSegment &seg, int rank,
+                                      Vector &out)
+{
+    int frontier[128];
+    int visited[128];
+    int frontierCount = 0, visitedCount = 0;
+    frontier[frontierCount++] = seg.startArea;
+    visited[visitedCount++] = seg.startArea;
+
+    int candidates[32];
+    float candidateDist[32];
+    int candidateCount = 0;
+
+    for (int head = 0; head < frontierCount && head < 128; head++)
+    {
+        int areaIdx = frontier[head];
+        const NavAreaData *area = g_NavMesh.Area(areaIdx);
+        if (!area) continue;
+        Vector d = area->center - seg.entry;
+        float behind = d.x * seg.normal.x + d.y * seg.normal.y;
+        float dist = sqrtf(d.x * d.x + d.y * d.y);
+        if (behind <= -8.0f && dist <= 320.0f && candidateCount < 32)
+        {
+            int at = candidateCount;
+            while (at > 0 && dist < candidateDist[at - 1])
+            {
+                candidateDist[at] = candidateDist[at - 1];
+                candidates[at] = candidates[at - 1];
+                at--;
+            }
+            candidateDist[at] = dist;
+            candidates[at] = areaIdx;
+            candidateCount++;
+        }
+
+        for (int c = 0; c < area->connCount && frontierCount < 128; c++)
+        {
+            int next = area->connIdx[c];
+            if (next == seg.endArea || next < 0) continue;
+            const NavAreaData *nextArea = g_NavMesh.Area(next);
+            if (!nextArea) continue;
+            Vector nd = nextArea->center - seg.entry;
+            if (nd.x * seg.normal.x + nd.y * seg.normal.y > -8.0f) continue;
+            bool seen = false;
+            for (int v = 0; v < visitedCount; v++)
+                if (visited[v] == next) { seen = true; break; }
+            if (seen) continue;
+            visited[visitedCount++] = next;
+            frontier[frontierCount++] = next;
+        }
+    }
+
+    if (candidateCount <= 0) return false;
+    int pick = rank + 1;
+    if (pick >= candidateCount) pick = candidateCount - 1;
+    const NavAreaData *area = g_NavMesh.Area(candidates[pick]);
+    if (!area) return false;
+    out = area->center;
+    return true;
+}
+
+static bool PortalLandingClear(const PortalTransitSegment &seg, int ignoreSlot)
+{
+    for (int i = 0; i < 64; i++)
+    {
+        if (i == ignoreSlot) continue;
+        CInsBot *other = &g_Bots.m_bots[i];
+        if (!other->m_inUse || !other->m_info || other->m_info->IsDead()) continue;
+        Vector p = other->m_info->GetAbsOrigin();
+        float dz = fabsf(p.z - seg.exit.z);
+        if (dz > 110.0f) continue;
+        float dist = PortalHorizontalDist(p, seg.exit);
+        if (dist > 44.0f) continue;
+        float dx = p.x - seg.exit.x;
+        float dy = p.y - seg.exit.y;
+        float out = dx * seg.exitNormal.x + dy * seg.exitNormal.y;
+        if (out >= 32.0f) continue;
+        bool onLanding = g_NavMesh.IsOnAreaLanding(seg.endArea, p, 16.0f);
+        if (onLanding) return false;
+        // A bot just beyond a tiny 25u landing tile must not hold the lease
+        // forever. Only a hull actually overlapping the landing surface blocks.
+        if (dz <= 16.0f && dist < 28.0f)
+            return false;
+    }
+    return true;
+}
+
+static bool PortalLandingReservedByOther(const PortalTransitSegment &seg,
+                                         unsigned int key)
+{
+    for (int i = 0; i < 96; i++)
+    {
+        const PortalTransitLease &lease = s_portalLeases[i];
+        if (!lease.active || lease.key == key) continue;
+        if (fabsf(lease.exit.z - seg.exit.z) > 110.0f) continue;
+        if (PortalHorizontalDist(lease.exit, seg.exit) < PT_LANDING_RESERVE_RADIUS) return true;
+    }
+    return false;
+}
+
+static void PortalTrackProgress(PortalTransitBotState &st, const Vector &pos,
+                                float now)
+{
+    if (st.lastProgressTime <= 0.0f)
+    {
+        st.lastProgressTime = now;
+        st.progressPos = pos;
+        return;
+    }
+    float dx = pos.x - st.progressPos.x;
+    float dy = pos.y - st.progressPos.y;
+    float dz = pos.z - st.progressPos.z;
+    if (dx * dx + dy * dy + dz * dz >= 8.0f * 8.0f)
+    {
+        st.lastProgressTime = now;
+        st.progressPos = pos;
+    }
+}
+
+static void PortalResetBotState(PortalTransitBotState &st)
+{
+    unsigned int lastKey = st.lastCompletedKey;
+    float completedUntil = st.completedUntil;
+    float blockedUntil = st.blockedUntil;
+    memset(&st, 0, sizeof(st));
+    st.lastCompletedKey = lastKey;
+    st.completedUntil = completedUntil;
+    st.blockedUntil = blockedUntil;
+}
+
 // ---------------------------------------------------------------------------
 // Trace filter for steering obstacle detection.
 //
@@ -554,6 +1233,770 @@ void MoveAtWorldYaw(float worldYaw, float viewYaw, float speed,
     side = -sinf(rel) * speed;
 }
 
+// Haditha's basement exit is one continuous choke from the spawn ramp through
+// the 464 drop and the east-door chain. Keep the crowd nonblocking for the
+// whole route, not only while a narrow edge happens to be within the local
+// scan window; otherwise a separated bot starts colliding again mid-column.
+static bool PathContainsHadithaBasementExit(const int *path, int pathLen,
+                                            int cursor)
+{
+    if (!IsHadithaMapName(g_Bots.m_mapname) || !path || pathLen <= 0)
+        return false;
+    int first = cursor > 0 ? cursor - 1 : 0;
+    for (int i = first; i < pathLen; i++)
+    {
+        const NavAreaData *area = g_NavMesh.Area(path[i]);
+        if (!area) continue;
+        switch (area->id)
+        {
+            case 464:  case 3321: case 463:
+            case 3289: case 3319: case 3293:
+            case 3315: case 3295: case 320:
+                return true;
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+bool CInsBot::UpdateCrowdTransitGrace(const Vector &pos, float now)
+{
+    int mySlot = (int)(this - g_Bots.m_bots);
+    if (!g_NavMesh.IsLoaded() || m_pathLen <= 0 || m_pathCursor <= 0
+        || m_pathCursor >= m_pathLen)
+    {
+        if (m_crowdTransitGraceActive && now < m_crowdTransitHoldUntil)
+            return true;
+        EndCrowdTransitGrace();
+        return false;
+    }
+
+    PortalTransitSegment seg;
+    Vector crowdEntry(0, 0, 0);
+    bool haveTightSegment = false;
+    float bestEntryDist = 3.4e38f;
+    // A crowd has to become nonblocking before it compresses into the mouth,
+    // not only after every hull has reached the active edge. Scan a short
+    // path-local window for a genuinely narrow raw edge and activate within a
+    // local approach radius. Wide drops and open-room NAV tessellation never
+    // qualify, regardless of their edge type.
+    int scanEnd = m_pathCursor + 16;
+    if (scanEnd >= m_pathLen) scanEnd = m_pathLen - 1;
+    for (int look = m_pathCursor; look <= scanEnd; look++)
+    {
+        PortalTransitEdgeInfo edge;
+        if (!GetTransitEdgeInfo(m_path[look - 1], m_path[look], edge))
+            continue;
+        if (edge.halfSpan <= 0.0f || edge.halfSpan >= 32.0f)
+            continue;
+        float d = PortalHorizontalDist(pos, edge.entry);
+        if (d > 1000.0f || d >= bestEntryDist)
+            continue;
+
+        PortalTransitSegment candidate;
+        if (!BuildPortalTransitSegment(m_path, m_pathLen, look, candidate))
+            continue;
+        seg = candidate;
+        crowdEntry = edge.entry;
+        bestEntryDist = d;
+        haveTightSegment = true;
+    }
+    // Dense groups need collision grace even between named portals. A stacked
+    // spawn or a column compressing toward the next choke otherwise spends the
+    // whole approach shoving hulls instead of making forward progress.
+    int nearbyCrowd = 1;
+    for (int i = 0; i < 64; i++)
+    {
+        if (i == (int)(this - g_Bots.m_bots)) continue;
+        CInsBot *other = &g_Bots.m_bots[i];
+        if (!other->m_inUse || !other->m_info || other->m_info->IsDead())
+            continue;
+        if (other->m_info->GetTeamIndex() != m_info->GetTeamIndex())
+            continue;
+        Vector op = other->m_info->GetAbsOrigin();
+        float dx = op.x - pos.x;
+        float dy = op.y - pos.y;
+        if (dx * dx + dy * dy <= 400.0f * 400.0f
+            && fabsf(op.z - pos.z) <= 120.0f)
+            nearbyCrowd++;
+    }
+    if (!haveTightSegment && nearbyCrowd < 4)
+    {
+        if (PathContainsHadithaBasementExit(m_path, m_pathLen, m_pathCursor))
+        {
+            m_crowdTransitHoldUntil = now + 4.0f;
+            if (!m_crowdTransitOwnsCollision && !m_spawnNoCollideActive
+                && !HasBodyNoCollide() && !BeginCrowdTransitGrace())
+                return false;
+            m_crowdTransitGraceActive = true;
+            return true;
+        }
+        if (m_crowdTransitGraceActive && now < m_crowdTransitHoldUntil)
+            return true;
+        EndCrowdTransitGrace();
+        return false;
+    }
+
+    m_crowdTransitHoldUntil = now + 4.0f;
+    if (!m_crowdTransitOwnsCollision && !m_spawnNoCollideActive
+        && !HasBodyNoCollide() && !BeginCrowdTransitGrace())
+        return false;
+    m_crowdTransitGraceActive = true;
+    return true;
+}
+
+int CInsBot::UpdatePortalTransit(const Vector &pos, float viewYaw,
+                                 float &fwd, float &side, int &buttons)
+{
+    int mySlot = (int)(this - g_Bots.m_bots);
+    if (mySlot < 0 || mySlot >= 64) return PORTAL_TRANSIT_NONE;
+    if (!m_inUse || !m_info || m_info->IsDead()) return PORTAL_TRANSIT_NONE;
+
+    float now = Now();
+    PortalTransitBotState &st = s_portalBots[mySlot];
+
+    PortalTransitSegment seg;
+    bool haveSegment = false;
+    bool cacheHit = st.cacheValid
+                 && st.cachePathSerial == m_pathSerial
+                 && st.cacheCursor == m_pathCursor
+                 && st.cachePathLen == m_pathLen
+                 && now < st.cacheTime + 0.35f;
+    if (cacheHit)
+    {
+        seg = st.cached;
+        haveSegment = true;
+    }
+    else
+    {
+        haveSegment = BuildPortalTransitSegment(m_path, m_pathLen, m_pathCursor,
+                                                seg);
+        st.cacheValid = haveSegment;
+        st.cachePathSerial = m_pathSerial;
+        st.cacheCursor = m_pathCursor;
+        st.cachePathLen = m_pathLen;
+        st.cacheTime = now;
+        if (haveSegment) st.cached = seg;
+    }
+
+    // Once the owner has crossed, its path cursor may leave the portal edge
+    // before the hull leaves the landing. Keep the stored segment authoritative
+    // through landing and clearance so a path rebuild cannot release the gate
+    // underneath the owner and drop the next bot onto the same tile.
+    if (!haveSegment && st.segmentValid
+        && (st.phase == PT_PHASE_LAND
+            || st.phase == PT_PHASE_CLEAR
+            || st.phase == PT_PHASE_RECOVERY)
+        && PortalHorizontalDist(pos, st.segment.exit) < 300.0f)
+    {
+        seg = st.segment;
+        haveSegment = true;
+    }
+
+    // After the owner crosses the last slice its cursor advances to a wide
+    // edge; keep the cached segment until CLEAR releases it.
+    if (!haveSegment && st.phase != PT_PHASE_NONE && st.segmentValid
+        && st.pathSerial == m_pathSerial
+        && m_pathCursor >= st.segment.startEdge
+        && m_pathCursor <= st.segment.endEdge + 2
+        && PortalHorizontalDist(pos, st.segment.exit) < 300.0f)
+    {
+        seg = st.segment;
+        haveSegment = true;
+    }
+
+    if (!haveSegment)
+    {
+        for (int i = 0; i < 96; i++)
+            if (s_portalLeases[i].active && s_portalLeases[i].ownerSlot == mySlot + 1)
+                ReleasePortalTransitLease(&s_portalLeases[i]);
+        if (st.phase != PT_PHASE_NONE) PortalResetBotState(st);
+        return PORTAL_TRANSIT_NONE;
+    }
+
+    if (st.phase != PT_PHASE_NONE && st.key != seg.key)
+    {
+        for (int i = 0; i < 96; i++)
+            if (s_portalLeases[i].active && s_portalLeases[i].ownerSlot == mySlot + 1)
+                ReleasePortalTransitLease(&s_portalLeases[i]);
+        PortalResetBotState(st);
+    }
+    if (st.phase == PT_PHASE_NONE)
+    {
+        st.phase = PT_PHASE_APPROACH;
+        st.phaseTime = now;
+        st.lastProgressTime = now;
+        st.progressPos = pos;
+    }
+    st.key = seg.key;
+    st.segment = seg;
+    st.segmentValid = true;
+    st.pathSerial = m_pathSerial;
+
+    // Drop edges have their own takeoff/landing geometry in the normal path
+    // controller. During crowd grace, keep that controller authoritative and
+    // use the grace only to remove player blocking; aiming the transit helper
+    // at the generated landing can pin bots against the lip.
+    if (m_crowdTransitGraceActive && seg.dropEntry)
+        return PORTAL_TRANSIT_NONE;
+
+    // With crowd collision grace active there is no hull to serialize. Keep
+    // the portal geometry (especially for drops/jumps) but let every
+    // participant steer through it independently at full speed.
+    if (m_spawnNoCollideActive || HasBodyNoCollide() || m_crowdTransitGraceActive)
+    {
+        // If a tight seam shoves the bot outside both adjoining tiles, aim at
+        // the nearest point of their shared seam rectangle. Using an
+        // individual tile's corner would send the bot through the wall beside
+        // the opening; the shared rectangle is the actual doorway line.
+        if (m_crowdTransitGraceActive && seg.entryHalf > 0.0f
+            && seg.entryHalf < 32.0f
+            && !seg.dropEntry && !seg.dropExit && !seg.jumpEntry)
+        {
+            const NavAreaData *fromArea = g_NavMesh.Area(seg.startArea);
+            const NavAreaData *toArea = g_NavMesh.Area(seg.endArea);
+            if (fromArea && toArea)
+            {
+                float seamX0 = fromArea->lo.x > toArea->lo.x
+                             ? fromArea->lo.x : toArea->lo.x;
+                float seamX1 = fromArea->hi.x < toArea->hi.x
+                             ? fromArea->hi.x : toArea->hi.x;
+                float seamY0 = fromArea->lo.y > toArea->lo.y
+                             ? fromArea->lo.y : toArea->lo.y;
+                float seamY1 = fromArea->hi.y < toArea->hi.y
+                             ? fromArea->hi.y : toArea->hi.y;
+                if (seamX0 <= seamX1 + 1.0f && seamY0 <= seamY1 + 1.0f)
+                {
+                    const float outsideMargin = 4.0f;
+                    bool outsideFrom =
+                        pos.x < fromArea->lo.x - outsideMargin
+                     || pos.x > fromArea->hi.x + outsideMargin
+                     || pos.y < fromArea->lo.y - outsideMargin
+                     || pos.y > fromArea->hi.y + outsideMargin;
+                    bool outsideTo =
+                        pos.x < toArea->lo.x - outsideMargin
+                     || pos.x > toArea->hi.x + outsideMargin
+                     || pos.y < toArea->lo.y - outsideMargin
+                     || pos.y > toArea->hi.y + outsideMargin;
+                    if (outsideFrom && outsideTo)
+                    {
+                        Vector target(pos.x, pos.y, pos.z);
+                        if (target.x < seamX0) target.x = seamX0;
+                        else if (target.x > seamX1) target.x = seamX1;
+                        if (target.y < seamY0) target.y = seamY0;
+                        else if (target.y > seamY1) target.y = seamY1;
+                        target.z = g_NavMesh.GetZ(seg.endArea,
+                                                  target.x, target.y);
+                        MoveAtWorldYaw(
+                            atan2f(target.y - pos.y, target.x - pos.x)
+                            * (180.0f / 3.14159265f),
+                            viewYaw, insbot_move_speed.GetFloat() * 0.60f,
+                            fwd, side);
+                        return PORTAL_TRANSIT_HOLD;
+                    }
+                }
+            }
+        }
+
+        float dxEntry = pos.x - seg.entry.x;
+        float dyEntry = pos.y - seg.entry.y;
+        float signedDist = dxEntry * seg.normal.x + dyEntry * seg.normal.y;
+        float distEntry = sqrtf(dxEntry * dxEntry + dyEntry * dyEntry);
+        float lateralDist = fabsf(dxEntry * -seg.normal.y
+                                + dyEntry * seg.normal.x);
+        float distExit = PortalHorizontalDist(pos, seg.exit);
+        bool crossed = seg.dropEntry
+                     ? (pos.z <= seg.entry.z - 20.0f
+                        || g_NavMesh.IsOnAreaLanding(seg.endArea, pos, 12.0f))
+                     : (signedDist >= 2.0f);
+        if (crossed && distExit <= 40.0f)
+            return PORTAL_TRANSIT_NONE;
+
+        // Committing to the far side while still laterally offset makes a
+        // bot press into the wall beside a narrow opening. Center on the
+        // physical mouth first; only then aim through to the landing.
+        bool centered = distEntry <= 16.0f && lateralDist <= 12.0f;
+        Vector target = (crossed || centered)
+                      ? seg.exit : seg.entry;
+        float transitSpeed = insbot_move_speed.GetFloat()
+                           * PT_CROWD_SPEED_SCALE;
+        // The east-door seam climbs in 8-16u steps. At full engine speed the
+        // step impulse can launch a bot onto the high ledge beside the
+        // corridor; cap only this chain so the rest of the route stays fast.
+        if (IsHadithaEastDoorEdge(seg.startArea, seg.endArea)
+            && transitSpeed > 170.0f)
+            transitSpeed = 170.0f;
+        MoveAtWorldYaw(
+            atan2f(target.y - pos.y, target.x - pos.x)
+            * (180.0f / 3.14159265f),
+            viewYaw, transitSpeed, fwd, side);
+        if (m_crowdTransitGraceActive && insbot_sprint.GetBool()
+            && !(buttons & IN_DUCK))
+            buttons |= INS_IN_SPRINT;
+        if (seg.entryHalf < 32.0f && distEntry < 96.0f)
+            buttons |= INS_IN_USE;
+        if (seg.jumpEntry && distEntry < 72.0f)
+            buttons |= IN_JUMP;
+        return PORTAL_TRANSIT_HOLD;
+    }
+
+    // The transit controller owns queue state while a physical segment is
+    // active. Clear the legacy queue bookkeeping so it cannot leak into the
+    // next open-terrain frame.
+    m_doorYieldUntil = 0.0f;
+    m_doorYieldSlot = 0;
+    m_queueLeaderSlot = 0;
+    m_queueWaitSince = 0.0f;
+    m_chokeProgressTime = 0.0f;
+    m_chokeBackoffUntil = 0.0f;
+    m_blocked = false;
+    m_chokeBackedOut = false;
+    m_followSpeed = 0.0f;
+
+    PortalTransitLease *lease = FindPortalTransitLease(seg.key);
+    if (lease)
+    {
+        if (lease->ownerSlot == mySlot + 1)
+        {
+            // A same-opening repath is still the same transit episode. Adopt
+            // the new path serial so the queue wait and lease age survive it.
+            lease->ownerPathSerial = m_pathSerial;
+        }
+        else if (PortalLeaseIsStale(*lease, now))
+        {
+            ReleasePortalTransitLease(lease);
+            lease = 0;
+        }
+    }
+
+    if (st.phase == PT_PHASE_RECOVERY)
+    {
+        if (now < st.recoveryUntil)
+        {
+            float dx = pos.x - seg.entry.x;
+            float dy = pos.y - seg.entry.y;
+            float signedDist = dx * seg.normal.x + dy * seg.normal.y;
+            if (signedDist < -12.0f && ClearBehind(
+                    atan2f(seg.exit.y - pos.y, seg.exit.x - pos.x)
+                    * (180.0f / 3.14159265f)))
+            {
+                MoveAtWorldYaw(
+                    atan2f(seg.exit.y - pos.y, seg.exit.x - pos.x)
+                    * (180.0f / 3.14159265f) + 180.0f,
+                    viewYaw, insbot_move_speed.GetFloat() * 0.45f, fwd, side);
+            }
+            else
+            {
+                fwd = 0.0f;
+                side = 0.0f;
+            }
+            return PORTAL_TRANSIT_HOLD;
+        }
+        st.phase = PT_PHASE_NONE;
+        st.segmentValid = false;
+        st.cacheValid = false;
+        st.blockedUntil = now + 1.0f;
+        return PORTAL_TRANSIT_NONE;
+    }
+
+    float dxEntry = pos.x - seg.entry.x;
+    float dyEntry = pos.y - seg.entry.y;
+    float signedDist = dxEntry * seg.normal.x + dyEntry * seg.normal.y;
+    float lateralDist = fabsf(dxEntry * -seg.normal.y + dyEntry * seg.normal.x);
+    float distEntry = sqrtf(dxEntry * dxEntry + dyEntry * dyEntry);
+    float distExit = PortalHorizontalDist(pos, seg.exit);
+    float exitSpan = (seg.exit.x - seg.entry.x) * seg.normal.x
+                   + (seg.exit.y - seg.entry.y) * seg.normal.y;
+    bool landingClear = PortalLandingClear(seg, mySlot);
+    bool tightTransit = seg.entryHalf < 32.0f || seg.dropEntry;
+    // Acquire a lease only when this bot is the deterministic next candidate.
+    if (!lease)
+    {
+        int candidate = -1;
+        float bestScore = -3.4e38f;
+        for (int i = 0; i < 64; i++)
+        {
+            CInsBot *other = &g_Bots.m_bots[i];
+            if (!other->m_inUse || !other->m_info || other->m_info->IsDead()) continue;
+            if (!PortalPathContainsSegment(other->m_path, other->m_pathLen,
+                                           other->m_pathCursor,
+                                           seg.startArea, seg.endArea))
+                continue;
+            Vector op = other->m_info->GetAbsOrigin();
+            if (!seg.dropEntry && fabsf(op.z - seg.entry.z) > 150.0f) continue;
+            float odx = op.x - seg.entry.x;
+            float ody = op.y - seg.entry.y;
+            float osp = odx * seg.normal.x + ody * seg.normal.y;
+            float olat = fabsf(odx * -seg.normal.y + ody * seg.normal.x);
+            if (olat > 120.0f) continue;
+            bool inside = osp > -4.0f;
+            if (!inside && s_portalBots[i].blockedUntil > now) continue;
+            float score = inside
+                        ? (100000.0f + osp)
+                        : -PortalHorizontalDist(op, seg.entry);
+            if (score > bestScore
+                || (fabsf(score - bestScore) < 0.01f && (candidate < 0 || i < candidate)))
+            {
+                bestScore = score;
+                candidate = i;
+            }
+        }
+
+        bool emergencyInside = signedDist > -4.0f;
+        if (candidate == mySlot
+            && (emergencyInside
+                || (distEntry <= PT_ACQUIRE_RADIUS
+                    && !PortalLandingReservedByOther(seg, seg.key)))
+            && !(seg.key == st.lastCompletedKey && now < st.completedUntil))
+        {
+            lease = AllocatePortalTransitLease(seg.key);
+            if (lease)
+            {
+                lease->ownerSlot = mySlot + 1;
+                lease->ownerPathSerial = m_pathSerial;
+                lease->startArea = seg.startArea;
+                lease->endArea = seg.endArea;
+                lease->grantTime = now;
+                lease->lastProgressTime = now;
+                lease->progressPos = pos;
+                lease->entry = seg.entry;
+                lease->exit = seg.exit;
+                st.phase = PT_PHASE_APPROACH;
+                st.phaseTime = now;
+                st.lastProgressTime = now;
+                st.progressPos = pos;
+            }
+        }
+    }
+
+    if (lease && lease->ownerSlot == mySlot + 1)
+    {
+        lease->lastProgressTime = now;
+        PortalTrackProgress(st, pos, now);
+
+        if (st.phase == PT_PHASE_APPROACH)
+        {
+            if (!landingClear && signedDist < -8.0f)
+            {
+                st.phase = PT_PHASE_QUEUED;
+                st.phaseTime = now;
+                fwd = 0.0f;
+                side = 0.0f;
+                bool preserveRecovery = m_bodyNoCollideActive
+                                     || m_bodyNoCollideEscalating
+                                     || HasBodyNoCollide()
+                                     || (m_spawnNoCollideActive
+                                         && m_spawnNoCollideExpired);
+                if (!preserveRecovery)
+                {
+                    m_stuckSince = 0.0f;
+                    m_stuckStage = 0;
+                    m_unstuckUntil = 0.0f;
+                }
+                return PORTAL_TRANSIT_HOLD;
+            }
+            if (distEntry <= PT_COMMIT_RADIUS)
+            {
+                st.phase = PT_PHASE_COMMITTED;
+                st.phaseTime = now;
+                st.lastProgressTime = now;
+                st.progressPos = pos;
+            }
+            else
+            {
+                Vector target = m_hasMoveTarget ? m_moveTarget : seg.entry;
+                MoveAtWorldYaw(
+                    atan2f(target.y - pos.y, target.x - pos.x)
+                    * (180.0f / 3.14159265f),
+                    viewYaw, insbot_move_speed.GetFloat() * 0.9f, fwd, side);
+                return PORTAL_TRANSIT_OWNER;
+            }
+        }
+
+        if (st.phase == PT_PHASE_QUEUED)
+        {
+            bool waitedLongEnough = now - st.phaseTime >= PT_QUEUE_WAIT_MAX;
+            if (!landingClear && !waitedLongEnough)
+            {
+                fwd = 0.0f;
+                side = 0.0f;
+                bool preserveRecovery = m_bodyNoCollideActive
+                                     || m_bodyNoCollideEscalating
+                                     || HasBodyNoCollide()
+                                     || (m_spawnNoCollideActive
+                                         && m_spawnNoCollideExpired);
+                if (!preserveRecovery)
+                {
+                    m_stuckSince = 0.0f;
+                    m_stuckStage = 0;
+                    m_unstuckUntil = 0.0f;
+                }
+                return PORTAL_TRANSIT_HOLD;
+            }
+            if (distEntry > PT_COMMIT_RADIUS + 24.0f && !waitedLongEnough)
+            {
+                Vector target = m_hasMoveTarget ? m_moveTarget : seg.entry;
+                MoveAtWorldYaw(
+                    atan2f(target.y - pos.y, target.x - pos.x)
+                    * (180.0f / 3.14159265f),
+                    viewYaw, insbot_move_speed.GetFloat() * 0.85f, fwd, side);
+                return PORTAL_TRANSIT_OWNER;
+            }
+            st.phase = PT_PHASE_COMMITTED;
+            st.phaseTime = now;
+            st.lastProgressTime = now;
+            st.progressPos = pos;
+        }
+
+        if (st.phase == PT_PHASE_COMMITTED)
+        {
+            Vector target = m_hasMoveTarget ? m_moveTarget : seg.exit;
+            float tdx = target.x - pos.x;
+            float tdy = target.y - pos.y;
+            // Stay aimed through the physical opening until the hull is
+            // actually through it.  The old condition only forced the exit
+            // target after the bot was already 24u past the entry plane, so a
+            // bot arriving from behind kept steering back toward its next NAV
+            // waypoint and ground against the lip forever.
+            if (signedDist < exitSpan - 8.0f)
+                target = seg.exit;
+            MoveAtWorldYaw(
+                atan2f(target.y - pos.y, target.x - pos.x)
+                * (180.0f / 3.14159265f),
+                viewYaw, insbot_move_speed.GetFloat(), fwd, side);
+            if (seg.jumpEntry && distEntry < 72.0f)
+                buttons |= INS_IN_JUMP;
+
+            bool crossed = seg.dropEntry
+                         ? (pos.z <= seg.entry.z - 20.0f
+                            || g_NavMesh.IsOnAreaLanding(seg.endArea, pos, 12.0f))
+                         : (signedDist >= 2.0f);
+            if (crossed)
+            {
+                st.phase = PT_PHASE_LAND;
+                st.phaseTime = now;
+                st.lastProgressTime = now;
+                st.progressPos = pos;
+            }
+            else if (now - st.lastProgressTime >= 2.5f)
+            {
+                ReleasePortalTransitLease(lease);
+                st.phase = PT_PHASE_RECOVERY;
+                st.phaseTime = now;
+                st.recoveryUntil = now + 1.6f;
+                st.blockedUntil = now + 2.6f;
+                fwd = 0.0f;
+                side = 0.0f;
+                return PORTAL_TRANSIT_HOLD;
+            }
+            return PORTAL_TRANSIT_OWNER;
+        }
+
+        if (st.phase == PT_PHASE_LAND)
+        {
+            Vector target = seg.exit;
+            if (m_hasMoveTarget)
+            {
+                float tdx = m_moveTarget.x - seg.exit.x;
+                float tdy = m_moveTarget.y - seg.exit.y;
+                if (tdx * seg.exitNormal.x + tdy * seg.exitNormal.y > -8.0f)
+                    target = m_moveTarget;
+            }
+            Vector moved = pos;
+            MoveAtWorldYaw(
+                atan2f(target.y - pos.y, target.x - pos.x)
+                * (180.0f / 3.14159265f),
+                viewYaw, insbot_move_speed.GetFloat(), fwd, side);
+
+            float movedExit = PortalHorizontalDist(moved, seg.exit);
+            bool reached = movedExit <= 28.0f
+                        || (movedExit <= 48.0f
+                            && g_NavMesh.IsOnAreaLanding(seg.endArea, moved, 12.0f));
+            if (reached)
+            {
+                st.phase = PT_PHASE_CLEAR;
+                st.phaseTime = now;
+                st.lastProgressTime = now;
+                st.progressPos = pos;
+            }
+            else if (now - st.lastProgressTime >= 2.5f)
+            {
+                ReleasePortalTransitLease(lease);
+                st.phase = PT_PHASE_RECOVERY;
+                st.phaseTime = now;
+                st.recoveryUntil = now + 1.6f;
+                st.blockedUntil = now + 2.6f;
+                fwd = 0.0f;
+                side = 0.0f;
+                return PORTAL_TRANSIT_HOLD;
+            }
+            return PORTAL_TRANSIT_OWNER;
+        }
+
+        if (st.phase == PT_PHASE_CLEAR)
+        {
+            int curArea = CurrentArea(pos);
+            bool leftLanding = curArea >= 0
+                            && curArea != seg.endArea
+                            && curArea != seg.startArea;
+
+            // Do not hand the opening to the next bot while this owner still
+            // occupies a tiny landing tile. On stairs/drops the next hull can
+            // otherwise arrive before the first has entered the downstream
+            // NAV area, recreating the exact crowd pile-up at the lip.
+            // Once the owner is far enough from the landing center, the next
+            // owner may approach. PortalLandingClear still prevents it from
+            // committing into a hull that overlaps the landing, so waiting
+            // for a full area change here only throttled the queue (and
+            // deadlocked when the final destination was inside endArea).
+            if (leftLanding || distExit >= 24.0f)
+            {
+                ReleasePortalTransitLease(lease);
+                st.lastCompletedKey = seg.key;
+                st.completedUntil = now + 1.0f;
+                st.phase = PT_PHASE_NONE;
+                st.segmentValid = false;
+                st.cacheValid = false;
+                return PORTAL_TRANSIT_NONE;
+            }
+            if (now - st.phaseTime >= 10.0f)
+            {
+                ReleasePortalTransitLease(lease);
+                st.lastCompletedKey = seg.key;
+                st.completedUntil = now + 1.0f;
+                st.phase = PT_PHASE_NONE;
+                st.segmentValid = false;
+                st.cacheValid = false;
+                return PORTAL_TRANSIT_NONE;
+            }
+
+            Vector target = seg.exit + seg.exitNormal * 48.0f;
+            if (m_hasMoveTarget)
+            {
+                float tdx = m_moveTarget.x - seg.exit.x;
+                float tdy = m_moveTarget.y - seg.exit.y;
+                if (tdx * seg.exitNormal.x + tdy * seg.exitNormal.y > 8.0f)
+                    target = m_moveTarget;
+            }
+            MoveAtWorldYaw(
+                atan2f(target.y - pos.y, target.x - pos.x)
+                * (180.0f / 3.14159265f),
+                viewYaw, insbot_move_speed.GetFloat() * 0.9f, fwd, side);
+            if (now - st.lastProgressTime >= 2.5f)
+            {
+                ReleasePortalTransitLease(lease);
+                st.phase = PT_PHASE_RECOVERY;
+                st.phaseTime = now;
+                st.recoveryUntil = now + 1.6f;
+                st.blockedUntil = now + 2.6f;
+                fwd = 0.0f;
+                side = 0.0f;
+                return PORTAL_TRANSIT_HOLD;
+            }
+            return PORTAL_TRANSIT_OWNER;
+        }
+
+        st.phase = PT_PHASE_APPROACH;
+        st.phaseTime = now;
+    }
+
+    // Another bot owns this physical opening. A non-owner still inside the
+    // throat waits behind the owner; only a bot that has physically reached
+    // the far side may continue out of the opening.
+    if (signedDist > -4.0f && signedDist >= exitSpan - 8.0f)
+    {
+        Vector target = m_hasMoveTarget ? m_moveTarget : seg.exit;
+        MoveAtWorldYaw(
+            atan2f(target.y - pos.y, target.x - pos.x)
+            * (180.0f / 3.14159265f),
+            viewYaw, insbot_move_speed.GetFloat() * 0.8f, fwd, side);
+        return PORTAL_TRANSIT_HOLD;
+    }
+
+    if (now < st.blockedUntil)
+    {
+        fwd = 0.0f;
+        side = 0.0f;
+        return PORTAL_TRANSIT_HOLD;
+    }
+
+    // Crowd transit grace: non-blocking bots do not need the one-at-a-time
+    // lease. Move them straight at the verified opening so a crowd can drain
+    // instead of staging hundreds of units behind a single owner.
+    if (tightTransit && !lease
+        && (m_spawnNoCollideActive || HasBodyNoCollide())
+        && distEntry <= PT_ACQUIRE_RADIUS + 40.0f)
+    {
+        Vector target = distEntry > PT_COMMIT_RADIUS ? seg.entry : seg.exit;
+        MoveAtWorldYaw(
+            atan2f(target.y - pos.y, target.x - pos.x)
+            * (180.0f / 3.14159265f),
+            viewYaw, insbot_move_speed.GetFloat() * 0.7f, fwd, side);
+        return PORTAL_TRANSIT_HOLD;
+    }
+
+    if (distEntry > 220.0f)
+        return PORTAL_TRANSIT_HOLD;
+
+    // Reserve a deterministic column of staging points behind the lip.
+    // Distance ordering gives the closest bot rank zero, so the elected owner
+    // never has to pass through a teammate parked in front of the opening.
+    int queueRank = 0;
+    for (int i = 0; i < 64; i++)
+    {
+        if (i == mySlot) continue;
+        CInsBot *other = &g_Bots.m_bots[i];
+        if (!other->m_inUse || !other->m_info || other->m_info->IsDead()) continue;
+        if (!PortalPathContainsSegment(other->m_path, other->m_pathLen,
+                                       other->m_pathCursor,
+                                       seg.startArea, seg.endArea))
+            continue;
+        Vector op = other->m_info->GetAbsOrigin();
+        float odx = op.x - seg.entry.x;
+        float ody = op.y - seg.entry.y;
+        float osp = odx * seg.normal.x + ody * seg.normal.y;
+        float olat = fabsf(odx * -seg.normal.y + ody * seg.normal.x);
+        if (osp > 8.0f || olat > 140.0f) continue;
+        float odist = sqrtf(odx * odx + ody * ody);
+        if (odist < distEntry
+            || (fabsf(odist - distEntry) < 0.01f && i < mySlot))
+            queueRank++;
+    }
+
+    float behindDist = PT_HOLD_BEHIND + (float)queueRank * 44.0f;
+    Vector queueTarget;
+    if (!PortalQueueTarget(seg, m_path, m_pathLen, seg.startEdge, behindDist,
+                           queueTarget)
+        && !PortalNeighborQueueTarget(seg, queueRank, queueTarget))
+        queueTarget = seg.entry - seg.normal * behindDist;
+    float qdx = queueTarget.x - pos.x;
+    float qdy = queueTarget.y - pos.y;
+    float qdist = sqrtf(qdx * qdx + qdy * qdy);
+    if (qdist > 24.0f)
+    {
+        MoveAtWorldYaw(
+            atan2f(qdy, qdx) * (180.0f / 3.14159265f),
+            viewYaw, insbot_move_speed.GetFloat() * 0.7f, fwd, side);
+        return PORTAL_TRANSIT_HOLD;
+    }
+
+    fwd = 0.0f;
+    side = 0.0f;
+    bool preserveRecovery = m_bodyNoCollideActive
+                         || m_bodyNoCollideEscalating
+                         || HasBodyNoCollide()
+                         || (m_spawnNoCollideActive
+                             && m_spawnNoCollideExpired);
+    if (!preserveRecovery)
+    {
+        m_stuckSince = 0.0f;
+        m_stuckStage = 0;
+        m_unstuckUntil = 0.0f;
+    }
+    return PORTAL_TRANSIT_HOLD;
+}
+
 // Signed shortest angular difference (a-b) in [-180, 180).
 
 
@@ -576,6 +2019,12 @@ void CInsBot::ApplyCrowdSteeringClassic(float moveYaw, float viewYaw, float &fwd
         m_chokeBackoffUntil = 0.0f;
         return;
     }
+
+    // Collision grace already removes the only reason for the legacy
+    // single-file queue: teammate hulls cannot block the passage. Let the
+    // crowd flow at path speed instead of staging it hundreds of units back.
+    if (m_spawnNoCollideActive || HasBodyNoCollide() || m_crowdTransitGraceActive)
+        return;
 
     int myTeam = m_info->GetTeamIndex();
     float yawDiff = fmodf(moveYaw - m_chokeCacheYaw, 360.0f);
@@ -938,6 +2387,18 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
 
     int streamingMode = insbot_streaming.GetInt();
     Vector pos = m_info->GetAbsOrigin();
+    UpdateCrowdTransitGrace(pos, Now());
+    if (streamingMode != 0)
+    {
+        int transit = UpdatePortalTransit(pos, viewYaw, fwd, side, buttons);
+        if (transit != PORTAL_TRANSIT_NONE) return;
+    }
+    // Crowd grace removes the reason for single-file queueing. If the current
+    // edge is a wide approach and the detector has already armed for a narrow
+    // edge ahead, preserve the normal path steering instead of letting the
+    // legacy queue stop the column before the mouth.
+    if (m_crowdTransitGraceActive)
+        return;
     bool physicalPassage = false;
     if (m_pathLen > 0 && m_pathCursor > 0 && m_pathCursor < m_pathLen)
         physicalPassage = SourceTurnForEdge(m_path[m_pathCursor - 1],
@@ -1814,6 +3275,7 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
 void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &buttons, QAngle &view)
 {
     Vector pos = m_info->GetAbsOrigin();
+    bool crowdTransitGrace = m_crowdTransitGraceActive;
 
     // A completed route and a failed route both make AdvanceWaypoint return
     // false.  The old fallback consequently kept walking at the exact logical
@@ -1906,7 +3368,10 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         else if (haveWaypoint)
         {
             immTarget = m_moveTarget;   // the current portal/waypoint
-            ProbeUpcomingDoorwayRunway(m_doorwayRunway);
+            if (m_spawnNoCollideActive || HasBodyNoCollide())
+                ResetDoorwayRunway();
+            else
+                ProbeUpcomingDoorwayRunway(m_doorwayRunway);
             if (m_doorwayRunway.active && m_doorwayRunway.isImmediateEdge
                 && m_doorwayRunway.distToPortal > 60.0f
                 && m_doorwayRunway.turnAngle > 30.0f)
@@ -1931,6 +3396,14 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             bool sourceTurn = m_pathCursor > 0
                 && SourceTurnForEdge(m_path[m_pathCursor - 1],
                                      m_path[m_pathCursor], pos);
+            if (m_spawnNoCollideActive || HasBodyNoCollide())
+            {
+                bool keepAlignment = m_pathCursor > 0
+                    && g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE,
+                                              m_path[m_pathCursor - 1],
+                                              m_path[m_pathCursor]);
+                if (!keepAlignment) sourceTurn = false;
+            }
             float immediateDx = immTarget.x - pos.x;
             float immediateDy = immTarget.y - pos.y;
             float immediateDistSq = immediateDx * immediateDx
@@ -1954,6 +3427,24 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             // Ease off before a sharp turn only when BSP traces confirmed the
             // current opening. Open-map NAV zigzags retain full speed.
             float navSpeed = insbot_move_speed.GetFloat();
+            if (m_crowdTransitGraceActive
+                || (m_spawnNoCollideActive && !m_spawnNoCollideExpired))
+                navSpeed *= PT_CROWD_APPROACH_SPEED_SCALE;
+            // Virtual transition staging points sit only a few units before a
+            // drop lip. Approaching them at full speed makes the bot orbit the
+            // lip as virtualApproach flips on and off each tick.
+            if (m_transitionApproach)
+            {
+                float stageDx = m_moveTarget.x - pos.x;
+                float stageDy = m_moveTarget.y - pos.y;
+                float stageDist = sqrtf(stageDx * stageDx + stageDy * stageDy);
+                if (stageDist < 96.0f)
+                {
+                    float scale = stageDist / 96.0f;
+                    if (scale < 0.30f) scale = 0.30f;
+                    navSpeed *= scale;
+                }
+            }
             if (sourceTurn && !m_traversingLadder
                 && m_pathCursor + 1 < m_pathLen && m_hasMoveTarget)
             {
@@ -2049,7 +3540,23 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                 // is within a few feet.
                 if ((cur->attributes & NAVATTR_JUMP) && canJump) buttons |= IN_JUMP;
             }
-            if (!ladderMove && LowCeilingAhead(mvYaw)) buttons |= IN_DUCK;
+            // LowCeilingAhead is a horizontal head-height ray; it cannot see
+            // a ceiling directly above the standing hull. Tall stair/ramp
+            // areas (Haditha's area 2306) need the vertical envelope check;
+            // ordinary corridors must not crouch just because a roof is
+            // within 70u, since that slows the whole gate column.
+            bool tallCeilingZone = false;
+            const NavAreaData *ceilingArea = g_NavMesh.Area(CurrentArea(pos));
+            if (ceilingArea)
+            {
+                float zSpan = ceilingArea->hi.z - ceilingArea->lo.z;
+                if (zSpan < 0.0f) zSpan = -zSpan;
+                tallCeilingZone = zSpan > 64.0f;
+            }
+            if (!ladderMove
+                && (LowCeilingAhead(mvYaw)
+                    || (tallCeilingZone && CeilingLowAt(pos))))
+                buttons |= IN_DUCK;
             // Only jump when the waypoint is genuinely above the player - well
             // above the Source engine's 21u jump height so ramps, gentle steps,
             // and multi-Z nav area centres don't cause constant mid-ramp jumping.
@@ -2066,7 +3573,22 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                     {
                         Vector seam;
                         if (!g_NavMesh.GetPortal(prevArea, m_path[m_pathCursor], seam))
-                            edgeStep = m_moveTarget.z > pos.z + 16.0f;
+                            edgeStep = m_moveTarget.z > pos.z + 12.0f;
+                    }
+                    if (!edgeStep && m_pathCursor > 0)
+                    {
+                        NavEdgeMeta jumpMeta;
+                        if (g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1],
+                                                  m_path[m_pathCursor], jumpMeta)
+                            && jumpMeta.valid
+                            && jumpMeta.kind == NAV_EDGE_JUMP
+                            && !IsHadithaTightDoorEdge(
+                                   m_path[m_pathCursor - 1],
+                                   m_path[m_pathCursor])
+                            && !IsHadithaEastDoorEdge(
+                                   m_path[m_pathCursor - 1],
+                                   m_path[m_pathCursor]))
+                            edgeStep = true;
                     }
                 }
             }
@@ -2139,10 +3661,10 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
     }
     m_navDest = immTarget;
     m_haveNavDest = true;
-    if (!m_traversingLadder
-        && (!m_spawnNoCollideActive || m_spawnNoCollideExpired))
+    if (!m_traversingLadder)
     {
-        bool collisionGrace = HasBodyNoCollide() || m_spawnNoCollideActive;
+        bool collisionGrace = HasBodyNoCollide() || m_spawnNoCollideActive
+                           || crowdTransitGrace;
         if (collisionGrace)
         {
             // Keep the choke/recovery controller alive while collision drains.
@@ -2153,7 +3675,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             float oldTeleportOk = m_nextTeleportOk;
             ApplyCrowdSteering(moveYaw, view.y, recoveryFwd, recoverySide,
                                recoveryButtons);
-            if (m_dropAhead)
+            if (m_dropAhead || crowdTransitGrace)
             {
                 fwd = recoveryFwd;
                 side = recoverySide;
@@ -2168,5 +3690,11 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         }
         else
             ApplyCrowdSteering(moveYaw, view.y, fwd, side, buttons);
+    }
+    if (m_crowdTransitGraceActive && !m_enemyIndex
+        && (fabsf(fwd) > 10.0f || fabsf(side) > 10.0f))
+    {
+        view.y = m_haveLastNavMoveYaw ? m_lastNavMoveYaw : moveYaw;
+        view.x = 0.0f;
     }
 }

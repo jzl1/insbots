@@ -272,6 +272,7 @@ private:
     int    m_path[INSBOT_MAX_PATH];
     int    m_pathLen;
     int    m_pathCursor;
+    unsigned int m_pathSerial;
     BotPathResult m_pathResult;
     bool   m_pathContinues;   // BuildPath returned a truncated prefix; keep repathing
     int    m_goalArea;
@@ -393,6 +394,15 @@ private:
     float  m_spawnNoCollideRecoveryCheck;
     int    m_spawnOriginalCollisionGroup;
 
+    // Crowd transit grace: proactively remove player-vs-player blocking for a
+    // short, path-local window while a group crosses one verified tight portal.
+    // Unlike spawn/body recovery grace this is not a stuck-recovery lease and
+    // never escalates to a teleport.
+    bool   m_crowdTransitGraceActive;
+    bool   m_crowdTransitOwnsCollision;
+    int    m_crowdTransitOriginalGroup;
+    float  m_crowdTransitHoldUntil;
+
     // Body-block recovery owns one lease over a local player cohort. The
     // collision-group state itself is roster-managed because humans and bots
     // can participate in overlapping recovery requests.
@@ -492,6 +502,7 @@ private:
     bool   m_dropAhead;
     float  m_dropAheadDist;
     bool   m_dropHoldExpired;  // true after 2s drop-hold expires; prevents 1-tick re-arm oscillation
+    bool   m_transitionApproach; // aiming at a virtual transition staging point
 
     // cover: a spot that breaks line-of-sight to the current threat
     Vector m_coverSpot;
@@ -607,6 +618,10 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
     void  BeginSpawnNoCollide(const Vector &pos);
     void  UpdateSpawnNoCollide(const Vector &pos, bool countTime);
     void  EndSpawnNoCollide(bool restoreGroup);
+    bool  BeginCrowdTransitGrace();
+    bool  UpdateCrowdTransitGrace(const Vector &pos, float now);
+    void  EndCrowdTransitGrace();
+    bool  HasCrowdTransitGrace() const { return m_crowdTransitGraceActive; }
     bool  SpawnHullOverlapsPlayer(const Vector &pos) const;
     void  ResetSpawnNoCollideNavigation(const Vector &pos);
     bool  FindBodyBlocker(const Vector &pos, const Vector &target,
@@ -715,6 +730,8 @@ bool  ChooseCoverSpot(const Vector &primaryThreat, Vector &outSpot, int &outTier
                              int &buttons); // shared nav/combat spacing + choke queue
     void  ApplyCrowdSteeringClassic(float moveYaw, float viewYaw, float &fwd,
                                     float &side, int &buttons);
+    int   UpdatePortalTransit(const Vector &pos, float viewYaw, float &fwd,
+                              float &side, int &buttons);
     void  MoveToward(const Vector &dest, float &fwd, float &side, int &buttons, QAngle &view);
     void  Say(int ev);         // emit a radio callout (VoiceEvent) for this bot
     float Now() const;
@@ -978,6 +995,8 @@ extern int g_TurretOffsetAnimTime;
 // learned-bad-link persistence (implemented in bot.cpp)
 void InsBots_SaveLearn();
 void InsBots_ResetPhysicalPortalCache();
+void InsBots_ResetPortalTransit();
+void InsBots_ResetPortalTransitSlot(int slot);
 void InsBots_ForgetLearn();
 
 // per-map faction of each team number, read from the map's .imc2 config (the

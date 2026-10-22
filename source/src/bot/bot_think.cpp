@@ -282,6 +282,7 @@ void CInsBot::ThinkDeadReset(float now)
     ResetLadderTraversal(true);
     ResetBodyNoCollideRecovery();
     EndSpawnNoCollide(true);
+    EndCrowdTransitGrace();
     m_state = BOT_DEAD;
     m_classSetupSent = false;
     m_nextReinforcePulse = 0.0f;
@@ -2381,7 +2382,8 @@ overwatch_done:
     bool hadithaGate = false;
     if (!spawnTimedGrace && !m_traversingLadder)
     {
-        bool collisionGrace = HasBodyNoCollide() || m_spawnNoCollideActive;
+        bool collisionGrace = HasBodyNoCollide() || m_spawnNoCollideActive
+                           || HasCrowdTransitGrace();
         if (collisionGrace)
         {
             float recoveryFwd = fwd, recoverySide = side;
@@ -2455,6 +2457,15 @@ overwatch_done:
     {
         buttons |= INS_IN_SPRINT;
     }
+    // Collision grace removes the crowd reason for the Haditha no-sprint
+    // approach. Let the column cover the basement route at normal sprint speed
+    // while it is nonblocking; doorway_sprint remains a separate opt-in.
+    if ((HasCrowdTransitGrace()
+         || (m_spawnNoCollideActive && !m_spawnNoCollideExpired))
+        && !m_traversingLadder && insbot_sprint.GetBool()
+        && (fwd > 100.0f || side > 100.0f || side < -100.0f)
+        && !(buttons & IN_DUCK))
+        buttons |= INS_IN_SPRINT;
 
     // ---------------- stuck detection & recovery ----------------
     // Progress-based: a bot is "stuck" if it is trying to move but not getting
@@ -2467,7 +2478,26 @@ overwatch_done:
         RunMove(0.0f, 0.0f, 0, view);
         return;
     }
-    if ((!m_spawnNoCollideActive || m_spawnNoCollideExpired)
+    bool crowdPortalTransit = false;
+    if (HasCrowdTransitGrace() && m_pathCursor > 0 && m_pathCursor < m_pathLen)
+    {
+        NavEdgeMeta crowdEdge;
+        bool haveCrowdEdge = g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1],
+                                                   m_path[m_pathCursor],
+                                                   crowdEdge);
+        crowdPortalTransit =
+            g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE,
+                                   m_path[m_pathCursor - 1],
+                                   m_path[m_pathCursor])
+            || g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE,
+                                      m_path[m_pathCursor - 1],
+                                      m_path[m_pathCursor])
+            || (haveCrowdEdge && crowdEdge.valid
+                && (crowdEdge.kind == NAV_EDGE_DROP
+                    || crowdEdge.kind == NAV_EDGE_JUMP));
+    }
+    if (!crowdPortalTransit
+        && (!m_spawnNoCollideActive || m_spawnNoCollideExpired)
         && now >= m_stuckCheckTime)
     {
         bool progressed = false, noProgress = false;
@@ -2608,7 +2638,12 @@ overwatch_done:
             if (markTime < 0.2f) markTime = 0.2f;
             float teleportTime = insbot_unstuck_teleport_time.GetFloat();
             float abandonTime = markTime + 1.8f;
-            if (abandonTime < teleportTime + 1.0f)
+            // The teleport deadline is only a reason to keep waiting when a
+            // teleport is actually available. With teleport disabled, holding
+            // a stuck bot for the full (default 5s) deadline burns most of a
+            // 15s transit budget before the reroute is even attempted.
+            if (insbot_unstuck_teleport.GetBool()
+                && abandonTime < teleportTime + 1.0f)
                 abandonTime = teleportTime + 1.0f;
 
             // nudge while stuck - but only after a real stretch of no progress

@@ -1613,6 +1613,7 @@ void CBotRoster::InvalidateNavMeshState(bool reloadSucceeded)
     ResetHadithaDoorGate();
     InvalidateAdvanceTargets();
     InsBots_ResetPhysicalPortalCache();
+    InsBots_ResetPortalTransit();
     for (int i = 0; i < 64; i++)
     {
         if (m_bots[i].m_inUse)
@@ -1663,6 +1664,7 @@ void CBotRoster::LevelInit(const char *mapname)
     ResetHadithaDoorGate();
     ResetSniperCaches();
     InsBots_ResetPhysicalPortalCache();
+    InsBots_ResetPortalTransit();
 
     // try to load maps/<map>.nav from the game dir
     char gamedir[256];
@@ -1959,6 +1961,7 @@ void CBotRoster::LevelShutdown()
     ResetHadithaDoorGate();
     ResetSniperCaches();
     InsBots_ResetPhysicalPortalCache();
+    InsBots_ResetPortalTransit();
     g_NavMesh.Free();
     m_navLoadedForMap = false;
 }

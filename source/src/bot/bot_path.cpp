@@ -66,6 +66,7 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
     // left a terrain mismatch stale for as long as 7.2s, while desynchronized
     // 1.5-3.0s rebuilds remain a small fraction of one frame.
     m_repathTime = Now() + frand(1.5f, 3.0f);
+    m_pathSerial++;
 
     int start = CurrentArea(m_info->GetAbsOrigin());
     int end   = g_NavMesh.FindArea(goal);
@@ -125,6 +126,13 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
         return;
     }
     m_pathCursor = (m_pathLen > 1) ? 1 : 0;
+    // Some generated routes repeat the start area as their first waypoint.
+    // Leaving that duplicate active makes the bot chase the tile it already
+    // occupies, and a periodic rebuild can restart the same loop forever.
+    while (m_pathCursor < m_pathLen && m_path[m_pathCursor] == start)
+        m_pathCursor++;
+    if (m_pathCursor >= m_pathLen)
+        m_pathCursor = m_pathLen - 1;
     m_hasMoveTarget = false;
     m_pathResult = BOT_PATH_VALID;
     // A rebuilt route may leave from a different edge. Do not let a nearly
@@ -300,11 +308,25 @@ static bool PositionOnAreaSurface(int areaIdx, const Vector &pos,
     if (requireLanding)
         return g_NavMesh.IsOnAreaLanding(areaIdx, pos, 8.0f);
     const NavAreaData *a = g_NavMesh.Area(areaIdx);
-    if (!a || pos.x < a->lo.x - 24.0f || pos.x > a->hi.x + 24.0f
-        || pos.y < a->lo.y - 24.0f || pos.y > a->hi.y + 24.0f)
+    if (!a || pos.x < a->lo.x - 8.0f || pos.x > a->hi.x + 8.0f
+        || pos.y < a->lo.y - 8.0f || pos.y > a->hi.y + 8.0f)
         return false;
     float floorZ = g_NavMesh.GetZ(areaIdx, pos.x, pos.y);
-    return floorZ <= pos.z + 64.0f && floorZ >= pos.z - 64.0f;
+    return floorZ <= pos.z + 16.0f && floorZ >= pos.z - 16.0f;
+}
+
+// Sidecar-verified east-door tiles can carry a bogus elevation delta even
+// though the map floor is continuous. Use their horizontal footprint for path
+// continuity and cursor completion, with a generous vertical envelope.
+static bool PositionOnAreaFootprint(int areaIdx, const Vector &pos)
+{
+    const NavAreaData *a = g_NavMesh.Area(areaIdx);
+    if (!a) return false;
+    if (pos.x < a->lo.x - 8.0f || pos.x > a->hi.x + 8.0f
+        || pos.y < a->lo.y - 8.0f || pos.y > a->hi.y + 8.0f)
+        return false;
+    float floorZ = g_NavMesh.GetZ(areaIdx, pos.x, pos.y);
+    return floorZ <= pos.z + 160.0f && floorZ >= pos.z - 160.0f;
 }
 
 // Ladder ownership needs a stricter feet-on-floor test than ordinary terrain
@@ -361,6 +383,17 @@ static bool CrossedExactPortalIntoArea(int fromIdx, int toIdx,
 bool WalkEdgeNeedsJump(int fromIdx, int toIdx)
 {
     if (!g_NavMesh.CanJumpFrom(fromIdx)) return false;
+    // Haditha's basement exit is a continuous floor; the generated JUMP flags
+    // on its 25u seam tiles are mesh artifacts.
+    if (IsHadithaTightDoorEdge(fromIdx, toIdx)) return false;
+    // The Haditha east-door chain carries a bogus +19u edge delta even though
+    // BSP hull sweeps show a continuous ramp. Jumping here launches bots onto
+    // the ledge above the 25u seam tiles, where they strand off-mesh.
+    if (IsHadithaEastDoorEdge(fromIdx, toIdx)) return false;
+    NavEdgeMeta meta;
+    if (g_NavMesh.GetEdgeMeta(fromIdx, toIdx, meta) && meta.valid
+        && meta.kind == NAV_EDGE_WALK && meta.zDelta > 16.0f)
+        return true;
     Vector seam;
     if (!g_NavMesh.GetPortal(fromIdx, toIdx, seam)) return false;
     float fromZ = g_NavMesh.GetZ(fromIdx, seam.x, seam.y);
@@ -506,7 +539,11 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
         sideWall[s] = waistHit < 127.9f && upperHit < 127.9f
                    && fabsf(waistHit - upperHit) <= 32.0f;
     }
-    if (!sideWall[0] || !sideWall[1]) return false;
+    // One-sided portals are common where a doorway meets an open room or a
+    // short interior wall. Requiring walls on both sides rejected those real
+    // openings outright. The bounded hull sweep below still has to prove a
+    // clear, finite band before the edge is treated as a physical portal.
+    if (!sideWall[0] && !sideWall[1]) return false;
 
     Vector normal(axis.y, -axis.x, 0.0f);
     Vector travel = to->center - from->center;
@@ -526,8 +563,12 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
     {
         float off = sampleMin + i * sampleStep;
         Vector candidate = portal + axis * off;
-        Vector start = candidate - normal * 56.0f;
-        Vector end = candidate + normal * 56.0f;
+        // Keep the sweep local to the portal. The old +/-56u endpoints placed
+        // the 32x72 hull deep inside surrounding walls on valid narrow
+        // doorways, so every sample reported startsolid and the caller fell
+        // back to an unverified NAV midpoint.
+        Vector start = candidate - normal * 24.0f;
+        Vector end = candidate + normal * 24.0f;
         start.z = g_NavMesh.GetZ(fromIdx, start.x, start.y) + 8.0f;
         end.z = g_NavMesh.GetZ(toIdx, end.x, end.y) + 8.0f;
         ray.Init(start, end, mins, maxs);
@@ -586,6 +627,15 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
 bool CInsBot::SourceTurnForEdge(int fromIdx, int toIdx, const Vector &pos) const
 {
     if (fromIdx < 0 || toIdx < 0) return false;
+    NavEdgeMeta edgeMeta;
+    if (g_NavMesh.GetEdgeMeta(fromIdx, toIdx, edgeMeta) && edgeMeta.valid
+        && (edgeMeta.kind == NAV_EDGE_DROP || edgeMeta.kind == NAV_EDGE_JUMP))
+    {
+        // A drop/jump is a straight-line takeoff, not a doorway arc. Applying
+        // gradual source-turn steering to a close takeoff point makes the bot
+        // orbit the lip instead of settling on it.
+        return false;
+    }
     if (IsHadithaTightDoorEdge(fromIdx, toIdx)
         || IsHadithaEastDoorEdge(fromIdx, toIdx))
         return true;
@@ -739,6 +789,7 @@ bool CInsBot::AdvanceWaypoint()
     if (m_pathLen <= 0 || m_pathCursor >= m_pathLen) return false;
 
     Vector pos = m_info->GetAbsOrigin();
+    m_transitionApproach = false;
 
     // A waypoint is complete only after the engine says the bot is physically
     // standing on that NAV area. The old 40-unit portal-radius test advanced the
@@ -764,13 +815,30 @@ bool CInsBot::AdvanceWaypoint()
         NavEdgeMeta edgeMeta;
         bool haveEdgeMeta = m_pathCursor > 0
             && g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1], toIdx, edgeMeta);
+        bool eastFixupEdge = haveEdgeMeta
+            && g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE,
+                                      m_path[m_pathCursor - 1], toIdx);
         bool landingOnlyEdge = haveEdgeMeta && edgeMeta.valid
             && (edgeMeta.kind == NAV_EDGE_DROP || edgeMeta.kind == NAV_EDGE_JUMP);
         Vector pm, paxis; float ph;
         if (m_pathCursor > 0)
             havePortal = g_NavMesh.GetPortalMerged(m_path[m_pathCursor - 1],
                                                    toIdx, pm, paxis, ph);
-        if (havePortal && sourceTurn)
+        if (eastFixupEdge)
+        {
+            float nx = edgeMeta.normalX;
+            float ny = edgeMeta.normalY;
+            float nl = sqrtf(nx * nx + ny * ny);
+            if (nl >= 0.5f)
+            {
+                nx /= nl;
+                ny /= nl;
+                float side = (pos.x - edgeMeta.midX) * nx
+                           + (pos.y - edgeMeta.midY) * ny;
+                reached = side > 1.0f && PositionOnAreaFootprint(toIdx, pos);
+            }
+        }
+        else if (havePortal && sourceTurn)
         {
             const NavAreaData *toA = g_NavMesh.Area(toIdx);
             if (toA
@@ -866,8 +934,14 @@ bool CInsBot::AdvanceWaypoint()
     bool physicallyOnEdge = false;
     if (m_pathCursor > 0)
     {
-        physicallyOnEdge = PositionOnAreaSurface(m_path[m_pathCursor - 1], pos)
-                         || PositionOnAreaSurface(m_path[m_pathCursor], pos);
+        bool eastFixupEdge = g_NavMesh.HasFixupEdge(
+            NAV_FIXUP_EAST_EDGE, m_path[m_pathCursor - 1], m_path[m_pathCursor]);
+        if (eastFixupEdge)
+            physicallyOnEdge = PositionOnAreaFootprint(m_path[m_pathCursor - 1], pos)
+                             || PositionOnAreaFootprint(m_path[m_pathCursor], pos);
+        else
+            physicallyOnEdge = PositionOnAreaSurface(m_path[m_pathCursor - 1], pos)
+                             || PositionOnAreaSurface(m_path[m_pathCursor], pos);
     }
     // While climbing, do not invalidate the path just because FindArea returns
     // a different area (the player origin on a ladder is not a walkable point).
@@ -946,6 +1020,8 @@ bool CInsBot::AdvanceWaypoint()
         m_corridorLatched = false;
         m_corridorAheadDist = 0.0f;
     }
+    else if (virtualWp && virtualApproach)
+        m_transitionApproach = true;
 
     // Replace the nominal NAV midpoint/width with the full-hull-verified
     // physical opening. This centers a bot that approached off-axis before it

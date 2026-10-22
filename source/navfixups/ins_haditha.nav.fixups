@@ -11,4 +11,9 @@ edge tight 3321 463
 edge east 3295 3315
 edge east 3295 320
 edge east 3315 320
-transition 464 3321 takeoff -2592.5 50 -136 landing -2592.5 -100 -188.5
+edge east 463 3289
+edge east 3289 463
+edge east 3289 3319
+edge east 3319 3293
+edge east 3293 3315
+transition 464 3321 takeoff -2592.5 50 -136 landing -2592.5 12.5 -188.76

@@ -413,6 +413,52 @@ void CInsBot::EndSpawnNoCollide(bool restoreGroup)
            m_name, restoreGroup ? m_spawnOriginalCollisionGroup : current);
 }
 
+bool CInsBot::BeginCrowdTransitGrace()
+{
+    if (m_crowdTransitOwnsCollision)
+        return true;
+    if (m_spawnNoCollideActive || HasBodyNoCollide())
+    {
+        m_crowdTransitGraceActive = true;
+        return true;
+    }
+    if (!m_edict || m_edict->IsFree() || s_offset_m_CollisionGroup < 0)
+        return false;
+
+    IServerUnknown *unknown = m_edict->GetUnknown();
+    ICollideable *collideable = unknown ? unknown->GetCollideable() : 0;
+    if (!collideable) return false;
+    int original = collideable->GetCollisionGroup();
+    if (original == COLLISION_GROUP_DEBRIS_TRIGGER)
+        return false;
+    if (!WriteCollisionGroup(COLLISION_GROUP_DEBRIS_TRIGGER))
+        return false;
+
+    m_crowdTransitOriginalGroup = original;
+    m_crowdTransitOwnsCollision = true;
+    m_crowdTransitGraceActive = true;
+    BotDbg("[insbots] %s crowd transit grace started (group %d -> %d)\n",
+           m_name, original, COLLISION_GROUP_DEBRIS_TRIGGER);
+    return true;
+}
+
+void CInsBot::EndCrowdTransitGrace()
+{
+    if (!m_crowdTransitGraceActive)
+        return;
+    if (m_crowdTransitOwnsCollision)
+    {
+        if (!WriteCollisionGroup(m_crowdTransitOriginalGroup))
+            return;
+        BotDbg("[insbots] %s crowd transit grace ended (group %d)\n",
+               m_name, m_crowdTransitOriginalGroup);
+    }
+    m_crowdTransitGraceActive = false;
+    m_crowdTransitOwnsCollision = false;
+    m_crowdTransitOriginalGroup = 0;
+    m_crowdTransitHoldUntil = 0.0f;
+}
+
 void CInsBot::UpdateSpawnNoCollide(const Vector &pos, bool countTime)
 {
     if (!m_spawnNoCollideActive) return;
@@ -424,6 +470,15 @@ void CInsBot::UpdateSpawnNoCollide(const Vector &pos, bool countTime)
         // A game-side life/state transition changed collision ownership.
         EndSpawnNoCollide(false);
         return;
+    }
+
+    // A stacked spawn needs nonblocking transit long enough to drain the
+    // column through the first chokepoint. Arm this only when a real player
+    // hull overlap exists, so ordinary single-bot spawns are unaffected.
+    if (!m_crowdTransitGraceActive && SpawnHullOverlapsPlayer(pos))
+    {
+        m_crowdTransitGraceActive = true;
+        m_crowdTransitHoldUntil = Now() + 15.0f;
     }
 
     if (!m_spawnNoCollideExpired)

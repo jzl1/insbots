@@ -189,6 +189,7 @@ void CInsBot::Adopt(edict_t *e, int teamSlot)
 {
     IPlayerInfo *pi = playerinfomanager->GetPlayerInfo(e);
     memset(this, 0, sizeof(*this));
+    InsBots_ResetPortalTransitSlot((int)(this - g_Bots.m_bots));
     m_primaryWeaponName[0] = 0;
     m_reloadingClass = -1;
     m_sidearmTemporary = false;
@@ -239,9 +240,11 @@ void CInsBot::Adopt(edict_t *e, int teamSlot)
 
 void CInsBot::OnRemoved()
 {
+    InsBots_ResetPortalTransitSlot((int)(this - g_Bots.m_bots));
     ResetLadderTraversal(true);
     ResetBodyNoCollideRecovery();
     EndSpawnNoCollide(true);
+    EndCrowdTransitGrace();
     g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
     m_inUse = false;
     m_edict = 0; m_ctrl = 0; m_info = 0;
