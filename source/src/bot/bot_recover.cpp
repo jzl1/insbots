@@ -265,7 +265,10 @@ bool CInsBot::TeleportUnstuck(const Vector &pos, float now,
         return false;
     }
 
-    int destinations[2] = { destNode, -1 };
+    const int kMaxDestinations = 6;
+    int destinations[kMaxDestinations];
+    int destinationCount = 1;
+    destinations[0] = destNode;
     if (expandForward)
     {
         int suffixStart = m_pathCursor;
@@ -284,15 +287,21 @@ bool CInsBot::TeleportUnstuck(const Vector &pos, float now,
                 }
             }
         }
-        if (destPathIndex >= suffixStart && destPathIndex + 1 < m_pathLen
-            && g_NavMesh.HasConnection(destNode,
-                                       m_path[destPathIndex + 1]))
-            destinations[1] = m_path[destPathIndex + 1];
+        int prev = destNode;
+        int idx = destPathIndex;
+        while (destinationCount < kMaxDestinations
+               && idx >= suffixStart && idx + 1 < m_pathLen
+               && g_NavMesh.HasConnection(prev, m_path[idx + 1]))
+        {
+            prev = m_path[idx + 1];
+            destinations[destinationCount++] = prev;
+            idx++;
+        }
     }
 
     Vector dest;
     int usedNode = -1;
-    for (int i = 0; i < 2 && destinations[i] >= 0; i++)
+    for (int i = 0; i < destinationCount; i++)
     {
         int fromArea = i == 0 ? here : destinations[i - 1];
         if (FindSafeTeleportSpot(fromArea, destinations[i], pos, dest))

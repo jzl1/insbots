@@ -20,6 +20,7 @@ CNavMesh g_NavMesh;
 #ifndef TESTING_NATIVE
 extern CfgVar insbot_nav;
 extern IEngineTrace *enginetrace;
+extern CGlobalVars *gpGlobals;
 #endif
 
 bool CNavMesh::IsLoaded() const
@@ -261,9 +262,26 @@ static void FreeNavLoadScratch(NavLoadScratch &s, unsigned int areaCount)
     if (s.data)          free(s.data);
     memset(&s, 0, sizeof(s));
 }
+void CNavMesh::ResetPhysicalPortalCache()
+{
+    for (int i = 0; i < 1024; i++)
+    {
+        m_physicalPortalCache[i].mapHash = 0;
+        m_physicalPortalCache[i].fromIdx = -1;
+        m_physicalPortalCache[i].toIdx = -1;
+        m_physicalPortalCache[i].sampleTime = 0.0f;
+        m_physicalPortalCache[i].stateSignature = 0;
+        m_physicalPortalCache[i].valid = false;
+        m_physicalPortalCache[i].tight = false;
+        m_physicalPortalCache[i].halfSpan = 0.0f;
+    }
+}
+
 void CNavMesh::Free()
 {
     InvalidateCostCache();
+    ResetPhysicalPortalCache();
+    m_mapHash = 0;
     FreeNavSearchContext(m_searchContext);
     m_searchBusy = false;
     if (m_areas)
@@ -707,6 +725,7 @@ void CNavMesh::TakeState(CNavMesh &source)
     m_gridCell = source.m_gridCell;
     m_gridStart = source.m_gridStart;
     m_gridCells = source.m_gridCells;
+    m_mapHash = source.m_mapHash;
     // Free() invalidated the old cache before this transfer. Keep that fresh
     // stamp: copying the candidate's zero stamp could make entries from the
     // previous mesh look valid again.
@@ -737,6 +756,7 @@ void CNavMesh::TakeState(CNavMesh &source)
     source.m_gridCell = 0.0f;
     source.m_gridStart = 0;
     source.m_gridCells = 0;
+    source.m_mapHash = 0;
     source.m_costStamp = 0;
     source.m_costSeq = 0;
 }
@@ -744,6 +764,11 @@ void CNavMesh::TakeState(CNavMesh &source)
 bool CNavMesh::LoadInPlace(const char *path)
 {
     Free();
+
+    unsigned int mapHash = 2166136261u;
+    for (const char *p = path; p && *p; p++)
+        mapHash = (mapHash ^ (unsigned char)*p) * 16777619u;
+    m_mapHash = mapHash;
 
     FILE *fp = fopen(path, "rb");
     if (!fp) return false;
@@ -2085,6 +2110,409 @@ bool CNavMesh::GetEdgeMeta(int fromIdx, int toIdx, NavEdgeMeta &out) const
     return false;
 }
 
+#ifndef TESTING_NATIVE
+// Resolve a lateral scan line and facing direction even when the two NAV
+// rectangles do not overlap. Malformed generator links commonly bridge a
+// stairwell or a short missing strip: the shared-edge midpoint does not exist,
+// but the facing sides of the two rectangles still describe where the physical
+// opening must be. The hull sweep below still has to prove the actual band.
+static bool NavPhysicalPortalCandidate(const CNavMesh &mesh, int fromIdx,
+                                       int toIdx, Vector &portal, Vector &axis)
+{
+    const NavAreaData *from = mesh.Area(fromIdx);
+    const NavAreaData *to = mesh.Area(toIdx);
+    if (!from || !to) return false;
+
+    Vector merged;
+    Vector mergedAxis;
+    float mergedHalf = 0.0f;
+    bool haveMerged = mesh.GetPortalMerged(fromIdx, toIdx, merged, mergedAxis,
+                                           mergedHalf);
+    if (haveMerged)
+    {
+        portal = merged;
+        axis = mergedAxis;
+        return true;
+    }
+
+    const float ox0 = from->lo.x > to->lo.x ? from->lo.x : to->lo.x;
+    const float ox1 = from->hi.x < to->hi.x ? from->hi.x : to->hi.x;
+    const float oy0 = from->lo.y > to->lo.y ? from->lo.y : to->lo.y;
+    const float oy1 = from->hi.y < to->hi.y ? from->hi.y : to->hi.y;
+
+    if (ox1 > ox0 && (from->hi.y <= to->lo.y || to->hi.y <= from->lo.y))
+    {
+        axis = Vector(1.0f, 0.0f, 0.0f);
+        portal.x = (ox0 + ox1) * 0.5f;
+        portal.y = from->hi.y <= to->lo.y ? from->hi.y : to->lo.y;
+        portal.z = from->hi.y <= to->lo.y
+                 ? mesh.GetZ(fromIdx, portal.x, portal.y)
+                 : mesh.GetZ(toIdx, portal.x, portal.y);
+        return true;
+    }
+    if (oy1 > oy0 && (from->hi.x <= to->lo.x || to->hi.x <= from->lo.x))
+    {
+        axis = Vector(0.0f, 1.0f, 0.0f);
+        portal.y = (oy0 + oy1) * 0.5f;
+        portal.x = from->hi.x <= to->lo.x ? from->hi.x : to->lo.x;
+        portal.z = from->hi.x <= to->lo.x
+                 ? mesh.GetZ(fromIdx, portal.x, portal.y)
+                 : mesh.GetZ(toIdx, portal.x, portal.y);
+        return true;
+    }
+    return false;
+}
+
+// Vertical standing-hull probe for a separated malformed edge. A horizontal
+// sweep at the source floor is wrong for a stairwell: each step is a valid
+// standing surface, but the hull would collide with the rising treads. Try a
+// range of start heights so a low ceiling above a landing does not make the
+// whole sample read as startsolid.
+static bool NavPhysicalPortalStandingHull(float x, float y, float zTop,
+                                          float zBot, float hullHeight,
+                                          float &floorZ)
+{
+    if (!enginetrace) return false;
+    Vector mins(-16.0f, -16.0f, 0.0f);
+    Vector maxs( 16.0f,  16.0f, hullHeight);
+    CTraceFilterWorldAndPropsOnly filter;
+    Ray_t ray;
+    trace_t tr;
+    for (float startZ = zTop; startZ >= zBot + 8.0f; startZ -= 16.0f)
+    {
+        ray.Init(Vector(x, y, startZ), Vector(x, y, zBot), mins, maxs);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+        if (!tr.startsolid && !tr.allsolid && tr.fraction < 1.0f)
+        {
+            floorZ = tr.endpos.z;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Cheap hull trace used as a dynamic-state token for the cached probe. A
+// closed door, a moving prop, or a destroyed breakable changes the hit entity,
+// fraction, or end position and therefore invalidates the cached result.
+static unsigned int NavPhysicalPortalStateSignature(const CNavMesh &mesh,
+                                                    int fromIdx, int toIdx)
+{
+    if (!enginetrace) return 0;
+    const NavAreaData *from = mesh.Area(fromIdx);
+    const NavAreaData *to = mesh.Area(toIdx);
+    if (!from || !to) return 0;
+    Vector portal, axis;
+    if (!NavPhysicalPortalCandidate(mesh, fromIdx, toIdx, portal, axis))
+        return 0;
+    Vector travel = to->center - from->center;
+    float len = sqrtf(travel.x * travel.x + travel.y * travel.y);
+    if (len < 0.5f) return 0;
+    Vector normal(travel.x / len, travel.y / len, 0.0f);
+    Vector start = portal - normal * 56.0f;
+    Vector end = portal + normal * 56.0f;
+    start.z = mesh.GetZ(fromIdx, start.x, start.y) + 8.0f;
+    end.z = mesh.GetZ(toIdx, end.x, end.y) + 8.0f;
+
+    CTraceFilterWorldAndPropsOnly filter;
+    Ray_t ray;
+    trace_t tr;
+    ray.Init(start, end, Vector(-16.0f, -16.0f, 0.0f),
+             Vector(16.0f, 16.0f, 72.0f));
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+
+    unsigned int hash = 2166136261u;
+    hash = (hash ^ (unsigned int)(size_t)tr.m_pEnt) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.fraction * 100000.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.endpos.x * 16.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.endpos.y * 16.0f)) * 16777619u;
+    hash = (hash ^ (unsigned int)(int)(tr.endpos.z * 16.0f)) * 16777619u;
+    return hash;
+}
+#endif
+
+bool CNavMesh::GetPhysicalPortal(int fromIdx, int toIdx, Vector &center,
+                                 float &halfSpan) const
+{
+    Vector axis;
+    return GetPhysicalPortal(fromIdx, toIdx, center, axis, halfSpan);
+}
+
+bool CNavMesh::GetPhysicalPortal(int fromIdx, int toIdx, Vector &center,
+                                 Vector &axis, float &halfSpan) const
+{
+    const NavAreaData *from = Area(fromIdx);
+    const NavAreaData *to = Area(toIdx);
+    if (!from || !to) return false;
+
+#ifdef TESTING_NATIVE
+    Vector mid;
+    float mergedHalf = 0.0f;
+    if (GetPortalMerged(fromIdx, toIdx, mid, axis, mergedHalf))
+    {
+        center = mid;
+        halfSpan = mergedHalf;
+        return mergedHalf > 0.0f && mergedHalf < 40.0f;
+    }
+    return false;
+#else
+    if (!enginetrace)
+    {
+        Vector mid;
+        float mergedHalf = 0.0f;
+        if (!GetPortalMerged(fromIdx, toIdx, mid, axis, mergedHalf))
+            return false;
+        center = mid;
+        halfSpan = mergedHalf;
+        return mergedHalf > 0.0f && mergedHalf < 40.0f;
+    }
+
+    unsigned int key = m_mapHash ^ ((unsigned int)fromIdx * 73856093u)
+                                 ^ ((unsigned int)toIdx * 19349663u);
+    PhysicalPortalEntry &cached = m_physicalPortalCache[key & 1023u];
+    float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+    const unsigned int stateSignature =
+        NavPhysicalPortalStateSignature(*this, fromIdx, toIdx);
+    if (cached.valid && cached.mapHash == m_mapHash
+        && cached.fromIdx == fromIdx && cached.toIdx == toIdx
+        && now >= cached.sampleTime && now - cached.sampleTime <= 30.0f
+        && cached.stateSignature == stateSignature)
+    {
+        if (cached.tight)
+        {
+            center = cached.center;
+            axis = cached.axis;
+            halfSpan = cached.halfSpan;
+        }
+        return cached.tight;
+    }
+
+    cached.mapHash = m_mapHash;
+    cached.fromIdx = fromIdx;
+    cached.toIdx = toIdx;
+    cached.sampleTime = now;
+    cached.stateSignature = stateSignature;
+    cached.valid = true;
+    cached.tight = false;
+    cached.halfSpan = 0.0f;
+
+    Vector portal;
+    if (!NavPhysicalPortalCandidate(*this, fromIdx, toIdx, portal, axis))
+        return false;
+    float axisLen = sqrtf(axis.x * axis.x + axis.y * axis.y);
+    if (axisLen < 0.5f) return false;
+    axis.x /= axisLen; axis.y /= axisLen; axis.z = 0.0f;
+
+    NavEdgeMeta edgeMeta;
+    const bool typedEdge = GetEdgeMeta(fromIdx, toIdx, edgeMeta)
+                        && edgeMeta.valid;
+
+    CTraceFilterWorldAndPropsOnly filter;
+    Ray_t ray; trace_t tr;
+    Vector waist = portal + Vector(0, 0, 44.0f);
+    Vector upper = portal + Vector(0, 0, 68.0f);
+    bool sideWall[2] = { false, false };
+    for (int s = 0; s < 2; s++)
+    {
+        float sign = s ? -1.0f : 1.0f;
+        Vector waistEnd = waist + axis * (sign * 128.0f);
+        ray.Init(waist, waistEnd);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+        float waistHit = (!tr.startsolid && !tr.allsolid)
+                       ? tr.fraction * 128.0f : 9999.0f;
+        Vector upperEnd = upper + axis * (sign * 128.0f);
+        ray.Init(upper, upperEnd);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+        float upperHit = (!tr.startsolid && !tr.allsolid)
+                       ? tr.fraction * 128.0f : 9999.0f;
+        sideWall[s] = waistHit < 127.9f && upperHit < 127.9f
+                   && fabsf(waistHit - upperHit) <= 32.0f;
+    }
+    if (!sideWall[0] && !sideWall[1]) return false;
+
+    Vector normal(axis.y, -axis.x, 0.0f);
+    Vector travel = to->center - from->center;
+    if (travel.x * normal.x + travel.y * normal.y < 0.0f)
+    {
+        normal.x = -normal.x;
+        normal.y = -normal.y;
+    }
+
+    const int sampleCount = 25;
+    const float sampleStep = 8.0f;
+    const float sampleMin = -96.0f;
+    bool clear[sampleCount];
+    float sampleZ[sampleCount];
+    for (int i = 0; i < sampleCount; i++) sampleZ[i] = portal.z;
+    Vector mins(-16.0f, -16.0f, 0.0f);
+    Vector maxs( 16.0f,  16.0f, 72.0f);
+    for (int i = 0; i < sampleCount; i++)
+    {
+        float off = sampleMin + i * sampleStep;
+        Vector candidate = portal + axis * off;
+        if (!typedEdge)
+        {
+            const float standTop = portal.z + 112.0f;
+            const float standBottom = portal.z - 308.0f;
+            clear[i] = NavPhysicalPortalStandingHull(
+                candidate.x, candidate.y, standTop, standBottom,
+                72.0f, sampleZ[i]);
+            continue;
+        }
+        Vector start = candidate - normal * 24.0f;
+        Vector end = candidate + normal * 24.0f;
+        start.z = GetZ(fromIdx, start.x, start.y) + 8.0f;
+        end.z = typedEdge ? GetZ(toIdx, end.x, end.y) + 8.0f
+                          : GetZ(fromIdx, end.x, end.y) + 8.0f;
+        ray.Init(start, end, mins, maxs);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+        clear[i] = !tr.startsolid && !tr.allsolid && tr.fraction >= 0.999f;
+        sampleZ[i] = tr.endpos.z;
+    }
+
+    int bestFirst = -1, bestLast = -1;
+    float bestScore = 3.4e38f;
+    for (int i = 0; i < sampleCount; )
+    {
+        if (!clear[i]) { i++; continue; }
+        int first = i;
+        while (i + 1 < sampleCount && clear[i + 1])
+        {
+            if (!typedEdge && fabsf(sampleZ[i + 1] - sampleZ[i]) > 12.0f)
+                break;
+            i++;
+        }
+        int last = i++;
+        if (first == 0 || last == sampleCount - 1) continue;
+        float firstRun = sampleMin + first * sampleStep;
+        float lastRun = sampleMin + last * sampleStep;
+        float runCenter = (firstRun + lastRun) * 0.5f;
+        float runSpan = lastRun - firstRun;
+        float score = fabsf(runCenter) - runSpan * 0.10f;
+        if (score < bestScore)
+        {
+            bestScore = score;
+            bestFirst = first;
+            bestLast = last;
+        }
+    }
+    if (bestFirst < 0) return false;
+
+    float firstRun = sampleMin + bestFirst * sampleStep;
+    float lastRun = sampleMin + bestLast * sampleStep;
+    float centerOff = (firstRun + lastRun) * 0.5f;
+    float centerSpan = lastRun - firstRun;
+    if (centerSpan >= 96.0f) return false;
+
+    cached.tight = true;
+    Vector physicalCenter = portal + axis * centerOff;
+    physicalCenter.z = typedEdge
+                     ? GetZ(toIdx, physicalCenter.x, physicalCenter.y)
+                     : sampleZ[(bestFirst + bestLast) / 2];
+    cached.center = physicalCenter;
+    cached.axis = axis;
+    cached.halfSpan = (centerSpan + 32.0f) * 0.5f;
+    center = physicalCenter;
+    halfSpan = cached.halfSpan;
+    return true;
+#endif
+}
+
+bool CNavMesh::GetPhysicalStep(int fromIdx, int toIdx, float &stepHeight) const
+{
+    stepHeight = 0.0f;
+    const NavAreaData *from = Area(fromIdx);
+    const NavAreaData *to = Area(toIdx);
+    if (!from || !to) return false;
+    NavEdgeMeta meta;
+    if (!GetEdgeMeta(fromIdx, toIdx, meta) || !meta.valid
+        || meta.kind != NAV_EDGE_WALK)
+        return false;
+
+    Vector seam;
+    Vector axis;
+    float halfSpan = 0.0f;
+    if (!GetPortal(fromIdx, toIdx, seam)
+        && !GetPortalMerged(fromIdx, toIdx, seam, axis, halfSpan))
+        return false;
+
+    float nx = meta.normalX;
+    float ny = meta.normalY;
+    float nl = sqrtf(nx * nx + ny * ny);
+    if (nl < 0.5f)
+    {
+        nx = to->center.x - from->center.x;
+        ny = to->center.y - from->center.y;
+        nl = sqrtf(nx * nx + ny * ny);
+    }
+    if (nl < 0.5f) return false;
+    nx /= nl; ny /= nl;
+
+    Vector fromPoint = seam;
+    fromPoint.x -= nx * 6.0f;
+    fromPoint.y -= ny * 6.0f;
+    Vector toPoint = seam;
+    toPoint.x += nx * 6.0f;
+    toPoint.y += ny * 6.0f;
+    if (fromPoint.x < from->lo.x) fromPoint.x = from->lo.x;
+    else if (fromPoint.x > from->hi.x) fromPoint.x = from->hi.x;
+    if (fromPoint.y < from->lo.y) fromPoint.y = from->lo.y;
+    else if (fromPoint.y > from->hi.y) fromPoint.y = from->hi.y;
+    if (toPoint.x < to->lo.x) toPoint.x = to->lo.x;
+    else if (toPoint.x > to->hi.x) toPoint.x = to->hi.x;
+    if (toPoint.y < to->lo.y) toPoint.y = to->lo.y;
+    else if (toPoint.y > to->hi.y) toPoint.y = to->hi.y;
+
+    float fromZ = TraceFloorZ(fromIdx, fromPoint.x, fromPoint.y, meta.midZ);
+    float toZ = TraceFloorZ(toIdx, toPoint.x, toPoint.y, meta.midZ);
+    stepHeight = toZ - fromZ;
+    return true;
+}
+
+bool CNavMesh::IsTightEdge(int fromIdx, int toIdx) const
+{
+    NavEdgeMeta meta;
+    if (GetEdgeMeta(fromIdx, toIdx, meta) && meta.valid
+        && (meta.kind == NAV_EDGE_DROP || meta.kind == NAV_EDGE_JUMP))
+    {
+        Vector center;
+        float halfSpan = 0.0f;
+        if (GetPhysicalPortal(fromIdx, toIdx, center, halfSpan))
+            return halfSpan > 0.0f && halfSpan < 36.0f;
+        return meta.halfSpan > 0.0f && meta.halfSpan < 36.0f;
+    }
+
+    Vector center;
+    float halfSpan = 0.0f;
+    return GetPhysicalPortal(fromIdx, toIdx, center, halfSpan)
+        && halfSpan > 0.0f && halfSpan < 40.0f;
+}
+
+float CNavMesh::TraceFloorZ(int areaIdx, float x, float y, float fromZ) const
+{
+    const NavAreaData *a = Area(areaIdx);
+    if (!a) return 0.0f;
+    float fallback = GetZ(areaIdx, x, y);
+#ifndef TESTING_NATIVE
+    if (!enginetrace) return fallback;
+    float startZ = a->hi.z + 64.0f;
+    if (fromZ > startZ) startZ = fromZ + 64.0f;
+    float endZ = a->lo.z - 128.0f;
+    Vector start(x, y, startZ);
+    Vector end(x, y, endZ);
+    Ray_t ray;
+    trace_t tr;
+    CTraceFilterWorldAndPropsOnly filter;
+    ray.Init(start, end);
+    enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
+    if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f)
+        return fallback;
+    return tr.endpos.z;
+#else
+    (void)fromZ;
+    return fallback;
+#endif
+}
+
 bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
                                      Vector &landing, Vector &axis,
                                      float &halfSpan) const
@@ -2146,8 +2574,8 @@ bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
 
     takeoff.x = meta.midX;
     takeoff.y = meta.midY;
-    takeoff.z = meta.midZ;
-    landing.z = GetZ(toIdx, landing.x, landing.y);
+    takeoff.z = TraceFloorZ(fromIdx, takeoff.x, takeoff.y, meta.midZ);
+    landing.z = TraceFloorZ(toIdx, landing.x, landing.y, meta.midZ);
     if (takeoff.z - landing.z < 24.0f) return false;
     axis = Vector(meta.axisX, meta.axisY, 0.0f);
     halfSpan = meta.halfSpan;
@@ -2175,6 +2603,8 @@ bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
         {
             takeoff = hintTakeoff;
             landing = hintLanding;
+            takeoff.z = TraceFloorZ(fromIdx, takeoff.x, takeoff.y, takeoff.z);
+            landing.z = TraceFloorZ(toIdx, landing.x, landing.y, landing.z);
             float dx = landing.x - takeoff.x;
             float dy = landing.y - takeoff.y;
             float len = sqrtf(dx * dx + dy * dy);
@@ -2206,8 +2636,12 @@ bool CNavMesh::GetTransitionWaypoint(int fromIdx, int toIdx, const Vector &pos,
     // The staging point sits 28u behind the takeoff. Use it only while it is
     // safely ahead of the bot; when approaching off-axis near the lip, aim
     // directly at the takeoff instead of steering back to that staging point.
-    bool useStaging = along > 48.0f;
-    out.virtualApproach = useStaging || (along > 0.0f && lateral > 8.0f);
+    // Once a bot has already dropped below the takeoff ledge, never re-arm the
+    // upper virtual approach point.
+    bool alreadyDropped = pos.z < out.takeoff.z - 24.0f;
+    bool useStaging = !alreadyDropped && along > 48.0f;
+    out.virtualApproach = !alreadyDropped
+                       && (useStaging || (along > 0.0f && lateral > 8.0f));
     if (out.virtualApproach)
     {
         const NavAreaData *from = Area(fromIdx);
@@ -2239,7 +2673,7 @@ bool CNavMesh::IsOnAreaLanding(int areaIdx, const Vector &pos, float maxZDelta) 
     if (pos.x < a->lo.x || pos.x > a->hi.x
         || pos.y < a->lo.y || pos.y > a->hi.y)
         return false;
-    float floorZ = GetZ(areaIdx, pos.x, pos.y);
+    float floorZ = TraceFloorZ(areaIdx, pos.x, pos.y, pos.z);
     return fabsf(floorZ - pos.z) <= maxZDelta;
 }
 

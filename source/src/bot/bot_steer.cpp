@@ -1232,34 +1232,6 @@ void MoveAtWorldYaw(float worldYaw, float viewYaw, float speed,
     fwd = cosf(rel) * speed;
     side = -sinf(rel) * speed;
 }
-
-// Haditha's basement exit is one continuous choke from the spawn ramp through
-// the 464 drop and the east-door chain. Keep the crowd nonblocking for the
-// whole route, not only while a narrow edge happens to be within the local
-// scan window; otherwise a separated bot starts colliding again mid-column.
-static bool PathContainsHadithaBasementExit(const int *path, int pathLen,
-                                            int cursor)
-{
-    if (!IsHadithaMapName(g_Bots.m_mapname) || !path || pathLen <= 0)
-        return false;
-    int first = cursor > 0 ? cursor - 1 : 0;
-    for (int i = first; i < pathLen; i++)
-    {
-        const NavAreaData *area = g_NavMesh.Area(path[i]);
-        if (!area) continue;
-        switch (area->id)
-        {
-            case 464:  case 3321: case 463:
-            case 3289: case 3319: case 3293:
-            case 3315: case 3295: case 320:
-                return true;
-            default:
-                break;
-        }
-    }
-    return false;
-}
-
 bool CInsBot::UpdateCrowdTransitGrace(const Vector &pos, float now)
 {
     int mySlot = (int)(this - g_Bots.m_bots);
@@ -1323,15 +1295,6 @@ bool CInsBot::UpdateCrowdTransitGrace(const Vector &pos, float now)
     }
     if (!haveTightSegment && nearbyCrowd < 4)
     {
-        if (PathContainsHadithaBasementExit(m_path, m_pathLen, m_pathCursor))
-        {
-            m_crowdTransitHoldUntil = now + 4.0f;
-            if (!m_crowdTransitOwnsCollision && !m_spawnNoCollideActive
-                && !HasBodyNoCollide() && !BeginCrowdTransitGrace())
-                return false;
-            m_crowdTransitGraceActive = true;
-            return true;
-        }
         if (m_crowdTransitGraceActive && now < m_crowdTransitHoldUntil)
             return true;
         EndCrowdTransitGrace();
@@ -1521,11 +1484,10 @@ int CInsBot::UpdatePortalTransit(const Vector &pos, float viewYaw,
                       ? seg.exit : seg.entry;
         float transitSpeed = insbot_move_speed.GetFloat()
                            * PT_CROWD_SPEED_SCALE;
-        // The east-door seam climbs in 8-16u steps. At full engine speed the
-        // step impulse can launch a bot onto the high ledge beside the
-        // corridor; cap only this chain so the rest of the route stays fast.
-        if (IsHadithaEastDoorEdge(seg.startArea, seg.endArea)
-            && transitSpeed > 170.0f)
+        // A tight stepped seam can launch a bot onto the high ledge beside the
+        // corridor at full engine speed. Cap only the physical tight-edge
+        // commit; the rest of the route stays fast.
+        if (IsTightEdge(seg.startArea, seg.endArea) && transitSpeed > 170.0f)
             transitSpeed = 170.0f;
         MoveAtWorldYaw(
             atan2f(target.y - pos.y, target.x - pos.x)
@@ -2570,11 +2532,9 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
         myNext = m_path[m_pathCursor];
         if (m_pathCursor > 0) myCur = m_path[m_pathCursor - 1];
     }
-    bool hadithaDoorEdge = myCur >= 0 && myNext >= 0
-                        && IsHadithaTightDoorEdge(myCur, myNext);
-    bool hadithaEastDoorEdge = myCur >= 0 && myNext >= 0
-                            && IsHadithaEastDoorEdge(myCur, myNext);
-    if (hadithaDoorEdge || hadithaEastDoorEdge)
+    bool tightEdge = myCur >= 0 && myNext >= 0
+                  && IsTightEdge(myCur, myNext);
+    if (tightEdge)
     {
         // These physical frames are single-hull and must always use the
         // serialized choke logic even when a trace sample happens to miss the
@@ -2646,9 +2606,9 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
             // area beyond any physically verified doorway. Otherwise the
             // follower loses sight of its leader the instant that leader's
             // cursor advances and enters while the rear hull is still in the
-            // frame. Haditha remains covered by its explicit edge verifier.
+            // frame. The physical tight-edge classifier covers that case.
             bool physicalDoorChain = physicalPassage
-                                  || IsHadithaTightDoorEdge(myCur, myNext);
+                                  || IsTightEdge(myCur, myNext);
             adjacentEdgeAhead = physicalDoorChain && !pathShared
                               && otherCur == myNext;
             if (adjacentEdgeAhead) pathShared = true;
@@ -2966,9 +2926,9 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
             // ---- continuous gap-based follow speed ----
             // Keep a compact moving column. A 140u stop gap made an eight-bot
             // squad require nearly 1000u of empty approach space, backing the
-            // whole team into rooms before short passages such as Haditha's
-            // id468->id581 plank entrance. An 80u center gap still leaves about
-            // 48u between 32u hulls while letting the queue fit and flow.
+            // whole team into rooms before short passages. An 80u center gap
+            // still leaves about 48u between 32u hulls while letting the queue
+            // fit and flow.
             float maxSpeed = insbot_move_speed.GetFloat();
             float target;
             if (dropAhead)
@@ -3037,7 +2997,7 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
 
         // About to walk off a drop with a teammate already on the landing
         // below: hold at the edge. Creeping off here is what stacks bots on
-        // top of each other at elevation steps (Haditha (-2612,-83)).
+        // top of each other at elevation steps.
         if (dropAhead && TeammateAtLanding())
         {
             if (!m_dropHoldExpired)
@@ -3095,14 +3055,13 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
                     // A doorway leader uses the configured generic recovery
                     // deadline, not a map-specific short timer. Followers are
                     // intentionally held above, so only the front bot reaches
-                    // this branch. Haditha's east corner keeps its verified
-                    // multi-slot landing; every other detected doorway uses
-                    // ordinary TeleportUnstuck and its on-path hull checks.
+                    // this branch. Every detected doorway uses ordinary
+                    // TeleportUnstuck and its on-path hull checks.
                     float teleportDelay = insbot_doorway_teleport_time.GetFloat();
                     if (teleportDelay < 0.2f) teleportDelay = 0.2f;
                     float bodyStart = insbot_stuck_time.GetFloat();
                     if (bodyStart < 0.2f) bodyStart = 0.2f;
-                    if (!hadithaEastDoorEdge && !m_bodyNoCollideAttempted
+                    if (!tightEdge && !m_bodyNoCollideAttempted
                         && teleportDelay > bodyStart
                         && now - m_chokeProgressTime >= bodyStart)
                     {
@@ -3117,9 +3076,7 @@ void CInsBot::ApplyCrowdSteering(float moveYaw, float viewYaw, float &fwd,
                     bool transferDue = !bodyRecoveryOwns
                                     && insbot_doorway_teleport.GetBool()
                                     && now - m_chokeProgressTime >= teleportDelay;
-                    bool transferred = transferDue && (hadithaEastDoorEdge
-                        ? TransferHadithaEastDoor(now)
-                        : TeleportUnstuck(pos, now, true));
+                    bool transferred = transferDue && TeleportUnstuck(pos, now, true);
                     if (transferred)
                     {
                         m_chokeProgressTime = 0.0f;
@@ -3540,22 +3497,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                 // is within a few feet.
                 if ((cur->attributes & NAVATTR_JUMP) && canJump) buttons |= IN_JUMP;
             }
-            // LowCeilingAhead is a horizontal head-height ray; it cannot see
-            // a ceiling directly above the standing hull. Tall stair/ramp
-            // areas (Haditha's area 2306) need the vertical envelope check;
-            // ordinary corridors must not crouch just because a roof is
-            // within 70u, since that slows the whole gate column.
-            bool tallCeilingZone = false;
-            const NavAreaData *ceilingArea = g_NavMesh.Area(CurrentArea(pos));
-            if (ceilingArea)
-            {
-                float zSpan = ceilingArea->hi.z - ceilingArea->lo.z;
-                if (zSpan < 0.0f) zSpan = -zSpan;
-                tallCeilingZone = zSpan > 64.0f;
-            }
-            if (!ladderMove
-                && (LowCeilingAhead(mvYaw)
-                    || (tallCeilingZone && CeilingLowAt(pos))))
+            if (!ladderMove && LowCeilingAhead(mvYaw))
                 buttons |= IN_DUCK;
             // Only jump when the waypoint is genuinely above the player - well
             // above the Source engine's 21u jump height so ramps, gentle steps,
@@ -3581,13 +3523,7 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                         if (g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1],
                                                   m_path[m_pathCursor], jumpMeta)
                             && jumpMeta.valid
-                            && jumpMeta.kind == NAV_EDGE_JUMP
-                            && !IsHadithaTightDoorEdge(
-                                   m_path[m_pathCursor - 1],
-                                   m_path[m_pathCursor])
-                            && !IsHadithaEastDoorEdge(
-                                   m_path[m_pathCursor - 1],
-                                   m_path[m_pathCursor]))
+                            && jumpMeta.kind == NAV_EDGE_JUMP)
                             edgeStep = true;
                     }
                 }
@@ -3694,7 +3630,11 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
     if (m_crowdTransitGraceActive && !m_enemyIndex
         && (fabsf(fwd) > 10.0f || fabsf(side) > 10.0f))
     {
+        float oldViewY = view.y;
+        float speed = sqrtf(fwd * fwd + side * side);
+        float worldMoveYaw = oldViewY + atan2f(-side, fwd) * (180.0f / 3.14159265f);
         view.y = m_haveLastNavMoveYaw ? m_lastNavMoveYaw : moveYaw;
         view.x = 0.0f;
+        MoveAtWorldYaw(worldMoveYaw, view.y, speed, fwd, side);
     }
 }

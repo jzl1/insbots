@@ -202,9 +202,7 @@ float DistanceToLineSegment(const Vector& p, const Vector& a, const Vector& b);
 float SignedAngleDiff(float a, float b);
 
 // ---- map-identity predicates (bot_util.cpp) --------------------------------
-bool IsHadithaMapName(const char *name);
-bool IsHadithaTightDoorEdge(int fromIdx, int toIdx);
-bool IsHadithaEastDoorEdge(int fromIdx, int toIdx);
+bool IsTightEdge(int fromIdx, int toIdx);
 
 // ---- shared team intelligence (bot_perceive.cpp) ---------------------------
 void IntelReport(int team, int enemyIdx, const Vector &pos, float now);
@@ -257,9 +255,6 @@ bool   ProbePhysicalPortal(int fromIdx, int toIdx,
 
 // ---- doorway (bot_doorway.cpp) ---------------------------------------------
 bool HasDoorwayLineOfSight(const Vector &from, const Vector &to);
-
-// ---- haditha behaviour (bot_haditha.cpp) -----------------------------------
-bool IsHadithaDoorNoSprintZone(const int *path, int pathLen, int cursor, const Vector &pos);
 
 // ---- steering (bot_steer.cpp) ----------------------------------------------
 void MoveAtWorldYaw(float worldYaw, float viewYaw, float speed, float &fwd, float &side);

@@ -363,7 +363,9 @@ static bool CrossedExactPortalIntoArea(int fromIdx, int toIdx,
     // surface. The old +/-64u surface window let a shallow stacked drop clear
     // while the bot was still standing on the upper floor.
     if (meta.kind == NAV_EDGE_DROP || meta.kind == NAV_EDGE_JUMP)
+    {
         return PositionOnAreaSurface(toIdx, pos, true);
+    }
     if (meta.kind != NAV_EDGE_WALK) return false;
     if (!PositionOnAreaSurface(toIdx, pos)) return false;
 
@@ -383,13 +385,9 @@ static bool CrossedExactPortalIntoArea(int fromIdx, int toIdx,
 bool WalkEdgeNeedsJump(int fromIdx, int toIdx)
 {
     if (!g_NavMesh.CanJumpFrom(fromIdx)) return false;
-    // Haditha's basement exit is a continuous floor; the generated JUMP flags
-    // on its 25u seam tiles are mesh artifacts.
-    if (IsHadithaTightDoorEdge(fromIdx, toIdx)) return false;
-    // The Haditha east-door chain carries a bogus +19u edge delta even though
-    // BSP hull sweeps show a continuous ramp. Jumping here launches bots onto
-    // the ledge above the 25u seam tiles, where they strand off-mesh.
-    if (IsHadithaEastDoorEdge(fromIdx, toIdx)) return false;
+    float physicalStep = 0.0f;
+    if (g_NavMesh.GetPhysicalStep(fromIdx, toIdx, physicalStep))
+        return physicalStep > 18.0f;
     NavEdgeMeta meta;
     if (g_NavMesh.GetEdgeMeta(fromIdx, toIdx, meta) && meta.valid
         && meta.kind == NAV_EDGE_WALK && meta.zDelta > 16.0f)
@@ -413,6 +411,78 @@ struct PhysicalPortalProbe
 };
 static PhysicalPortalProbe s_physicalPortalCache[1024];
 
+// Resolve a lateral scan line and facing direction even when the two NAV
+// rectangles do not overlap. Malformed generator links commonly bridge a
+// stairwell or a short missing strip: the shared-edge midpoint does not exist,
+// but the facing sides of the two rectangles still describe where the physical
+// opening must be. The caller's hull sweep then proves the actual band.
+static bool PhysicalPortalCandidate(int fromIdx, int toIdx,
+                                    Vector &portal, Vector &axis)
+{
+    const NavAreaData *from = g_NavMesh.Area(fromIdx);
+    const NavAreaData *to = g_NavMesh.Area(toIdx);
+    if (!from || !to) return false;
+
+    float mergedHalf = 0.0f;
+    if (g_NavMesh.GetPortalMerged(fromIdx, toIdx, portal, axis, mergedHalf))
+        return true;
+
+    const float ox0 = from->lo.x > to->lo.x ? from->lo.x : to->lo.x;
+    const float ox1 = from->hi.x < to->hi.x ? from->hi.x : to->hi.x;
+    const float oy0 = from->lo.y > to->lo.y ? from->lo.y : to->lo.y;
+    const float oy1 = from->hi.y < to->hi.y ? from->hi.y : to->hi.y;
+
+    if (ox1 > ox0 && (from->hi.y <= to->lo.y || to->hi.y <= from->lo.y))
+    {
+        axis = Vector(1.0f, 0.0f, 0.0f);
+        portal.x = (ox0 + ox1) * 0.5f;
+        portal.y = from->hi.y <= to->lo.y ? from->hi.y : from->lo.y;
+        portal.z = from->hi.y <= to->lo.y
+                 ? g_NavMesh.GetZ(fromIdx, portal.x, portal.y)
+                 : g_NavMesh.GetZ(toIdx, portal.x, portal.y);
+        return true;
+    }
+    if (oy1 > oy0 && (from->hi.x <= to->lo.x || to->hi.x <= from->lo.x))
+    {
+        axis = Vector(0.0f, 1.0f, 0.0f);
+        portal.y = (oy0 + oy1) * 0.5f;
+        portal.x = from->hi.x <= to->lo.x ? from->hi.x : from->lo.x;
+        portal.z = from->hi.x <= to->lo.x
+                 ? g_NavMesh.GetZ(fromIdx, portal.x, portal.y)
+                 : g_NavMesh.GetZ(toIdx, portal.x, portal.y);
+        return true;
+    }
+    return false;
+}
+
+// Vertical standing-hull probe for a separated malformed edge. A horizontal
+// sweep at the source floor is wrong for a stairwell: each step is a valid
+// standing surface, but the hull would collide with the rising treads. Try a
+// range of start heights so a low ceiling above a landing does not make the
+// whole sample read as startsolid.
+static bool PhysicalPortalStandingHull(float x, float y, float zTop,
+                                       float zBot, float hullHeight,
+                                       float &floorZ)
+{
+    if (!enginetrace) return false;
+    Vector mins(-16.0f, -16.0f, 0.0f);
+    Vector maxs( 16.0f,  16.0f, hullHeight);
+    CTraceFilterWorldAndPropsOnly filter;
+    Ray_t ray;
+    trace_t tr;
+    for (float startZ = zTop; startZ >= zBot + 8.0f; startZ -= 16.0f)
+    {
+        ray.Init(Vector(x, y, startZ), Vector(x, y, zBot), mins, maxs);
+        enginetrace->TraceRay(ray, MASK_PLAYERSOLID_BRUSHONLY, &filter, &tr);
+        if (!tr.startsolid && !tr.allsolid && tr.fraction < 1.0f)
+        {
+            floorZ = tr.endpos.z;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Cheap hull trace used as a dynamic-state token for the cached probe. A
 // closed door, a moving prop, or a destroyed breakable changes the hit entity,
 // fraction, or end position and therefore invalidates the cached result.
@@ -422,8 +492,8 @@ static unsigned int PhysicalPortalStateSignature(int fromIdx, int toIdx)
     const NavAreaData *from = g_NavMesh.Area(fromIdx);
     const NavAreaData *to = g_NavMesh.Area(toIdx);
     if (!from || !to) return 0;
-    Vector portal;
-    if (!g_NavMesh.GetPortal(fromIdx, toIdx, portal)) return 0;
+    Vector portal, axis;
+    if (!PhysicalPortalCandidate(fromIdx, toIdx, portal, axis)) return 0;
     Vector travel = to->center - from->center;
     float len = sqrtf(travel.x * travel.x + travel.y * travel.y);
     if (len < 0.5f) return 0;
@@ -464,6 +534,15 @@ void InsBots_ResetPhysicalPortalCache()
 bool ProbePhysicalPortal(int fromIdx, int toIdx,
                                 Vector *safeCenter, float *safeHalfSpan)
 {
+    Vector sharedCenter;
+    float sharedHalfSpan = 0.0f;
+    if (g_NavMesh.GetPhysicalPortal(fromIdx, toIdx, sharedCenter,
+                                    sharedHalfSpan))
+    {
+        if (safeCenter) *safeCenter = sharedCenter;
+        if (safeHalfSpan) *safeHalfSpan = sharedHalfSpan;
+        return true;
+    }
     if (!enginetrace) return false;
     const NavAreaData *from = g_NavMesh.Area(fromIdx);
     const NavAreaData *to = g_NavMesh.Area(toIdx);
@@ -499,23 +578,15 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
     cached.tight = false;
     cached.halfSpan = 0.0f;
 
-    Vector portal;
-    if (!g_NavMesh.GetPortal(fromIdx, toIdx, portal))
+    Vector portal, axis;
+    if (!PhysicalPortalCandidate(fromIdx, toIdx, portal, axis))
         return false;
-    float lx = from->lo.x > to->lo.x ? from->lo.x : to->lo.x;
-    float hx = from->hi.x < to->hi.x ? from->hi.x : to->hi.x;
-    float ly = from->lo.y > to->lo.y ? from->lo.y : to->lo.y;
-    float hy = from->hi.y < to->hi.y ? from->hi.y : to->hi.y;
-    // Use the exact shared edge for the physical probe. Merged portals are
-    // directional and can shift toward a neighboring terrain slice before any
-    // physical doorway has actually been proven.
-    Vector axis = ((hx - lx) <= (hy - ly))
-                ? Vector(0.0f, 1.0f, 0.0f)
-                : Vector(1.0f, 0.0f, 0.0f);
     float axisLen = sqrtf(axis.x * axis.x + axis.y * axis.y);
     if (axisLen < 0.5f) return false;
     axis.x /= axisLen; axis.y /= axisLen; axis.z = 0.0f;
-
+    NavEdgeMeta edgeMeta;
+    const bool typedEdge = g_NavMesh.GetEdgeMeta(fromIdx, toIdx, edgeMeta)
+                        && edgeMeta.valid;
     CTraceFilterWorldAndPropsOnly filter;
     Ray_t ray; trace_t tr;
     Vector waist = portal + Vector(0, 0, 44.0f);
@@ -557,23 +628,41 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
     const float sampleStep = 8.0f;
     const float sampleMin = -96.0f;
     bool clear[sampleCount];
+    float sampleZ[sampleCount];
+    for (int i = 0; i < sampleCount; i++) sampleZ[i] = portal.z;
     Vector mins(-16.0f, -16.0f, 0.0f);
     Vector maxs( 16.0f,  16.0f, 72.0f);
     for (int i = 0; i < sampleCount; i++)
     {
         float off = sampleMin + i * sampleStep;
         Vector candidate = portal + axis * off;
+        if (!typedEdge)
+        {
+            const float standTop = portal.z + 112.0f;
+            const float standBottom = portal.z - 308.0f;
+            clear[i] = PhysicalPortalStandingHull(
+                candidate.x, candidate.y, standTop, standBottom,
+                72.0f, sampleZ[i]);
+            continue;
+        }
         // Keep the sweep local to the portal. The old +/-56u endpoints placed
         // the 32x72 hull deep inside surrounding walls on valid narrow
         // doorways, so every sample reported startsolid and the caller fell
         // back to an unverified NAV midpoint.
         Vector start = candidate - normal * 24.0f;
         Vector end = candidate + normal * 24.0f;
+        // For a malformed separated link, trace both ends from the source
+        // surface: the destination rectangle can be a stairwell away and its
+        // interpolated Z would tilt the sweep through the steps. A typed edge
+        // keeps the original two-sided floor test.
         start.z = g_NavMesh.GetZ(fromIdx, start.x, start.y) + 8.0f;
-        end.z = g_NavMesh.GetZ(toIdx, end.x, end.y) + 8.0f;
+        end.z = typedEdge
+              ? g_NavMesh.GetZ(toIdx, end.x, end.y) + 8.0f
+              : g_NavMesh.GetZ(fromIdx, end.x, end.y) + 8.0f;
         ray.Init(start, end, mins, maxs);
         enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
         clear[i] = !tr.startsolid && !tr.allsolid && tr.fraction >= 0.999f;
+        sampleZ[i] = tr.endpos.z;
     }
 
     int bestFirst = -1, bestLast = -1;
@@ -582,7 +671,15 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
     {
         if (!clear[i]) { i++; continue; }
         int first = i;
-        while (i + 1 < sampleCount && clear[i + 1]) i++;
+        while (i + 1 < sampleCount && clear[i + 1])
+        {
+            // A vertical stair probe can find a different floor on each side
+            // of a landing. Split at a real height change so the selected band
+            // follows one walkable surface instead of spanning two floors.
+            if (!typedEdge && fabsf(sampleZ[i + 1] - sampleZ[i]) > 12.0f)
+                break;
+            i++;
+        }
         int last = i++;
         // A run touching either boundary is open terrain, not a doorway.
         if (first == 0 || last == sampleCount - 1) continue;
@@ -590,6 +687,9 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
         float lastRun = sampleMin + last * sampleStep;
         float runCenter = (firstRun + lastRun) * 0.5f;
         float runSpan = lastRun - firstRun;
+        // Choose the clear band closest to the NAV midpoint. This keeps a
+        // separated stairwell on the source side of the opening instead of
+        // selecting an equally valid floor behind a nearby wall.
         float score = fabsf(runCenter) - runSpan * 0.10f;
         if (score < bestScore)
         {
@@ -610,7 +710,9 @@ bool ProbePhysicalPortal(int fromIdx, int toIdx,
 
     cached.tight = true;
     Vector physicalCenter = portal + axis * centerOff;
-    physicalCenter.z = g_NavMesh.GetZ(toIdx, physicalCenter.x, physicalCenter.y);
+    physicalCenter.z = typedEdge
+                     ? g_NavMesh.GetZ(toIdx, physicalCenter.x, physicalCenter.y)
+                     : sampleZ[(bestFirst + bestLast) / 2];
     cached.centerX = physicalCenter.x;
     cached.centerY = physicalCenter.y;
     cached.centerZ = physicalCenter.z;
@@ -636,8 +738,7 @@ bool CInsBot::SourceTurnForEdge(int fromIdx, int toIdx, const Vector &pos) const
         // orbit the lip instead of settling on it.
         return false;
     }
-    if (IsHadithaTightDoorEdge(fromIdx, toIdx)
-        || IsHadithaEastDoorEdge(fromIdx, toIdx))
+    if (IsTightEdge(fromIdx, toIdx))
         return true;
 
     // Portal-relative hull sampling still works after a bot has aimed into a
@@ -1001,6 +1102,29 @@ bool CInsBot::AdvanceWaypoint()
             virtualApproach = transition.virtualApproach;
         }
     }
+    if (!haveWp && m_pathCursor >= 1)
+    {
+        Vector safeCenter;
+        float safeHalf = 0.0f;
+        if (ProbePhysicalPortal(m_path[m_pathCursor - 1],
+                                m_path[m_pathCursor],
+                                &safeCenter, &safeHalf))
+        {
+            haveWp = true;
+            wp = safeCenter;
+            spreadHalf = safeHalf;
+            const NavAreaData *fromA = g_NavMesh.Area(m_path[m_pathCursor - 1]);
+            const NavAreaData *toA = g_NavMesh.Area(m_path[m_pathCursor]);
+            if (fromA && toA)
+            {
+                float tx = toA->center.x - fromA->center.x;
+                float ty = toA->center.y - fromA->center.y;
+                spreadAxis = fabsf(tx) < fabsf(ty)
+                           ? Vector(1.0f, 0.0f, 0.0f)
+                           : Vector(0.0f, 1.0f, 0.0f);
+            }
+        }
+    }
     if (!haveWp)
     {
         const NavAreaData *a = g_NavMesh.Area(m_path[m_pathCursor]);
@@ -1264,9 +1388,8 @@ bool CInsBot::AdvanceWaypoint()
     }
     // ---- elevation-drop lookahead ----
     // If the waypoint sits notably below the bot's feet, the path drops off a
-    // step/ledge (Haditha's stacked areas around (-2612,-83) drop ~15-30u
-    // between connected tiles). Followers must hold at the edge until the
-    // landing clears, otherwise they walk off onto a teammate below and stack.
+    // step/ledge. Followers must hold at the edge until the landing clears,
+    // otherwise they walk off onto a teammate below and stack.
     m_dropAhead = false;
     m_dropAheadDist = 0.0f;
     // Keep drop/jump queues active in both streaming modes. This is independent

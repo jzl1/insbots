@@ -2378,32 +2378,6 @@ overwatch_done:
     // non-sprint run speed while the waypoint controller retains full input;
     // lowering the input itself kept leaders in the frame too long and let
     // followers compress into them.
-    bool spawnTimedGrace = m_spawnNoCollideActive && !m_spawnNoCollideExpired;
-    bool hadithaGate = false;
-    if (!spawnTimedGrace && !m_traversingLadder)
-    {
-        bool collisionGrace = HasBodyNoCollide() || m_spawnNoCollideActive
-                           || HasCrowdTransitGrace();
-        if (collisionGrace)
-        {
-            float recoveryFwd = fwd, recoverySide = side;
-            float oldTeleportOk = m_nextTeleportOk;
-            hadithaGate = g_Bots.ControlHadithaDoor(
-                this, pos, now, view.y, recoveryFwd, recoverySide);
-            if (m_nextTeleportOk > oldTeleportOk)
-            {
-                fwd = 0.0f;
-                side = 0.0f;
-                buttons = 0;
-            }
-        }
-        else
-            hadithaGate = g_Bots.ControlHadithaDoor(
-                this, pos, now, view.y, fwd, side);
-    }
-    bool hadithaNoSprint = hadithaGate || (!m_traversingLadder
-        && IsHadithaDoorNoSprintZone(m_path, m_pathLen, m_pathCursor, pos));
-
     // Doorway apex braking timer (single-shot per approach)
     if (m_doorwayRunway.active && !m_doorwayRunway.apexBraked
         && m_doorwayRunway.turnAngle > 35.0f
@@ -2450,16 +2424,16 @@ overwatch_done:
         buttons &= ~INS_IN_SPRINT;
         if (fwd > 220.0f) fwd = 220.0f;
     }
-    else if (!hadithaNoSprint && doorwaySprintAllowed
+    else if (doorwaySprintAllowed
         && !m_traversingLadder && insbot_sprint.GetBool() && !engaging && m_nadeState == 0
         && m_reloadUntil <= now && fwd > 100.0f && fabsf(side) < 60.0f
         && !(buttons & IN_DUCK))
     {
         buttons |= INS_IN_SPRINT;
     }
-    // Collision grace removes the crowd reason for the Haditha no-sprint
-    // approach. Let the column cover the basement route at normal sprint speed
-    // while it is nonblocking; doorway_sprint remains a separate opt-in.
+    // Collision grace removes the crowd reason for the doorway no-sprint
+    // approach. Let the column move at normal sprint speed while it is
+    // non-blocking; doorway_sprint remains a separate opt-in.
     if ((HasCrowdTransitGrace()
          || (m_spawnNoCollideActive && !m_spawnNoCollideExpired))
         && !m_traversingLadder && insbot_sprint.GetBool()
@@ -2478,26 +2452,7 @@ overwatch_done:
         RunMove(0.0f, 0.0f, 0, view);
         return;
     }
-    bool crowdPortalTransit = false;
-    if (HasCrowdTransitGrace() && m_pathCursor > 0 && m_pathCursor < m_pathLen)
-    {
-        NavEdgeMeta crowdEdge;
-        bool haveCrowdEdge = g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1],
-                                                   m_path[m_pathCursor],
-                                                   crowdEdge);
-        crowdPortalTransit =
-            g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE,
-                                   m_path[m_pathCursor - 1],
-                                   m_path[m_pathCursor])
-            || g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE,
-                                      m_path[m_pathCursor - 1],
-                                      m_path[m_pathCursor])
-            || (haveCrowdEdge && crowdEdge.valid
-                && (crowdEdge.kind == NAV_EDGE_DROP
-                    || crowdEdge.kind == NAV_EDGE_JUMP));
-    }
-    if (!crowdPortalTransit
-        && (!m_spawnNoCollideActive || m_spawnNoCollideExpired)
+    if ((!m_spawnNoCollideActive || m_spawnNoCollideExpired)
         && now >= m_stuckCheckTime)
     {
         bool progressed = false, noProgress = false;

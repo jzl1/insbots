@@ -213,9 +213,21 @@ public:
                  m_gridW(0), m_gridH(0), m_gridMinX(0), m_gridMinY(0), m_gridCell(0), m_gridStart(0), m_gridCells(0),
                  m_sccCount(0), m_sccReachWords(0), m_sccReach(0),
                  m_fixups(0), m_fixupCount(0),
+                 m_mapHash(0),
                  m_searchContext(), m_searchBusy(false),
                  m_costStamp(0), m_costSeq(0), m_costParams(), m_lastSearchStatus(NAV_SEARCH_OK)
     {
+        for (int i = 0; i < 1024; i++)
+        {
+            m_physicalPortalCache[i].mapHash = 0;
+            m_physicalPortalCache[i].fromIdx = -1;
+            m_physicalPortalCache[i].toIdx = -1;
+            m_physicalPortalCache[i].sampleTime = 0.0f;
+            m_physicalPortalCache[i].stateSignature = 0;
+            m_physicalPortalCache[i].valid = false;
+            m_physicalPortalCache[i].tight = false;
+            m_physicalPortalCache[i].halfSpan = 0.0f;
+        }
         for (int i = 0; i < 64; i++)
         {
             m_fbCache[i].key = 0;
@@ -296,6 +308,25 @@ public:
     bool  GetPortalMerged(int fromIdx, int toIdx, Vector &mid, Vector &axis,
                           float &halfSpan) const;
 
+    // Physical hull-safe opening for an edge. The generated NAV midpoint is
+    // not reliable when the mesh and BSP disagree, so this probes the actual
+    // world geometry and returns a finite clear band when one exists. The
+    // result is cached per mesh/edge and invalidated when dynamic geometry
+    // changes. TESTING_NATIVE builds use the merged NAV opening as a fallback.
+    bool  GetPhysicalPortal(int fromIdx, int toIdx, Vector &center,
+                            float &halfSpan) const;
+    bool  GetPhysicalPortal(int fromIdx, int toIdx, Vector &center,
+                            Vector &axis, float &halfSpan) const;
+
+    // Physical floor-height difference at a walk seam. Returns false when the
+    // edge is not a walk edge or the seam cannot be resolved.
+    bool  GetPhysicalStep(int fromIdx, int toIdx, float &stepHeight) const;
+
+    // True when a walk edge is a single-file opening, or when a drop/jump
+    // edge is narrower than the transition threshold. This replaces the old
+    // map-specific tight/east-door edge lists.
+    bool  IsTightEdge(int fromIdx, int toIdx) const;
+
     // Returns the typed ladder edge between two path areas. Ordinary shared-
     // edge connections return false. 'up' is true when traversing bottom->top.
     bool  GetLadderConnection(int fromIdx, int toIdx, int &ladderIdx, bool &up) const;
@@ -311,6 +342,7 @@ public:
     bool  GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
                                 Vector &landing, Vector &axis,
                                 float &halfSpan) const;
+    float TraceFloorZ(int areaIdx, float x, float y, float fromZ = 0.0f) const;
     bool  GetTransitionWaypoint(int fromIdx, int toIdx, const Vector &pos,
                                 NavTransitionWaypoint &out) const;
 
@@ -391,6 +423,22 @@ private:
     NavFixupRecord *m_fixups;
     int             m_fixupCount;
 
+    // Cached physical-edge probes. A closed door, moving prop, or destroyed
+    // breakable changes the state signature and forces a fresh sweep.
+    struct PhysicalPortalEntry
+    {
+        unsigned int mapHash;
+        int fromIdx, toIdx;
+        float sampleTime;
+        unsigned int stateSignature;
+        bool valid;
+        bool tight;
+        Vector center, axis;
+        float halfSpan;
+    };
+    mutable PhysicalPortalEntry m_physicalPortalCache[1024];
+    unsigned int m_mapHash;
+
     NavSearchContext m_searchContext;
     bool             m_searchBusy;
 
@@ -420,6 +468,7 @@ private:
     bool LoadInPlace(const char *path);
     void ClearFixups();
     void TakeState(CNavMesh &source);
+    void ResetPhysicalPortalCache();
     float EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const;
     bool SccReachable(int fromScc, int toScc) const;
     NavSearchResult SearchWithContext(int startIdx, int goalIdx, int seed,

@@ -100,51 +100,7 @@ float xyd(const Vector &a, const Vector &b)
     return sqrtf(dx * dx + dy * dy);
 }
 
-bool IsHadithaMapName(const char *name)
+bool IsTightEdge(int fromIdx, int toIdx)
 {
-    // Keep the original map-name recognition as a fallback.  The fixup sidecar
-    // adds data-driven edges, but a missing sidecar must not silently disable
-    // the entire Haditha door controller.
-    if (name && (!_stricmp(name, "ins_haditha") ||
-                 !_stricmp(name, "ins_haditha_night")))
-        return true;
-    return g_NavMesh.HasFixupKind(NAV_FIXUP_TIGHT_EDGE);
-}
-
-bool IsHadithaTightDoorEdge(int fromIdx, int toIdx)
-{
-    if (g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx))
-        return true;
-    if (!IsHadithaMapName(g_Bots.m_mapname)) return false;
-
-    const NavAreaData *from = g_NavMesh.Area(fromIdx);
-    const NavAreaData *to = g_NavMesh.Area(toIdx);
-    if (!from || !to) return false;
-    unsigned int a = from->id, b = to->id;
-    return (a == 800  && b == 464)  || (a == 464  && b == 800)
-        || (a == 464  && b == 3274) || (a == 3274 && b == 464)
-        || (a == 3274 && b == 235)  || (a == 235  && b == 3274)
-        || (a == 464  && b == 3321)
-        || (a == 3321 && b == 463);
-}
-
-bool IsHadithaEastDoorEdge(int fromIdx, int toIdx)
-{
-    if (g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx))
-        return true;
-    if (!IsHadithaMapName(g_Bots.m_mapname)) return false;
-
-    const NavAreaData *from = g_NavMesh.Area(fromIdx);
-    const NavAreaData *to = g_NavMesh.Area(toIdx);
-    if (!from || !to) return false;
-    unsigned int a = from->id, b = to->id;
-    // The old Haditha mesh routes through a seam of 25u tiles before the
-    // 3295/3315 pair.  Treat the whole chain as the same east-door choke.
-    return (a == 463  && b == 3289) || (a == 3289 && b == 463)
-        || (a == 3289 && b == 3319) || (a == 3319 && b == 3289)
-        || (a == 3319 && b == 3293) || (a == 3293 && b == 3319)
-        || (a == 3293 && b == 3315) || (a == 3315 && b == 3293)
-        || (a == 3295 && b == 3315) || (a == 3315 && b == 3295)
-        || (a == 3295 && b == 320)  || (a == 320  && b == 3295)
-        || (a == 3315 && b == 320)  || (a == 320  && b == 3315);
+    return g_NavMesh.IsTightEdge(fromIdx, toIdx);
 }

@@ -678,10 +678,10 @@ int CObjectives::PickGoal(int team, const Vector &botPos, int curGoal, float agg
 
     // ATTACK TARGET = the nearest eligible enemy/neutral objective to our own
     // HOME. With a nav mesh loaded, "nearest" is measured by actual nav path
-    // cost so a straight-line-close objective on another floor (Haditha's
-    // lower basement, roof-only areas) is not picked over a longer but
-    // reachable route. Falls back to straight-line distance when the mesh is
-    // unavailable or an objective has no nav area.
+    // cost so a straight-line-close objective on another floor (lower
+    // basement, roof-only areas) is not picked over a longer but reachable
+    // route. Falls back to straight-line distance when the mesh is unavailable
+    // or an objective has no nav area.
     Vector ref = (m_homeSamples[team] > 0) ? m_home[team] : botPos;
     int atkTarget = -1; float bestKey = 3.4e38f;
     int startArea = g_NavMesh.IsLoaded() ? g_NavMesh.FindArea(ref) : -1;

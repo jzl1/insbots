@@ -1610,7 +1610,6 @@ void CBotRoster::InvalidateNavMeshState(bool reloadSucceeded)
 {
     ResetSniperCaches();
     ResetLadderQueues();
-    ResetHadithaDoorGate();
     InvalidateAdvanceTargets();
     InsBots_ResetPhysicalPortalCache();
     InsBots_ResetPortalTransit();
@@ -1641,6 +1640,16 @@ void CBotRoster::InvalidateNavMeshState(bool reloadSucceeded)
     }
 }
 
+void CBotRoster::InvalidateAdvanceTargets()
+{
+    for (int i = 0; i < 64; i++)
+    {
+        if (!m_bots[i].m_inUse) continue;
+        m_bots[i].m_haveAdvanceTarget = false;
+        m_bots[i].m_advanceTargetRefresh = 0.0f;
+    }
+}
+
 void CBotRoster::LevelInit(const char *mapname)
 {
     _snprintf(m_mapname, sizeof(m_mapname), "%s", mapname ? mapname : "");
@@ -1661,7 +1670,6 @@ void CBotRoster::LevelInit(const char *mapname)
     m_captureUpdateTime[0] = m_captureUpdateTime[1] = m_captureUpdateTime[2] = -999.0f;
     m_captureRefillTime[0] = m_captureRefillTime[1] = m_captureRefillTime[2] = -999.0f;
     m_captureTarget[0] = m_captureTarget[1] = m_captureTarget[2] = -1;
-    ResetHadithaDoorGate();
     ResetSniperCaches();
     InsBots_ResetPhysicalPortalCache();
     InsBots_ResetPortalTransit();
@@ -1958,7 +1966,6 @@ void CBotRoster::LevelShutdown()
     ResetBodyGracePlayers(true);
     ResetLadderQueues();
     HearingReset();
-    ResetHadithaDoorGate();
     ResetSniperCaches();
     InsBots_ResetPhysicalPortalCache();
     InsBots_ResetPortalTransit();

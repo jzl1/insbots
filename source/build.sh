@@ -44,7 +44,6 @@ compile src/bot/bot_cover.cpp
 compile src/bot/bot_core.cpp
 compile src/bot/bot_perceive.cpp
 compile src/bot/bot_roster.cpp
-compile src/bot/bot_haditha.cpp
 compile src/bot/bot_ladder.cpp
 compile src/bot/bot_body.cpp
 compile src/bot/bot_steer.cpp
@@ -61,7 +60,7 @@ echo "LINK insbots.dll"
 $LINK /dll /machine:x86 /nodefaultlib \
   "/entry:_DllMainCRTStartup" \
   /out:$OUT/insbots.dll \
-  $OUT/crt_stub.obj $OUT/sdk_glue.obj $OUT/cfgvar.obj $OUT/nav.obj $OUT/objective.obj $OUT/voice.obj $OUT/profile.obj $OUT/bot_util.obj $OUT/bot_entry.obj $OUT/bot_loadout.obj $OUT/bot_cover.obj $OUT/bot_core.obj $OUT/bot_perceive.obj $OUT/bot_roster.obj $OUT/bot_haditha.obj $OUT/bot_ladder.obj $OUT/bot_body.obj $OUT/bot_steer.obj $OUT/bot_recover.obj $OUT/bot_doorway.obj $OUT/bot_path.obj $OUT/bot_weapons.obj $OUT/bot_squad.obj $OUT/bot_think.obj $OUT/insbots.obj $OUT/convar.obj \
+  $OUT/crt_stub.obj $OUT/sdk_glue.obj $OUT/cfgvar.obj $OUT/nav.obj $OUT/objective.obj $OUT/voice.obj $OUT/profile.obj $OUT/bot_util.obj $OUT/bot_entry.obj $OUT/bot_loadout.obj $OUT/bot_cover.obj $OUT/bot_core.obj $OUT/bot_perceive.obj $OUT/bot_roster.obj $OUT/bot_ladder.obj $OUT/bot_body.obj $OUT/bot_steer.obj $OUT/bot_recover.obj $OUT/bot_doorway.obj $OUT/bot_path.obj $OUT/bot_weapons.obj $OUT/bot_squad.obj $OUT/bot_think.obj $OUT/insbots.obj $OUT/convar.obj \
   $SDK/lib/public/tier0.lib $SDK/lib/public/vstdlib.lib \
   $OUT/msvcrt.lib
 

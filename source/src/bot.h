@@ -712,8 +712,6 @@ bool   m_chosenCoverIsLow;  // true if accepted cover is low-only (crate/sandbag
                           int *failureReason = 0,
                           bool expandForward = false); // full-hull warp past a bad link
     void  OnRelocated(const char *reason); // unified state reset after any teleport
-    bool  TransferHadithaDoor(float now); // semaphore owner: safe hop over verified 464->3321 gap
-    bool  TransferHadithaEastDoor(float now); // stalled leader: safe hop from id3295/3315 into id320
     bool  TeammateBlockingPath(const Vector &pos, int toArea) const;
     // vehicle-avoidance steering (bot_steer.cpp)
     bool  SteerAroundVehicle(float moveYaw, float viewYaw,
@@ -768,12 +766,6 @@ public:
         m_captureUpdateTime[0] = m_captureUpdateTime[1] = m_captureUpdateTime[2] = -999.0f;
         m_captureRefillTime[0] = m_captureRefillTime[1] = m_captureRefillTime[2] = 0.0f;
         m_captureTarget[0] = m_captureTarget[1] = m_captureTarget[2] = -1;
-        m_hadithaDoorOwner = 0;
-        m_hadithaDoorOwnerSince = 0.0f;
-        m_hadithaDoorProgressPos = Vector(0, 0, 0);
-        m_hadithaDoorProgressTime = 0.0f;
-        m_hadithaDoorClearUntil = 0.0f;
-        m_hadithaDoorCommitted = false;
         for (int i = 0; i < 10000; i++)
         {
             m_ladderQueues[i].ownerSlot = 0;
@@ -865,9 +857,6 @@ public:
     bool     IsLadderOwner(const CInsBot *bot, int ladderIdx) const;
     void     ReleaseLadder(CInsBot *bot, int ladderIdx, bool completed);
     void     ResetLadderQueues();
-    bool     ControlHadithaDoor(CInsBot *bot, const Vector &pos, float now,
-                                float viewYaw, float &fwd, float &side);
-    void     ResetHadithaDoorGate();
     void     InvalidateAdvanceTargets();
     void     InvalidateNavMeshState(bool reloadSucceeded);
     void     ResetSniperCaches();
@@ -952,12 +941,6 @@ float   *m_coverOwnedSince;
     float    m_captureUpdateTime[3];  // per-team throttle for target refresh (1s)
     float    m_captureRefillTime[3];  // per-team throttle for refilling slots (0.25s)
     int      m_captureTarget[3];      // per-team cached active capture objective
-    int      m_hadithaDoorOwner;      // roster slot + 1; one bot owns the physical throat
-    float    m_hadithaDoorOwnerSince; // acquisition time for stalled-owner recovery
-    Vector   m_hadithaDoorProgressPos;// independent physical-progress sample for the owner
-    float    m_hadithaDoorProgressTime;// continuous owner no-progress start
-    float    m_hadithaDoorClearUntil; // clearance interval before handing off
-    bool     m_hadithaDoorCommitted;  // owner reached staging line and began straight commit
     LadderQueueState m_ladderQueues[10000];
     SniperObjectiveCache m_sniperCache[3][INSBOT_SNIPER_OBJECTIVES];
     int      m_sniperCacheTeamCursor;

@@ -42,9 +42,9 @@ extern CfgVar                insbot_move_speed;
 
 // Vertical tolerance used to decide the bot has reached a ladder's recorded
 // lip.  The raw lip is a brush-AABB value that the player hull frequently
-// cannot occupy: the landing floor can sit ABOVE it (haditha ladder idx 4:
-// lip 75.0, floor 77.0), and even when the two align there is a residual
-// settle gap.  Measured shortfalls at the top of a completed climb were
+// cannot occupy: the landing floor can sit above it, and even when the two
+// align there is a residual settle gap. Measured shortfalls at the top of a
+// completed climb were
 // 2.4u-3.1u, so a zero-tolerance test never fires on ascent and the bot
 // thrashes in RECOVERY forever.
 //
@@ -56,8 +56,8 @@ extern CfgVar                insbot_move_speed;
 // flips the phase back to ATTACHED: latch / sag / re-attach, forever.
 //
 // That guard is measured from endHeight, NOT from the latch point, so the
-// tolerance spends the guard's budget directly.  Measured on haditha ladder 4
-// (lip 75.0, landing floor 77.0), lost-height events per segment:
+// tolerance spends the guard's budget directly. Measured on a ladder whose
+// landing floor sits 2u above its recorded lip, lost-height events per segment:
 //   tol 0/2/4/6 -> 0 events      tol 8 -> 8 events      tol 16 -> 33 events
 // and an independent 240s run at tol 12 produced 43 latches with 38 of them
 // reverting (observed sagging from a z=63.5 latch down to z=56.0, i.e. just
@@ -68,10 +68,10 @@ extern CfgVar                insbot_move_speed;
 // 12u of headroom.  Raising it requires re-running the sweep - the earlier
 // uncapped/16u ceiling let an admin re-create the loop.
 //
-// Not every ladder is fixed by this: on haditha, ladders 0 and 1 fail an
-// earlier XY gate in PositionOnLadderLanding() (the ladder top sits outside
-// the landing NAV area's XY rect) and never reach this test at all.  Their
-// residual lost-height retries are a navmesh problem, not a tolerance one.
+// Not every ladder is fixed by this: some fail an earlier XY gate in
+// PositionOnLadderLanding() because the ladder top sits outside the landing
+// NAV area's XY rectangle. Their residual lost-height retries are a navmesh
+// problem, not a tolerance one.
 float LadderLipTol()
 {
     float tol = insbot_ladder_lip_tol.GetFloat();
