@@ -468,6 +468,8 @@ private:
     void ClearFixups();
     void TakeState(CNavMesh &source);
     void ResetPhysicalPortalCache();
+    PhysicalPortalEntry &ResolvePhysicalPortalCacheEntry(unsigned int key,
+                                                         int fromIdx, int toIdx) const;
     float EdgeCost(int fromIdx, int toIdx, int connSlot, int seed) const;
     bool SccReachable(int fromScc, int toScc) const;
     NavSearchResult SearchWithContext(int startIdx, int goalIdx, int seed,

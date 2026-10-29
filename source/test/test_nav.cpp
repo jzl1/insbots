@@ -667,6 +667,34 @@ int main(){
   CNavMesh mc;
   if (!mc.Load(chainPath)) { printf("FAIL: chain load\n"); return 1; }
   if (mc.Count() != CHAIN) { printf("FAIL: chain count\n"); return 1; }
+  // Physical-portal cache associativity: two unrelated edges that hash to
+  // the same direct-mapped bucket must retain independent cached results.
+  {
+      CNavMesh cacheMesh;
+      // These indices have the same low 10-bit XOR hash, independent of the
+      // map hash (both map to bucket 384).
+      const int fromA = 1, toA = 3, fromB = 939, toB = 1;
+      if (((((unsigned int)fromA * 73856093u) ^ ((unsigned int)toA * 19349663u)) & 1023u)
+          != ((((unsigned int)fromB * 73856093u) ^ ((unsigned int)toB * 19349663u)) & 1023u))
+      { printf("FAIL: cache-collision fixture has unequal keys\n"); return 1; }
+      const unsigned int keyA = cacheMesh.m_mapHash
+                              ^ ((unsigned int)fromA * 73856093u)
+                              ^ ((unsigned int)toA * 19349663u);
+      const unsigned int keyB = keyA;
+      CNavMesh::PhysicalPortalEntry &entryA =
+          cacheMesh.ResolvePhysicalPortalCacheEntry(keyA, fromA, toA);
+      entryA.valid = true; entryA.fromIdx = fromA; entryA.toIdx = toA;
+      CNavMesh::PhysicalPortalEntry &entryB =
+          cacheMesh.ResolvePhysicalPortalCacheEntry(keyB, fromB, toB);
+      entryB.valid = true; entryB.fromIdx = fromB; entryB.toIdx = toB;
+      if (&entryA == &entryB)
+      { printf("FAIL: colliding physical-portal edges share one cache entry\n"); return 1; }
+      CNavMesh::PhysicalPortalEntry &retainedA =
+          cacheMesh.ResolvePhysicalPortalCacheEntry(keyA, fromA, toA);
+      if (!retainedA.valid || retainedA.fromIdx != fromA || retainedA.toIdx != toA)
+      { printf("FAIL: colliding physical-portal edges evict each other\n"); return 1; }
+      printf("VERIFIED: colliding physical-portal cache entries remain independent\n");
+  }
   {
       int buf[512];
       bool truncated = false;

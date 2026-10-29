@@ -277,6 +277,30 @@ void CNavMesh::ResetPhysicalPortalCache()
     }
 }
 
+CNavMesh::PhysicalPortalEntry &CNavMesh::ResolvePhysicalPortalCacheEntry(
+    unsigned int key, int fromIdx, int toIdx) const
+{
+    // Four-way set associativity retains several unrelated edges that share
+    // a hash bucket. The direct-mapped cache repeatedly evicted alternating
+    // path edges, forcing full hull sweeps even while their geometry was
+    // unchanged. Keep the same 1024-entry memory budget and use the oldest
+    // sample as the deterministic replacement victim.
+    int base = (int)(key & 1023u) & ~3;
+    int oldest = base;
+    for (int way = 0; way < 4; way++)
+    {
+        PhysicalPortalEntry &entry = m_physicalPortalCache[base + way];
+        if (entry.valid && entry.mapHash == m_mapHash
+            && entry.fromIdx == fromIdx && entry.toIdx == toIdx)
+            return entry;
+        if (!entry.valid || entry.mapHash != m_mapHash)
+            return entry;
+        if (entry.sampleTime < m_physicalPortalCache[oldest].sampleTime)
+            oldest = base + way;
+    }
+    return m_physicalPortalCache[oldest];
+}
+
 void CNavMesh::Free()
 {
     InvalidateCostCache();
@@ -2268,7 +2292,7 @@ bool CNavMesh::GetPhysicalPortal(int fromIdx, int toIdx, Vector &center,
 
     unsigned int key = m_mapHash ^ ((unsigned int)fromIdx * 73856093u)
                                  ^ ((unsigned int)toIdx * 19349663u);
-    PhysicalPortalEntry &cached = m_physicalPortalCache[key & 1023u];
+    PhysicalPortalEntry &cached = ResolvePhysicalPortalCacheEntry(key, fromIdx, toIdx);
     float now = gpGlobals ? gpGlobals->curtime : 0.0f;
     const unsigned int stateSignature =
         NavPhysicalPortalStateSignature(*this, fromIdx, toIdx);
