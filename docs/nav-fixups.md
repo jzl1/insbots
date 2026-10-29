@@ -31,17 +31,20 @@ Blank lines and `#` comments are allowed. Each data line is one of:
 
 ```
 edge tight <fromAreaId> <toAreaId>
-edge east <fromAreaId> <toAreaId>
 transition <fromAreaId> <toAreaId> [takeoff <x> <y> <z>] [landing <x> <y> <z>]
+area avoid <areaId>
 ```
 
 `tight` marks approach edges that need the conservative doorway gate.
-`east` marks the east-room choke edges. `transition` supplies optional
-takeoff and landing hints for a separated drop; if both hints are present they
-override the generic transition geometry. Area IDs must exist in the loaded
-mesh. The parser is strict: an unknown keyword, invalid ID, incomplete hint,
-or missing header discards the entire sidecar rather than applying a partial
-set.
+`transition` supplies optional takeoff and landing hints for a separated drop;
+if both hints are present they override the generic transition geometry.
+`area avoid` marks an area to be routed around when possible. Area IDs must
+exist in the loaded mesh. The parser is strict: an unknown keyword, invalid
+ID, incomplete hint, or missing header discards the entire sidecar rather than
+applying a partial set.
+
+Legacy `edge east <fromAreaId> <toAreaId>` lines are accepted and ignored so
+sidecars authored for older releases keep loading.
 
 ## Authoring and validation
 
@@ -53,5 +56,5 @@ set.
 5. Run `test_nav` and `grid_stress` for the map; a malformed sidecar must
    leave generic behavior intact.
 
-The shipped examples are under `source/navfixups/`. Copy the matching file to
-the game's `addons/insbots_nav/` directory with the `.nav.fixups` suffix.
+No example sidecars are bundled. Author one from the format above and place it
+next to the loaded NAV mesh with the `.nav.fixups` suffix.

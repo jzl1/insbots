@@ -38,11 +38,11 @@
 // Defined in turret.cpp; insbots.cpp reads it to drive the freeze window.
 extern CfgVar insbot_turret_freeze_fallback;
 
-#define INSBOTS_VERSION_NUM "0.21.1"
+#define INSBOTS_VERSION_NUM "0.21.2"
 #ifdef BUILD_TIMESTAMP
-#define INSBOTS_VERSION "0.21.1 (" BUILD_TIMESTAMP ")"
+#define INSBOTS_VERSION "0.21.2 (" BUILD_TIMESTAMP ")"
 #else
-#define INSBOTS_VERSION "0.21.1 (" __DATE__ " " __TIME__ ")"
+#define INSBOTS_VERSION "0.21.2 (" __DATE__ " " __TIME__ ")"
 #endif
 
 // ---- engine/game interface pointers ----------------------------------------

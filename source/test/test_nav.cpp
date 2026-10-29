@@ -585,10 +585,9 @@ int main(){
                   "edge east 2 3\n"
                   "transition 1 2 takeoff 10 20 30 landing 40 50 60\n");
       fclose(fx);
-      int id1 = m.IndexOfId(1), id2 = m.IndexOfId(2), id3 = m.IndexOfId(3);
+      int id1 = m.IndexOfId(1), id2 = m.IndexOfId(2);
       if (!m.LoadFixups(fixupPath) || !m.HasFixupKind(NAV_FIXUP_TIGHT_EDGE)
-          || !m.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, id1, id2)
-          || !m.HasFixupEdge(NAV_FIXUP_EAST_EDGE, id2, id3))
+          || !m.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, id1, id2))
       { printf("FAIL: valid fixup parsing\n"); return 1; }
       Vector fixTakeoff, fixLanding;
       if (!m.GetFixupTransition(id1, id2, fixTakeoff, fixLanding)

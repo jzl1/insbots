@@ -422,7 +422,7 @@ bool CNavMesh::LoadFixups(const char *path)
         if (sscanf(p, "edge %31s %u %u", kindName, &fromId, &toId) == 3)
         {
             if (!strcmp(kindName, "tight")) kind = NAV_FIXUP_TIGHT_EDGE;
-            else if (!strcmp(kindName, "east")) kind = NAV_FIXUP_EAST_EDGE;
+            else if (!strcmp(kindName, "east")) continue; // legacy no-op
             else valid = false;
         }
         else if (sscanf(p, "area avoid %u", &fromId) == 1)

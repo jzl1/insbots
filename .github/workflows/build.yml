@@ -14,9 +14,9 @@ on:
         default: false
         type: boolean
       release_tag:
-        description: 'Release Tag (default: v0.21.1)'
+        description: 'Release Tag (default: v0.21.2)'
         required: false
-        default: 'v0.21.1'
+        default: 'v0.21.2'
         type: string
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then
             TAG="${{ inputs.release_tag }}"
           else
-            TAG="v0.21.1_${TIMESTAMP}"
+            TAG="v0.21.2_${TIMESTAMP}"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
@@ -220,13 +220,12 @@ jobs:
           prerelease: ${{ inputs.is_prerelease }}
           make_latest: true
           body: |
-            ### What's New in v0.21.1:
-            * **Faster Nav Loading & Search:** Flat edge storage, area-ID lookup maps, and a tuned spatial grid cut Sinjar load time from roughly 976 ms to under 20 ms, while shared A* search and per-instance scratch contexts reduce allocation and contention.
-            * **More Reliable Navigation:** Transactional mesh loading, component rejection, deterministic area lookup ties, loader hardening, and reachable-area fallback prevent failed reloads, stale caches, and wasted searches.
-            * **Typed Portal & Transition Geometry:** Walk, ladder, jump, drop, and malformed edges are classified explicitly; split doorway slices merge into a single opening, and virtual approach geometry preserves the correct source-floor Z.
-            * **Width-Aware Routing:** `avoid_narrow` (default 50) softly penalizes 32-99u openings, helping bots avoid single-file doorways without making narrow routes unreachable.
-            * **Map Fixups:** Per-map `.nav.fixups` sidecars support tight-edge and separated-transition corrections, with Haditha and Haditha Night shipped as examples.
-            * **Native Regression Coverage:** Expanded tests cover cache invalidation, component rejection, portal/drop geometry, virtual approach Z, `NO_JUMP`, transactional reload, and narrow-portal routing.
+            ### What's New in v0.21.2:
+            * **Generic Physical Transitions:** Step, jump, drop, transition, and landing geometry now resolve from physical portals and floor traces instead of NAV elevation deltas. Stairs keep NAV surface height as the primary reference, with floor tracing used only when the NAV value is out of tolerance.
+            * **Haditha Special Cases Removed:** The Haditha-specific steering module and both bundled Haditha nav-fixup sidecars are gone; the optional sidecar system remains. Basement-gate, tunnel, and drop behavior now comes from the shared navigation and steering code, so other maps get the same handling.
+            * **Tunnel & Doorway Stability:** Runway staging now derives its heading from the current waypoint before probing, and drop approaches keep their 28u staging point only when it is safely ahead. This eliminates the portal ping-pong that could trap bots at tunnel transitions and drop lips.
+            * **Stronger Stuck Recovery:** Teleport recovery targets physical portals and searches a deterministic 5x5 hull-safe destination grid. Stuck bots reroute before teleporting, and reference-counted body-grace leases let crowded bots separate without pinning each other.
+            * **Scoped Low-Ceiling Handling:** Ducking now uses a forward overhang trace instead of NAV CROUCH flags, so bots no longer crouch through every flagged corridor while still ducking under real low ceilings.
 
           files: |
             release_assets/insbots-windows-x86.zip

@@ -189,7 +189,7 @@ static Vector PortalEdgeAxis(const NavAreaData *from, const NavAreaData *to)
 
 // Resolve one NAV edge to its physical opening. Walk edges require a
 // full-hull-verified finite band; drops use the typed transition geometry.
-// No sidecar/fixup data is consulted here.
+// Sidecar fixups can override drop hints and unresolved narrow walk edges.
 static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &out)
 {
     memset(&out, 0, sizeof(out));
