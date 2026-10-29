@@ -250,9 +250,6 @@ Vector ObjectiveCornerHoldPoint(const ObjPoint *op, const Vector &entry, int ord
 float  OpenHoldYaw(const Vector &pos, float preferredYaw);
 bool   PositionOnLadderLanding(int areaIdx, const Vector &pos);
 bool   WalkEdgeNeedsJump(int fromIdx, int toIdx);
-bool   ProbePhysicalPortal(int fromIdx, int toIdx,
-                           Vector *safeCenter, float *safeHalfSpan);
-
 // ---- doorway (bot_doorway.cpp) ---------------------------------------------
 bool HasDoorwayLineOfSight(const Vector &from, const Vector &to);
 

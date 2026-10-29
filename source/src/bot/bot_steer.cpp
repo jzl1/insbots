@@ -202,31 +202,6 @@ static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &ou
 
     NavEdgeMeta meta;
     bool haveMeta = g_NavMesh.GetEdgeMeta(fromIdx, toIdx, meta);
-    // A verified east-door edge is a flat narrow portal in the map even when
-    // the generated mesh carries a bogus elevation delta. Treat the sidecar
-    // classification as authoritative so bots do not jump into the frame.
-    if (haveMeta && meta.valid
-        && g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx)
-        && meta.halfSpan > 0.0f && meta.halfSpan < 40.0f)
-    {
-        float nx = meta.normalX;
-        float ny = meta.normalY;
-        float len = sqrtf(nx * nx + ny * ny);
-        if (len < 0.5f)
-        {
-            nx = to->center.x - from->center.x;
-            ny = to->center.y - from->center.y;
-            len = sqrtf(nx * nx + ny * ny);
-        }
-        if (len < 0.5f) return false;
-        out.entry = Vector(meta.midX, meta.midY, meta.midZ);
-        out.normal = Vector(nx / len, ny / len, 0.0f);
-        out.exit = out.entry + out.normal * 40.0f;
-        PortalClampToArea(toIdx, out.exit, 8.0f);
-        out.axis = Vector(meta.axisX, meta.axisY, 0.0f);
-        out.halfSpan = meta.halfSpan;
-        return true;
-    }
     if (haveMeta && meta.valid && meta.kind == NAV_EDGE_DROP)
     {
         // A mapper-authored transition is authoritative for the physical
@@ -282,26 +257,46 @@ static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &ou
 
     if (haveMeta && meta.valid && meta.kind == NAV_EDGE_JUMP)
     {
-        if (meta.halfSpan <= 0.0f || meta.halfSpan >= 40.0f) return false;
-        float dx = to->center.x - from->center.x;
-        float dy = to->center.y - from->center.y;
-        float len = sqrtf(dx * dx + dy * dy);
-        if (len < 0.5f) return false;
-        out.entry = Vector(meta.midX, meta.midY, meta.midZ);
-        out.normal = Vector(dx / len, dy / len, 0.0f);
+        Vector center;
+        Vector axis;
+        float halfSpan = 0.0f;
+        if (!g_NavMesh.GetPhysicalPortal(fromIdx, toIdx, center, axis,
+                                         halfSpan))
+        {
+            center = Vector(meta.midX, meta.midY, meta.midZ);
+            axis = Vector(meta.axisX, meta.axisY, 0.0f);
+            halfSpan = meta.halfSpan;
+        }
+        if (halfSpan <= 0.0f || halfSpan >= 40.0f) return false;
+        float nx = axis.y;
+        float ny = -axis.x;
+        float nlen = sqrtf(nx * nx + ny * ny);
+        if (nlen < 0.5f) return false;
+        nx /= nlen; ny /= nlen;
+        Vector travel = to->center - from->center;
+        if (travel.x * nx + travel.y * ny < 0.0f)
+        {
+            nx = -nx;
+            ny = -ny;
+        }
+        out.entry = center;
+        out.normal = Vector(nx, ny, 0.0f);
         out.exit = out.entry + out.normal * 40.0f;
         PortalClampToArea(toIdx, out.exit, 8.0f);
-        out.axis = Vector(meta.axisX, meta.axisY, 0.0f);
-        out.halfSpan = meta.halfSpan;
-        out.jump = true;
+        out.axis = axis;
+        out.halfSpan = halfSpan;
+        out.jump = WalkEdgeNeedsJump(fromIdx, toIdx);
         return true;
     }
 
     Vector center;
+    Vector physicalAxis;
     float halfSpan = 0.0f;
     Vector mergedAxis;
     bool haveMergedAxis = false;
-    if (!ProbePhysicalPortal(fromIdx, toIdx, &center, &halfSpan))
+    bool havePhysicalAxis = g_NavMesh.GetPhysicalPortal(
+        fromIdx, toIdx, center, physicalAxis, halfSpan);
+    if (!havePhysicalAxis)
     {
         // Some real 50u openings sit in an open room and fail the side-wall
         // probe. The merged NAV opening is still narrower than two 32u hulls;
@@ -329,8 +324,7 @@ static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &ou
         if (halfSpan <= 0.0f
             && haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK
             && meta.halfSpan > 0.0f && meta.halfSpan < 40.0f
-            && (g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx)
-                || g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx)))
+            && g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx))
         {
             center = Vector(meta.midX, meta.midY, meta.midZ);
             halfSpan = meta.halfSpan;
@@ -342,8 +336,7 @@ static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &ou
     if ((halfSpan <= 0.0f || halfSpan >= 40.0f)
         && haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK
         && meta.halfSpan > 0.0f && meta.halfSpan < 40.0f
-        && (g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx)
-            || g_NavMesh.HasFixupEdge(NAV_FIXUP_EAST_EDGE, fromIdx, toIdx)))
+        && g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE, fromIdx, toIdx))
     {
         center = Vector(meta.midX, meta.midY, meta.midZ);
         halfSpan = meta.halfSpan;
@@ -352,19 +345,40 @@ static bool GetTransitEdgeInfo(int fromIdx, int toIdx, PortalTransitEdgeInfo &ou
     }
     if (halfSpan <= 0.0f || halfSpan >= 40.0f) return false;
 
-    float dx = to->center.x - from->center.x;
-    float dy = to->center.y - from->center.y;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len < 0.5f) return false;
+    float nx = 0.0f, ny = 0.0f;
+    if (havePhysicalAxis)
+    {
+        nx = physicalAxis.y;
+        ny = -physicalAxis.x;
+    }
+    else if (haveMergedAxis)
+    {
+        nx = mergedAxis.y;
+        ny = -mergedAxis.x;
+    }
+    else
+    {
+        nx = to->center.x - from->center.x;
+        ny = to->center.y - from->center.y;
+    }
+    float nlen = sqrtf(nx * nx + ny * ny);
+    if (nlen < 0.5f) return false;
+    nx /= nlen; ny /= nlen;
+    Vector travel = to->center - from->center;
+    if (travel.x * nx + travel.y * ny < 0.0f)
+    {
+        nx = -nx;
+        ny = -ny;
+    }
     out.entry = center;
-    out.normal = Vector(dx / len, dy / len, 0.0f);
+    out.normal = Vector(nx, ny, 0.0f);
     out.exit = out.entry + out.normal * 40.0f;
     PortalClampToArea(toIdx, out.exit, 8.0f);
-    out.axis = haveMergedAxis ? mergedAxis : PortalEdgeAxis(from, to);
+    out.axis = havePhysicalAxis ? physicalAxis
+             : haveMergedAxis ? mergedAxis : PortalEdgeAxis(from, to);
     out.halfSpan = halfSpan;
-    if (haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK
-        && meta.zDelta > 12.0f)
-        out.jump = true;
+    if (haveMeta && meta.valid && meta.kind == NAV_EDGE_WALK)
+        out.jump = WalkEdgeNeedsJump(fromIdx, toIdx);
     return true;
 }
 
@@ -3356,9 +3370,8 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
             if (m_spawnNoCollideActive || HasBodyNoCollide())
             {
                 bool keepAlignment = m_pathCursor > 0
-                    && g_NavMesh.HasFixupEdge(NAV_FIXUP_TIGHT_EDGE,
-                                              m_path[m_pathCursor - 1],
-                                              m_path[m_pathCursor]);
+                    && IsTightEdge(m_path[m_pathCursor - 1],
+                                   m_path[m_pathCursor]);
                 if (!keepAlignment) sourceTurn = false;
             }
             float immediateDx = immTarget.x - pos.x;
@@ -3495,7 +3508,8 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                 // longer ducks bots while they stream through a passage; the
                 // LowCeilingAhead trace below only fires when a real overhang
                 // is within a few feet.
-                if ((cur->attributes & NAVATTR_JUMP) && canJump) buttons |= IN_JUMP;
+                if ((cur->attributes & NAVATTR_JUMP) && canJump)
+                    buttons |= IN_JUMP;
             }
             if (!ladderMove && LowCeilingAhead(mvYaw))
                 buttons |= IN_DUCK;
@@ -3516,15 +3530,6 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                         Vector seam;
                         if (!g_NavMesh.GetPortal(prevArea, m_path[m_pathCursor], seam))
                             edgeStep = m_moveTarget.z > pos.z + 12.0f;
-                    }
-                    if (!edgeStep && m_pathCursor > 0)
-                    {
-                        NavEdgeMeta jumpMeta;
-                        if (g_NavMesh.GetEdgeMeta(m_path[m_pathCursor - 1],
-                                                  m_path[m_pathCursor], jumpMeta)
-                            && jumpMeta.valid
-                            && jumpMeta.kind == NAV_EDGE_JUMP)
-                            edgeStep = true;
                     }
                 }
             }

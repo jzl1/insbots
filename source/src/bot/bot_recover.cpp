@@ -89,7 +89,11 @@ bool CInsBot::FindSafeTeleportSpot(int fromArea, int destArea,
 
     Vector base = da->center;
     Vector portal;
-    bool havePortal = g_NavMesh.GetPortal(fromArea, destArea, portal);
+    float physicalHalfSpan = 0.0f;
+    bool havePortal = g_NavMesh.GetPhysicalPortal(fromArea, destArea, portal,
+                                                  physicalHalfSpan);
+    if (!havePortal)
+        havePortal = g_NavMesh.GetPortal(fromArea, destArea, portal);
     if (havePortal)
     {
         base = portal;
@@ -142,8 +146,33 @@ bool CInsBot::FindSafeTeleportSpot(int fromArea, int destArea,
                 if (tryDest.x > maxX) tryDest.x = maxX;
                 if (tryDest.y < minY) tryDest.y = minY;
                 if (tryDest.y > maxY) tryDest.y = maxY;
-                tryDest.z = g_NavMesh.GetZ(destArea, tryDest.x, tryDest.y) + 8.0f;
+                tryDest.z = g_NavMesh.TraceFloorZ(destArea, tryDest.x,
+                                                  tryDest.y, pos.z) + 8.0f;
 
+                float dx = tryDest.x - pos.x, dy = tryDest.y - pos.y;
+                float dz = tryDest.z - pos.z;
+                if (dx * dx + dy * dy + dz * dz > 600.0f * 600.0f) continue;
+                if (!SafeStandSpot(tryDest, clearanceTiers[tier])) continue;
+                dest = tryDest;
+                return true;
+            }
+        }
+    }
+
+    // Add a deterministic 5x5 grid inside the destination area in addition to
+    // the portal-relative candidates above. It gives narrow or malformed
+    // landing areas a complete set of hull-safe samples.
+    for (int tier = 0; tier < tierCount; tier++)
+    {
+        for (int gy = 0; gy < 5; gy++)
+        {
+            for (int gx = 0; gx < 5; gx++)
+            {
+                float tx = minX + (maxX - minX) * (gx / 4.0f);
+                float ty = minY + (maxY - minY) * (gy / 4.0f);
+                Vector tryDest(tx, ty, 0.0f);
+                tryDest.z = g_NavMesh.TraceFloorZ(destArea, tx, ty, pos.z)
+                          + 8.0f;
                 float dx = tryDest.x - pos.x, dy = tryDest.y - pos.y;
                 float dz = tryDest.z - pos.z;
                 if (dx * dx + dy * dy + dz * dz > 600.0f * 600.0f) continue;

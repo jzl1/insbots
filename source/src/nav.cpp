@@ -2406,7 +2406,8 @@ bool CNavMesh::GetPhysicalPortal(int fromIdx, int toIdx, Vector &center,
     cached.tight = true;
     Vector physicalCenter = portal + axis * centerOff;
     physicalCenter.z = typedEdge
-                     ? GetZ(toIdx, physicalCenter.x, physicalCenter.y)
+                     ? TraceFloorZ(toIdx, physicalCenter.x, physicalCenter.y,
+                                   portal.z)
                      : sampleZ[(bestFirst + bestLast) / 2];
     cached.center = physicalCenter;
     cached.axis = axis;
@@ -2425,18 +2426,26 @@ bool CNavMesh::GetPhysicalStep(int fromIdx, int toIdx, float &stepHeight) const
     if (!from || !to) return false;
     NavEdgeMeta meta;
     if (!GetEdgeMeta(fromIdx, toIdx, meta) || !meta.valid
-        || meta.kind != NAV_EDGE_WALK)
+        || (meta.kind != NAV_EDGE_WALK && meta.kind != NAV_EDGE_JUMP))
         return false;
 
     Vector seam;
     Vector axis;
     float halfSpan = 0.0f;
-    if (!GetPortal(fromIdx, toIdx, seam)
-        && !GetPortalMerged(fromIdx, toIdx, seam, axis, halfSpan))
-        return false;
+    const bool havePhysical = GetPhysicalPortal(fromIdx, toIdx, seam, axis,
+                                                halfSpan);
+    if (!havePhysical)
+    {
+        // A JUMP edge without a physical opening is a real gap. Let the
+        // caller keep its jump behavior instead of treating it as a step.
+        if (meta.kind == NAV_EDGE_JUMP) return false;
+        if (!GetPortal(fromIdx, toIdx, seam)
+            && !GetPortalMerged(fromIdx, toIdx, seam, axis, halfSpan))
+            return false;
+    }
 
-    float nx = meta.normalX;
-    float ny = meta.normalY;
+    float nx = havePhysical ? axis.y : meta.normalX;
+    float ny = havePhysical ? -axis.x : meta.normalY;
     float nl = sqrtf(nx * nx + ny * ny);
     if (nl < 0.5f)
     {
@@ -2446,6 +2455,12 @@ bool CNavMesh::GetPhysicalStep(int fromIdx, int toIdx, float &stepHeight) const
     }
     if (nl < 0.5f) return false;
     nx /= nl; ny /= nl;
+    Vector travel = to->center - from->center;
+    if (travel.x * nx + travel.y * ny < 0.0f)
+    {
+        nx = -nx;
+        ny = -ny;
+    }
 
     Vector fromPoint = seam;
     fromPoint.x -= nx * 6.0f;
@@ -2522,7 +2537,7 @@ bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
     if (!from || !to) return false;
     NavEdgeMeta meta;
     if (!GetEdgeMeta(fromIdx, toIdx, meta) || !meta.valid
-        || meta.kind != NAV_EDGE_DROP || meta.zDelta >= -24.0f)
+        || meta.kind != NAV_EDGE_DROP)
         return false;
 
     float nx = meta.normalX;
@@ -2567,18 +2582,58 @@ bool CNavMesh::GetTransitionGeometry(int fromIdx, int toIdx, Vector &takeoff,
     else
         return false;
 
-    // Generic short-gap transition envelope: a real gap, narrow enough for one
-    // hull, with a meaningful drop.
-    if (gap <= 0.0f || gap > 64.0f) return false;
-    if (meta.halfSpan < 8.0f || meta.halfSpan >= 36.0f) return false;
+    Vector physicalCenter;
+    Vector physicalAxis;
+    float physicalHalfSpan = 0.0f;
+    const bool havePhysical = GetPhysicalPortal(fromIdx, toIdx, physicalCenter,
+                                                physicalAxis, physicalHalfSpan);
+    const float widthHalf = havePhysical && physicalHalfSpan > 0.0f
+                          ? physicalHalfSpan : meta.halfSpan;
 
-    takeoff.x = meta.midX;
-    takeoff.y = meta.midY;
+    // Generic short-gap transition envelope: a real gap, narrow enough for one
+    // hull, with a meaningful drop. When the physical probe found the opening,
+    // its floor data decides whether this is a transition; the generated NAV
+    // zDelta is only a fallback for maps without usable geometry.
+    if (!havePhysical && (gap <= 0.0f || gap > 64.0f)) return false;
+    if (widthHalf < 8.0f || widthHalf >= 36.0f) return false;
+
+    if (havePhysical)
+    {
+        takeoff.x = physicalCenter.x;
+        takeoff.y = physicalCenter.y;
+        float pnx = physicalAxis.y;
+        float pny = -physicalAxis.x;
+        float plen = sqrtf(pnx * pnx + pny * pny);
+        if (plen < 0.5f) return false;
+        pnx /= plen; pny /= plen;
+        Vector travel = to->center - from->center;
+        if (travel.x * pnx + travel.y * pny < 0.0f)
+        {
+            pnx = -pnx;
+            pny = -pny;
+        }
+        landing.x = physicalCenter.x + pnx * 6.0f;
+        landing.y = physicalCenter.y + pny * 6.0f;
+        if (takeoff.x < from->lo.x) takeoff.x = from->lo.x;
+        else if (takeoff.x > from->hi.x) takeoff.x = from->hi.x;
+        if (takeoff.y < from->lo.y) takeoff.y = from->lo.y;
+        else if (takeoff.y > from->hi.y) takeoff.y = from->hi.y;
+        if (landing.x < to->lo.x) landing.x = to->lo.x;
+        else if (landing.x > to->hi.x) landing.x = to->hi.x;
+        if (landing.y < to->lo.y) landing.y = to->lo.y;
+        else if (landing.y > to->hi.y) landing.y = to->hi.y;
+    }
+    else
+    {
+        takeoff.x = meta.midX;
+        takeoff.y = meta.midY;
+    }
     takeoff.z = TraceFloorZ(fromIdx, takeoff.x, takeoff.y, meta.midZ);
     landing.z = TraceFloorZ(toIdx, landing.x, landing.y, meta.midZ);
     if (takeoff.z - landing.z < 24.0f) return false;
-    axis = Vector(meta.axisX, meta.axisY, 0.0f);
-    halfSpan = meta.halfSpan;
+    axis = havePhysical ? physicalAxis
+                        : Vector(meta.axisX, meta.axisY, 0.0f);
+    halfSpan = widthHalf;
 
     // A sidecar transition records the physical takeoff and landing that were
     // verified against the map. Prefer it over the generated rectangle overlap,
@@ -2659,7 +2714,8 @@ bool CNavMesh::GetTransitionWaypoint(int fromIdx, int toIdx, const Vector &pos,
             if (out.point.y < from->lo.y) out.point.y = from->lo.y;
             else if (out.point.y > from->hi.y) out.point.y = from->hi.y;
         }
-        out.point.z = GetZ(fromIdx, out.point.x, out.point.y);
+        out.point.z = TraceFloorZ(fromIdx, out.point.x, out.point.y,
+                                  out.takeoff.z);
     }
     else
         out.point = out.landing;

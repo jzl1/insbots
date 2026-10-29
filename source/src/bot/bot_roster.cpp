@@ -1611,7 +1611,6 @@ void CBotRoster::InvalidateNavMeshState(bool reloadSucceeded)
     ResetSniperCaches();
     ResetLadderQueues();
     InvalidateAdvanceTargets();
-    InsBots_ResetPhysicalPortalCache();
     InsBots_ResetPortalTransit();
     for (int i = 0; i < 64; i++)
     {
@@ -1671,7 +1670,6 @@ void CBotRoster::LevelInit(const char *mapname)
     m_captureRefillTime[0] = m_captureRefillTime[1] = m_captureRefillTime[2] = -999.0f;
     m_captureTarget[0] = m_captureTarget[1] = m_captureTarget[2] = -1;
     ResetSniperCaches();
-    InsBots_ResetPhysicalPortalCache();
     InsBots_ResetPortalTransit();
 
     // try to load maps/<map>.nav from the game dir
@@ -1967,7 +1965,6 @@ void CBotRoster::LevelShutdown()
     ResetLadderQueues();
     HearingReset();
     ResetSniperCaches();
-    InsBots_ResetPhysicalPortalCache();
     InsBots_ResetPortalTransit();
     g_NavMesh.Free();
     m_navLoadedForMap = false;

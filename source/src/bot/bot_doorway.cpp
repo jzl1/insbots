@@ -227,7 +227,7 @@ bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
         int fromIdx = m_path[i];
         int toIdx = m_path[i + 1];
         Vector safeCenter; float safeHalf = 0.0f;
-        if (ProbePhysicalPortal(fromIdx, toIdx, &safeCenter, &safeHalf))
+        if (g_NavMesh.GetPhysicalPortal(fromIdx, toIdx, safeCenter, safeHalf))
         {
             float dx = safeCenter.x - pos.x;
             float dy = safeCenter.y - pos.y;
@@ -285,7 +285,9 @@ bool CInsBot::ProbeUpcomingDoorwayRunway(DoorwayRunwayState &outRunway)
                 if (i + 2 < m_pathLen)
                 {
                     Vector nextCenter; float nextHalf = 0.0f;
-                    if (ProbePhysicalPortal(m_path[i + 1], m_path[i + 2], &nextCenter, &nextHalf))
+                    if (g_NavMesh.GetPhysicalPortal(m_path[i + 1],
+                                                    m_path[i + 2],
+                                                    nextCenter, nextHalf))
                     {
                         float cdx = nextCenter.x - safeCenter.x, cdy = nextCenter.y - safeCenter.y;
                         if (cdx * cdx + cdy * cdy <= 130.0f * 130.0f)

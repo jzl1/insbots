@@ -977,7 +977,6 @@ extern int g_TurretOffsetAnimTime;
 
 // learned-bad-link persistence (implemented in bot.cpp)
 void InsBots_SaveLearn();
-void InsBots_ResetPhysicalPortalCache();
 void InsBots_ResetPortalTransit();
 void InsBots_ResetPortalTransitSlot(int slot);
 void InsBots_ForgetLearn();
