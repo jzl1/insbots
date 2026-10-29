@@ -3339,6 +3339,29 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
         else if (haveWaypoint)
         {
             immTarget = m_moveTarget;   // the current portal/waypoint
+            // AdvanceWaypoint may have just crossed a portal. Evaluate the
+            // runway against the new waypoint, not the previous edge's
+            // heading; otherwise it can stage the bot back across the portal.
+            float immediateDx = immTarget.x - pos.x;
+            float immediateDy = immTarget.y - pos.y;
+            float immediateDistSq = immediateDx * immediateDx
+                                  + immediateDy * immediateDy;
+            float mvYaw;
+            if (immediateDistSq > 16.0f * 16.0f)
+            {
+                mvYaw = atan2f(immediateDy, immediateDx)
+                      * (180.0f / 3.14159265f);
+                m_lastNavMoveYaw = mvYaw;
+                m_haveLastNavMoveYaw = true;
+            }
+            else
+            {
+                // Keep crossing a tiny tile/portal along the last valid route
+                // direction. Recomputing yaw from a near-zero vector lets a
+                // few units of overshoot reverse the camera every other tick.
+                mvYaw = m_haveLastNavMoveYaw ? m_lastNavMoveYaw : moveYaw;
+            }
+            moveYaw = mvYaw;
             if (m_spawnNoCollideActive || HasBodyNoCollide())
                 ResetDoorwayRunway();
             else
@@ -3374,24 +3397,16 @@ void CInsBot::MoveToward(const Vector &dest, float &fwd, float &side, int &butto
                                    m_path[m_pathCursor]);
                 if (!keepAlignment) sourceTurn = false;
             }
-            float immediateDx = immTarget.x - pos.x;
-            float immediateDy = immTarget.y - pos.y;
-            float immediateDistSq = immediateDx * immediateDx
-                                  + immediateDy * immediateDy;
-            float mvYaw;
+            immediateDx = immTarget.x - pos.x;
+            immediateDy = immTarget.y - pos.y;
+            immediateDistSq = immediateDx * immediateDx
+                            + immediateDy * immediateDy;
             if (immediateDistSq > 16.0f * 16.0f)
             {
                 mvYaw = atan2f(immediateDy, immediateDx)
                       * (180.0f / 3.14159265f);
                 m_lastNavMoveYaw = mvYaw;
                 m_haveLastNavMoveYaw = true;
-            }
-            else
-            {
-                // Keep crossing a tiny tile/portal along the last valid route
-                // direction.  Recomputing yaw from a near-zero vector lets a
-                // few units of overshoot reverse the camera every other tick.
-                mvYaw = m_haveLastNavMoveYaw ? m_lastNavMoveYaw : moveYaw;
             }
             moveYaw = mvYaw;
             // Ease off before a sharp turn only when BSP traces confirmed the
