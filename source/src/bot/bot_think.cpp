@@ -32,6 +32,7 @@
 #include "linux_offsets.h"
 #include "turret.h"
 #include "vehicle_target_math.h"
+#include "sniper_overwatch.h"
 
 extern IVEngineServer       *engine;
 extern IEngineTrace         *enginetrace;
@@ -322,8 +323,13 @@ void CInsBot::ThinkDeadReset(float now)
     m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
     g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
     m_recoilRise = 0; m_burstShots = 0; m_wp = 0; m_wpToggledMode = false; m_wpName[0] = 0;
+    m_primaryWeaponName[0] = 0;
     m_haveHoldSpot = false; m_patrolling = false;
     m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
+    m_sniperArrived = false; m_sniperTransitDeadline = 0.0f;
+    m_sniperYawCenter = 0.0f; m_sniperYawHalfSpan = 0.0f;
+    m_sniperHasSillCover = false;
+    m_compromisedPerchPos = Vector(0, 0, 0); m_compromisedPerchUntil = 0.0f;
     m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
     m_avoidObj = -1; m_avoidUntil = 0.0f; m_nextTeleportOk = 0.0f;
     m_hearUntil = 0; m_nextHearTime = 0;   // stop investigating footsteps when dead
@@ -364,8 +370,17 @@ void CInsBot::ThinkWeaponAndAmmo(float now)
             {
                 _snprintf(m_primaryWeaponName, sizeof(m_primaryWeaponName), "%s", wn);
             }
-            m_haveSniperSpot = false;
-            m_sniperStance = SNIPER_STANCE_NONE;
+            if (!HasSniperLoadout())
+            {
+                m_haveSniperSpot = false;
+                m_sniperArrived = false;
+                m_sniperStance = SNIPER_STANCE_NONE;
+                m_sniperHoldUntil = 0.0f;
+                m_sniperTransitDeadline = 0.0f;
+                m_sniperYawCenter = 0.0f;
+                m_sniperYawHalfSpan = 0.0f;
+                m_sniperHasSillCover = false;
+            }
             // No givecurrentammo here! The engine already gave us a full magazine on spawn.
         }
     }
@@ -527,6 +542,10 @@ void CInsBot::ThinkAlive()
         m_haveSniperSpot = false; m_sniperRelocateTime = 0.0f; m_sniperKills = 0;
         m_sniperArea = -1; m_sniperObj = -1; m_sniperTeam = 0;
         m_sniperStance = SNIPER_STANCE_NONE; m_sniperScore = 0.0f;
+        m_sniperArrived = false; m_sniperTransitDeadline = 0.0f;
+        m_sniperYawCenter = 0.0f; m_sniperYawHalfSpan = 0.0f;
+        m_sniperHasSillCover = false;
+        m_compromisedPerchPos = Vector(0, 0, 0); m_compromisedPerchUntil = 0.0f;
         m_sniperHearingDetour = false;
         m_sniperHearingReturnTime = 0.0f;
         m_hearUntil = 0; m_nextHearTime = 0; m_hearTarget = Vector(0, 0, 0);
@@ -816,15 +835,13 @@ void CInsBot::ThinkAlive()
         m_enemyIndex = 0;
         m_hearUntil = 0; m_nextHearTime = 0;   // stop chasing the last footstep origin
         Say(VOX_CLEAR);            // target eliminated / no longer valid: "clear"
-        if (confirmedKill && IsSniper() && m_haveSniperSpot)
+        if (confirmedKill && HasSniperLoadout() && m_haveSniperSpot)
         {
             m_sniperKills++;
             int relocateKills = insbot_sniper_relocate_kills.GetInt();
             if (relocateKills > 0 && m_sniperKills >= relocateKills)
             {
-                m_haveSniperSpot = false;
-                m_sniperKills = 0;
-                m_sniperRelocateTime = now + 25.0f;
+                AbandonSniperPerch(now, true);
             }
         }
     }
@@ -1253,8 +1270,7 @@ void CInsBot::ThinkAlive()
                         m_fireStateEnd = now + cyc;
                     }
 
-                    bool atAssignedPerch = m_haveSniperSpot
-                                        && xyd(pos, m_sniperSpot) <= 80.0f;
+                    bool atAssignedPerch = AtSniperPerch(pos);
                     bool crouchRoll = atAssignedPerch
                         ? (m_sniperStance == SNIPER_STANCE_CROUCH)
                         : (frand(0, 1) < insbot_crouch_chance.GetFloat());
@@ -1449,8 +1465,9 @@ void CInsBot::ThinkAlive()
 
         // Proactive cover: if engaging in the open beyond 250u, seek cover even if healthy.
         // If already holding cover from proactive cover, stay committed until the 3.0s LOS exit.
-        // Stationed snipers (at assigned perch <= 80u) are excluded: they hold their overwatch vantage point.
-        bool sniperAtPerch = IsSniper() && m_haveSniperSpot && (xyd(pos, m_sniperSpot) <= 80.0f);
+        // Stationed snipers (inside the 3D aperture) are excluded: they hold
+        // their overwatch vantage point.
+        bool sniperAtPerch = HasSniperLoadout() && AtSniperPerch(pos);
         bool proactiveCover = false;
         if (insbot_takecover.GetBool() && insbot_cover_on_engage.GetBool()
             && engaging && !leaderCoverActive && !sniperAtPerch)
@@ -1481,9 +1498,11 @@ void CInsBot::ThinkAlive()
             }
         }
 
-        bool  vulnerable = (insbot_takecover.GetBool()
-                        && (hurt || suppressed || (reloadActive && !suppressHold))
-                        && !leaderCoverActive) || proactiveCover;
+        bool sniperHoldPosition = sniperAtPerch && !hurt;
+        bool  vulnerable = !sniperHoldPosition
+                        && ((insbot_takecover.GetBool()
+                             && (hurt || suppressed || (reloadActive && !suppressHold))
+                             && !leaderCoverActive) || proactiveCover);
 
             // Capture-committed objective focus: keep pushing the objective
             // while engaging distant enemies. The bot still aims and fires on
@@ -1562,10 +1581,9 @@ void CInsBot::ThinkAlive()
             {
                 // Dead bots can't capture: hurt/reloading committed bots still
                 // break contact to cover exactly like everyone else.
-                if (IsSniper() && hurt)
+                if (HasSniperLoadout() && hurt && m_haveSniperSpot)
                 {
-                    m_haveSniperSpot = false;
-                    m_sniperRelocateTime = now + 45.0f; // Threat relocation: abandon current overlook if taking heavy fire
+                    AbandonSniperPerch(now, true);
                 }
                 Vector threat = losNow ? pi->GetAbsOrigin() : m_enemyLastPos;
                 if (now > m_coverUntil)
@@ -1765,9 +1783,9 @@ void CInsBot::ThinkAlive()
                 }
                 // Beyond CONVERGE_RADIUS: full follow speed from UpdateSquadFollow
             }
-            else if ((dist > combatStopDist && !(IsSniper() && m_haveSniperSpot))
-                     || (!losNow && !IsSniper())
-                     || (!losNow && IsSniper() && !m_haveSniperSpot
+            else if ((dist > combatStopDist && !(HasSniperLoadout() && m_haveSniperSpot))
+                     || (!losNow && !HasSniperLoadout())
+                     || (!losNow && HasSniperLoadout() && !m_haveSniperSpot
                          && now - m_enemyLastSeen > 4.5f))
             {
                 if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
@@ -1782,12 +1800,13 @@ void CInsBot::ThinkAlive()
             {
                 if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
-                if (IsSniper() && losNow && m_haveSniperSpot
-                    && m_sniperStance == SNIPER_STANCE_CROUCH)
+                if (HasSniperLoadout() && losNow && m_haveSniperSpot
+                    && (m_sniperStance == SNIPER_STANCE_CROUCH
+                        || (m_sniperHasSillCover && (reloadActive || suppressed))))
                 {
                     // Only crouch when this perch was explicitly validated
-                    // from the lower firing origin.  Half-height cover often
-                    // requires the stored standing stance to preserve LOS.
+                    // from the lower firing origin, or when ducking behind
+                    // Sill cover for an unhurt reload/suppression pause.
                     buttons |= IN_DUCK;
                 }
             }
@@ -1903,8 +1922,7 @@ void CInsBot::ThinkAlive()
         // timer is allowed to finish; no fresh detour can replace it. The
         // assignment/reservation remains intact, so ordinary overwatch
         // movement brings the sniper back as soon as UpdateHearing completes.
-        bool sniperAtPerch = m_haveSniperSpot
-                          && xyd(pos, m_sniperSpot) <= 65.0f;
+        bool sniperAtPerch = AtSniperPerch(pos);
         bool sniperDetourExpired = m_haveSniperSpot && m_sniperHearingDetour
                                  && now >= m_sniperHearingReturnTime;
         if (sniperDetourExpired)
@@ -2080,15 +2098,14 @@ void CInsBot::ThinkAlive()
                 bool overwatchEnabled = insbot_sniper_overwatch.GetBool();
                 if (m_haveSniperSpot && !overwatchEnabled)
                 {
-                    m_haveSniperSpot = false;
-                    m_sniperKills = 0;
+                    AbandonSniperPerch(now, false);
                 }
-                if (!captureCommitted && IsSniper() && overwatchEnabled
+                if (!captureCommitted && HasSniperLoadout() && overwatchEnabled
                     && now > m_sniperRelocateTime)
                 {
                     if (m_haveSniperSpot
                         && (m_sniperObj != m_objGoal || m_sniperTeam != myTeam))
-                        m_haveSniperSpot = false;
+                        AbandonSniperPerch(now, false);
                     if (!m_haveSniperSpot)
                     {
                         if (g_Bots.AssignSniperPerch(this, myTeam, m_objGoal, now))
@@ -2098,36 +2115,50 @@ void CInsBot::ThinkAlive()
                     }
                     if (m_haveSniperSpot)
                     {
-                        float sdist = xyd(pos, m_sniperSpot);
-                        if (sdist > 65.0f)
+                        if (!m_sniperArrived)
                         {
-                            MoveToward(m_sniperSpot, fwd, side, buttons, view);
-                            overwatchActive = true;
+                            if (now >= m_sniperTransitDeadline)
+                            {
+                                AbandonSniperPerch(now, true);
+                            }
+                            else
+                            {
+                                MoveToward(m_sniperSpot, fwd, side, buttons, view);
+                                overwatchActive = true;
+                            }
                         }
-                        else
+                        if (m_haveSniperSpot && AtSniperPerch(pos))
                         {
-                            // Stationed at sniper overlook!
+                            if (!m_sniperArrived)
+                            {
+                                m_sniperArrived = true;
+                                float minTime = insbot_sniper_perch_time_min.GetFloat();
+                                float maxTime = insbot_sniper_perch_time_max.GetFloat();
+                                m_sniperHoldUntil = sniper_ow::HoldDeadline(
+                                    now, minTime, maxTime, frand(0.0f, 1.0f));
+                                BotDbg("[insbots] %s arrived at sniper perch obj=%d\n",
+                                       m_name, m_sniperObj);
+                            }
                             if (now >= m_sniperHoldUntil)
                             {
-                                // Overload timer elapsed: don't sit stationary forever; pack up and move!
-                                m_haveSniperSpot = false;
-                                m_sniperKills = 0;
-                                m_sniperRelocateTime = now + 15.0f;
-                                // Perch expired: resume ordinary objective movement.
+                                AbandonSniperPerch(now, false);
                             }
                             else
                             {
                                 // Halt and use the posture whose firing origin
                                 // passed the objective/approach LOS tests.
                                 fwd = 0; side = 0;
-                                if (m_sniperStance == SNIPER_STANCE_CROUCH)
+                                if (m_sniperStance == SNIPER_STANCE_CROUCH
+                                    || (m_sniperHasSillCover
+                                        && (m_reloadUntil > now
+                                            || now < m_suppressedUntil)))
                                     buttons |= IN_DUCK;
-                                Vector scanTarget = m_sniperAimTarget;
-                                float outYaw = atan2f(scanTarget.y - pos.y, scanTarget.x - pos.x) * (180.0f / 3.14159265f);
                                 if (now >= m_nextHeadingChange)
                                 {
                                     m_nextHeadingChange = now + frand(1.5f, 4.0f);
-                                    m_headingYaw = outYaw + frand(-25.0f, 25.0f); // Scan sector across enemy approach vectors
+                                    float half = m_sniperYawHalfSpan;
+                                    m_headingYaw = m_sniperYawCenter
+                                                 + (half > 0.0f ? frand(-half, half) : 0.0f);
                                 }
                                 view.y = m_headingYaw; view.x = 0;
                                 overwatchActive = true;
@@ -3115,8 +3146,9 @@ void CInsBot::DebugDraw()
             "CAPTURE COMMIT");
     if (m_haveSniperSpot)
         debugoverlay->AddEntityTextOverlay(idx, 3, dur, 0, 220, 255, 255,
-            "SNIPER obj=%d score=%.1f stance=%s kills=%d",
+            "SNIPER obj=%d score=%.1f %s stance=%s kills=%d",
             m_sniperObj, m_sniperScore,
+            m_sniperArrived ? "ARRIVED" : "ENROUTE",
             m_sniperStance == SNIPER_STANCE_CROUCH ? "CROUCH" : "STAND",
             m_sniperKills);
     if (m_haveCover)

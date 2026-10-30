@@ -1103,6 +1103,15 @@ public:
         if (!strcmp(name, "round_reset") || !strcmp(name, "round_unfrozen"))
             g_Objectives.RefreshOrderIds();
 
+        // A new round may swap sides or move Push spawns. Relearn Home from
+        // this round's spawns and discard any per-(team, objective) perch
+        // cache that was oriented by the previous round's Home vectors.
+        if (!strcmp(name, "round_reset"))
+        {
+            g_Objectives.ResetHomes();
+            g_Bots.ResetSniperCaches();
+        }
+
         // A new round rebuilds squads: any pending slot request is void.
         if (!strcmp(name, "round_reset") || !strcmp(name, "round_end"))
             g_Bots.ClearAllReservations();

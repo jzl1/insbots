@@ -30,6 +30,7 @@
 #include "voice.h"
 #include "profile.h"
 #include "bot_internal.h"
+#include "sniper_overwatch.h"
 
 // ---- externs this TU needs (same pattern as bot.cpp / objective.cpp) -------
 extern IVEngineServer       *engine;
@@ -46,8 +47,6 @@ extern CfgVar                insbot_draw;
 extern CfgVar                insbot_draw_team;
 extern CfgVar                insbot_freeze;
 extern CfgVar                insbot_objectives;
-extern CfgVar                insbot_sniper_perch_time_max;
-extern CfgVar                insbot_sniper_perch_time_min;
 extern CfgVar                insbot_crouch_eye_height;
 extern CfgVar                insbot_detect;
 extern CfgVar                insbot_learn_persist;
@@ -767,12 +766,23 @@ void CBotRoster::ResetSniperCaches()
         {
             SniperObjectiveCache &cache = m_sniperCache[team][obj];
             cache.requested = false;
+            cache.built = false;
             cache.ready = false;
             cache.pendingCount = cache.pendingCursor = 0;
             cache.bestCount = cache.accepted = cache.rejected = 0;
+            cache.hasHomeSnapshot = false;
+            cache.homeKnown[0] = cache.homeKnown[1] = cache.homeKnown[2] = false;
+            cache.homeSnapshot[0] = cache.homeSnapshot[1] = cache.homeSnapshot[2] = Vector(0, 0, 0);
+            cache.friendlyOwned = false;
+            cache.readyFallbackAt = 0.0f;
         }
     m_sniperCacheTeamCursor = 1;
     m_sniperCacheObjCursor = 0;
+    // Home is relearned from each bot's next spawn sample. Clear the
+    // one-shot note flag too, or a bot that survives a round transition
+    // would never contribute to the new round's Home.
+    for (int i = 0; i < 64; i++)
+        if (m_bots[i].m_inUse) m_bots[i].m_notedSpawn = false;
 }
 
 void CBotRoster::RequestSniperCache(int team, int obj)
@@ -782,26 +792,58 @@ void CBotRoster::RequestSniperCache(int team, int obj)
     SniperObjectiveCache &cache = m_sniperCache[team][obj];
     if (cache.requested) return;
     cache.requested = true;
+    cache.built = false;
+    cache.ready = false;
+    cache.readyFallbackAt = (gpGlobals ? gpGlobals->curtime : 0.0f) + 10.0f;
     BuildSniperCacheCandidates(team, obj, cache);
 }
 
-static float SniperRangeScore(float distance)
+static Vector SniperEnemyHome(int team, const ObjPoint *op)
 {
-    if (distance < 500.0f || distance > 3300.0f) return -1.0f;
-    if (distance < 1200.0f) return (distance - 500.0f) / 700.0f;
-    if (distance <= 2200.0f) return 1.0f;
-    return (3300.0f - distance) / 1100.0f;
+    int enemyTeam = 3 - team;
+    if (enemyTeam >= 1 && enemyTeam <= 2
+        && g_Objectives.m_homeSamples[enemyTeam] > 0)
+        return g_Objectives.m_home[enemyTeam];
+
+    if (g_Objectives.m_homeSamples[team] > 0)
+    {
+        Vector axis = op->center - g_Objectives.m_home[team];
+        axis.z = 0.0f;
+        if (axis.x * axis.x + axis.y * axis.y > 1.0f)
+            return op->center + axis;
+    }
+    return op->center + Vector(1, 0, 0);
 }
 
 void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
                                              SniperObjectiveCache &cache)
 {
+    cache.built = false;
     cache.ready = false;
     cache.pendingCount = cache.pendingCursor = 0;
     cache.bestCount = cache.accepted = cache.rejected = 0;
+    cache.hasHomeSnapshot = false;
     const ObjPoint *op = g_Objectives.Get(obj);
     if (!op || !g_NavMesh.IsLoaded()) { cache.requested = false; cache.ready = false; return; }
 
+    int enemyTeam = 3 - team;
+    bool teamHomeKnown = (team >= 1 && team <= 2 && g_Objectives.m_homeSamples[team] > 0);
+    bool enemyHomeKnown = (enemyTeam >= 1 && enemyTeam <= 2
+                           && g_Objectives.m_homeSamples[enemyTeam] > 0);
+    float now = gpGlobals ? gpGlobals->curtime : 0.0f;
+    if (!sniper_ow::CacheReady(teamHomeKnown, enemyHomeKnown, now,
+                               cache.readyFallbackAt))
+        return;
+
+    cache.hasHomeSnapshot = true;
+    for (int t = 1; t <= 2; t++)
+    {
+        cache.homeKnown[t] = (g_Objectives.m_homeSamples[t] > 0);
+        cache.homeSnapshot[t] = g_Objectives.m_home[t];
+    }
+    cache.friendlyOwned = (g_Objectives.Relation(obj, team) > 0);
+
+    Vector enemyHome = SniperEnemyHome(team, op);
     int objectiveArea = g_NavMesh.FindNearestArea(op->center);
     int objectiveComponent = g_NavMesh.ComponentForArea(objectiveArea);
     for (int i = 0; i < g_NavMesh.GetTotalSniperSpotCount(); i++)
@@ -814,12 +856,19 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
         float dx = spot->pos.x - op->center.x;
         float dy = spot->pos.y - op->center.y;
         float distance = sqrtf(dx * dx + dy * dy);
-        float range = SniperRangeScore(distance);
+        float range = sniper_ow::RangeScore(distance);
         if (range < 0.0f) continue;
+
+        sniper_ow::FrontlineRule frontline = sniper_ow::EvaluateFrontline(
+            spot->pos.x, spot->pos.y,
+            op->center.x, op->center.y,
+            enemyHome.x, enemyHome.y,
+            cache.friendlyOwned);
+        if (!frontline.allowed) continue;
 
         const NavAreaData *area = g_NavMesh.Area(spot->areaIdx);
         float elevation = spot->pos.z - op->minZ;
-        float score = range * 60.0f;
+        float score = range * 60.0f + frontline.bonus;
         if (elevation > 0.0f)
         {
             if (elevation > 400.0f) elevation = 400.0f;
@@ -829,6 +878,7 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
         else if (spot->flags & SNIPER_SPOT_GOOD) score += 20.0f;
         else if (spot->flags & SNIPER_SPOT_IN_COVER) score += 8.0f;
         if (spot->flags & SNIPER_SPOT_CORNER) score += 3.0f;
+        if (spot->flags & SNIPER_SPOT_EDGE) score += 1.0f;
         if (area && area->connCount <= 3) score += 4.0f;
 
         bool duplicate = false;
@@ -865,6 +915,7 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
         cache.pending[dst].cheapScore = score;
         cache.pending[dst].flags = spot->flags;
     }
+    cache.built = true;
     if (cache.pendingCount == 0) cache.ready = true;
 }
 
@@ -890,12 +941,28 @@ static bool SniperWorldLOS(const Vector &from, const Vector &to)
     return !tr.startsolid && tr.fraction > 0.985f;
 }
 
+class EngineSniperProbe : public sniper_ow::ISniperProbe
+{
+public:
+    virtual bool HullClear(float x, float y, float z, float height)
+    {
+        return SniperHullClear(Vector(x, y, z), height);
+    }
+
+    virtual bool WorldLOS(float x1, float y1, float z1,
+                          float x2, float y2, float z2)
+    {
+        return SniperWorldLOS(Vector(x1, y1, z1), Vector(x2, y2, z2));
+    }
+};
+
 bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
                                          const SniperPendingCandidate &candidate,
                                          SniperPerch &out)
 {
     const ObjPoint *op = g_Objectives.Get(obj);
     if (!op || !enginetrace) return false;
+    EngineSniperProbe probe;
 
     Vector targets[8];
     float targetZ = op->minZ + 45.0f;
@@ -905,14 +972,17 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
     targets[3] = Vector(op->center.x, op->minY + 24.0f, targetZ);
     targets[4] = Vector(op->center.x, op->maxY - 24.0f, targetZ);
 
-    Vector approach(1, 0, 0);
-    int enemyTeam = 3 - team;
-    if (enemyTeam >= 1 && enemyTeam <= 2 && g_Objectives.m_homeSamples[enemyTeam] > 0)
+    Vector approach = SniperEnemyHome(team, op) - op->center;
+    approach.z = 0.0f;
+    float approachLength = sqrtf(approach.x * approach.x + approach.y * approach.y);
+    if (approachLength > 1.0f)
     {
-        approach = g_Objectives.m_home[enemyTeam] - op->center;
-        approach.z = 0.0f;
-        float length = sqrtf(approach.x * approach.x + approach.y * approach.y);
-        if (length > 1.0f) { approach.x /= length; approach.y /= length; }
+        approach.x /= approachLength;
+        approach.y /= approachLength;
+    }
+    else
+    {
+        approach = Vector(1, 0, 0);
     }
     Vector lateral(-approach.y, approach.x, 0);
     for (int a = 0; a < 3; a++)
@@ -933,17 +1003,24 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
     int bestUseful = 0;
     int bestStance = SNIPER_STANCE_NONE;
     Vector bestTarget = targets[0];
+    bool bestVisibleMask[8] = { false, false, false, false, false, false, false, false };
+    float bestEyeHeight = heights[0];
     for (int stance = 0; stance < 2; stance++)
     {
         float hullHeight = stance == 0 ? 72.0f : 36.0f;
-        if (!SniperHullClear(candidate.pos, hullHeight)) continue;
+        if (!probe.HullClear(candidate.pos.x, candidate.pos.y,
+                             candidate.pos.z, hullHeight)) continue;
         int visible = 0, useful = 0;
         Vector preferred = targets[0];
         bool preferredUseful = false;
+        bool visibleMask[8] = { false, false, false, false, false, false, false, false };
         for (int t = 0; t < 8; t++)
         {
-            if (!SniperWorldLOS(candidate.pos + Vector(0, 0, heights[stance]), targets[t])) continue;
+            if (!probe.WorldLOS(candidate.pos.x, candidate.pos.y,
+                                candidate.pos.z + heights[stance],
+                                targets[t].x, targets[t].y, targets[t].z)) continue;
             visible++;
+            visibleMask[t] = true;
             if (t > 0) useful++;
             if (t >= 5 || (!preferredUseful && t > 0))
             {
@@ -958,19 +1035,52 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
             bestUseful = useful;
             bestStance = stance == 0 ? SNIPER_STANCE_STAND : SNIPER_STANCE_CROUCH;
             bestTarget = preferred;
+            bestEyeHeight = heights[stance];
+            for (int t = 0; t < 8; t++) bestVisibleMask[t] = visibleMask[t];
         }
     }
     if (bestStance == SNIPER_STANCE_NONE) return false;
 
+    bool hasSillCover = (bestStance == SNIPER_STANCE_STAND)
+                      && sniper_ow::HasSillCover(
+                             probe, candidate.pos.x, candidate.pos.y, candidate.pos.z,
+                             op->center.x - candidate.pos.x,
+                             op->center.y - candidate.pos.y);
+
     int coverHits = 0;
+    bool coverBlocked[8] = { false, false, false, false, false, false, false, false };
     Vector coverStart = candidate.pos + Vector(0, 0, 44.0f);
     for (int i = 0; i < 8; i++)
     {
         float angle = (float)i * 0.78539816f;
         Vector end = coverStart + Vector(cosf(angle) * 160.0f, sinf(angle) * 160.0f, 0);
-        if (!SniperWorldLOS(coverStart, end)) coverHits++;
+        if (!probe.WorldLOS(coverStart.x, coverStart.y, coverStart.z,
+                            end.x, end.y, end.z))
+        {
+            coverHits++;
+            coverBlocked[i] = true;
+        }
     }
     if (coverHits >= 7) return false;
+
+    float objectiveBearing = atan2f(op->center.y - candidate.pos.y,
+                                    op->center.x - candidate.pos.x)
+                           * (180.0f / 3.14159265f);
+    float coverScore = sniper_ow::CoverScore(coverBlocked, 8, objectiveBearing, hasSillCover);
+
+    float yaws[8];
+    int yawCount = 0;
+    for (int t = 0; t < 8; t++)
+    {
+        if (!bestVisibleMask[t]) continue;
+        yaws[yawCount++] = atan2f(targets[t].y - candidate.pos.y,
+                                  targets[t].x - candidate.pos.x)
+                         * (180.0f / 3.14159265f);
+    }
+    sniper_ow::Arc arc = sniper_ow::ArcFromYaws(yaws, yawCount);
+    float clampedHalfSpan = sniper_ow::ClampArcToJambs(
+        probe, candidate.pos.x, candidate.pos.y, candidate.pos.z,
+        bestEyeHeight, arc.centerDeg, arc.halfSpanDeg);
 
     out.pos = candidate.pos;
     out.aimTarget = bestTarget;
@@ -978,15 +1088,16 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
     out.flags = candidate.flags;
     out.stance = (unsigned char)bestStance;
     out.visibleRays = (unsigned char)bestVisible;
-    out.score = candidate.cheapScore + bestVisible * 9.0f + bestUseful * 2.0f;
-    if (coverHits >= 2 && coverHits <= 5) out.score += coverHits * 3.0f;
-    else if (coverHits == 0) out.score -= 12.0f;
+    out.hasSillCover = hasSillCover;
+    out.yawCenter = arc.centerDeg;
+    out.yawHalfSpan = clampedHalfSpan;
+    out.score = candidate.cheapScore + bestVisible * 9.0f + bestUseful * 2.0f + coverScore;
     return true;
 }
 
-void CBotRoster::UpdateSniperCaches(float /*now*/)
+void CBotRoster::UpdateSniperCaches(float now)
 {
-    if (!g_NavMesh.IsLoaded() || !g_Objectives.IsReady()) return;
+    if (!g_NavMesh.IsLoaded() || g_Objectives.Count() <= 0) return;
     int budget = 3;
     for (int searched = 0; searched < 2 * INSBOT_SNIPER_OBJECTIVES && budget > 0; searched++)
     {
@@ -998,7 +1109,45 @@ void CBotRoster::UpdateSniperCaches(float /*now*/)
             m_sniperCacheTeamCursor = (m_sniperCacheTeamCursor == 1) ? 2 : 1;
         }
         SniperObjectiveCache &cache = m_sniperCache[team][obj];
-        if (!cache.requested || cache.ready) continue;
+        if (!cache.requested) continue;
+
+        if (cache.hasHomeSnapshot)
+        {
+            bool invalid = false;
+            for (int t = 1; t <= 2; t++)
+            {
+                if (g_Objectives.m_homeSamples[t] > 0)
+                {
+                    if (!cache.homeKnown[t]
+                        || sniper_ow::HomeDrifted(
+                               g_Objectives.m_home[t].x, g_Objectives.m_home[t].y,
+                               cache.homeSnapshot[t].x, cache.homeSnapshot[t].y))
+                        invalid = true;
+                }
+                else if (cache.homeKnown[t])
+                {
+                    invalid = true;
+                }
+            }
+            int relation = g_Objectives.Relation(obj, team);
+            if (relation >= 0 && ((relation > 0) != cache.friendlyOwned))
+                invalid = true;
+            if (invalid)
+            {
+                cache.built = false;
+                cache.ready = false;
+                cache.hasHomeSnapshot = false;
+                cache.pendingCount = cache.pendingCursor = 0;
+                cache.bestCount = cache.accepted = cache.rejected = 0;
+            }
+        }
+
+        if (cache.ready) continue;
+        if (!cache.built)
+        {
+            BuildSniperCacheCandidates(team, obj, cache);
+            if (!cache.built) continue;
+        }
         while (cache.pendingCursor < cache.pendingCount && budget-- > 0)
         {
             SniperPerch perch;
@@ -1044,6 +1193,21 @@ bool CBotRoster::IsSniperPerchReserved(const CInsBot *requester, int team,
     return false;
 }
 
+static bool SniperPathClearsObjective(const int *path, int pathLen,
+                                      const ObjPoint *op, bool friendlyOwned)
+{
+    if (!op || friendlyOwned) return true;
+    for (int i = 0; i < pathLen; i++)
+    {
+        const NavAreaData *area = g_NavMesh.Area(path[i]);
+        if (!area) continue;
+        if (sniper_ow::AabbOverlaps(area->lo.x, area->lo.y, area->hi.x, area->hi.y,
+                                    op->minX, op->minY, op->maxX, op->maxY))
+            return false;
+    }
+    return true;
+}
+
 bool CBotRoster::AssignSniperPerch(CInsBot *bot, int team, int obj, float now)
 {
     if (!bot || team < 1 || team > 2 || obj < 0 || obj >= INSBOT_SNIPER_OBJECTIVES)
@@ -1054,23 +1218,57 @@ bool CBotRoster::AssignSniperPerch(CInsBot *bot, int team, int obj, float now)
     Vector botPos = bot->m_info->GetAbsOrigin();
     int botArea = bot->CurrentArea(botPos);
     if (botArea < 0) botArea = g_NavMesh.FindNearestArea(botPos);
+    const ObjPoint *op = g_Objectives.Get(obj);
+    if (!op) return false;
+
+    bool tried[INSBOT_SNIPER_BEST];
+    float costs[INSBOT_SNIPER_BEST];
+    for (int i = 0; i < INSBOT_SNIPER_BEST; i++) tried[i] = false;
+
     int best = -1;
-    float bestScore = -3.4e38f;
-    for (int i = 0; i < cache.bestCount; i++)
+    int path[INSBOT_MAX_PATH];
+    int pathLen = 0;
+    float chosenCost = -1.0f;
+    for (;;)
     {
-        const SniperPerch &perch = cache.best[i];
-        if (IsSniperPerchReserved(bot, team, perch.pos)) continue;
-        float dx = perch.pos.x - botPos.x, dy = perch.pos.y - botPos.y, dz = perch.pos.z - botPos.z;
-        if (dx * dx + dy * dy + dz * dz > 6000.0f * 6000.0f) continue;
-        float pathCost = g_NavMesh.GetPathCost(botArea, perch.areaIdx, 0);
-        if (pathCost < 0.0f || pathCost > 6000.0f) continue;
-        unsigned int hash = (unsigned int)(bot->m_ordinal + 1) * 2654435761u
-                          ^ (unsigned int)(i + 17) * 2246822519u;
-        float jitter = (float)(hash % 1000) * 0.004f;
-        float score = perch.score + jitter - pathCost * 0.0015f;
-        if (score > bestScore) { bestScore = score; best = i; }
+        float bestScore = -3.4e38f;
+        best = -1;
+        for (int i = 0; i < cache.bestCount; i++)
+        {
+            if (tried[i]) continue;
+            const SniperPerch &perch = cache.best[i];
+            if (IsSniperPerchReserved(bot, team, perch.pos)) continue;
+            if (sniper_ow::PerchCompromised(
+                    perch.pos.x, perch.pos.y, perch.pos.z,
+                    bot->m_compromisedPerchPos.x, bot->m_compromisedPerchPos.y,
+                    bot->m_compromisedPerchPos.z,
+                    now, bot->m_compromisedPerchUntil))
+                continue;
+            float dx = perch.pos.x - botPos.x, dy = perch.pos.y - botPos.y, dz = perch.pos.z - botPos.z;
+            if (dx * dx + dy * dy + dz * dz > 6000.0f * 6000.0f) continue;
+            float pathCost = g_NavMesh.GetPathCost(botArea, perch.areaIdx, 0);
+            if (pathCost < 0.0f || pathCost > 6000.0f) continue;
+            unsigned int hash = (unsigned int)(bot->m_ordinal + 1) * 2654435761u
+                              ^ (unsigned int)(i + 17) * 2246822519u;
+            float jitter = (float)(hash % 1000) * 0.004f;
+            float score = sniper_ow::AssignmentScore(perch.score, jitter, pathCost);
+            if (score > bestScore) { bestScore = score; best = i; costs[i] = pathCost; }
+        }
+        if (best < 0) return false;
+
+        g_navDangerEnabled = false;
+        bool truncated = false;
+        pathLen = g_NavMesh.BuildPath(botArea, cache.best[best].areaIdx,
+                                      path, INSBOT_MAX_PATH, 0, &truncated);
+        if (pathLen > 0
+            && SniperPathClearsObjective(path, pathLen, op, cache.friendlyOwned))
+        {
+            chosenCost = costs[best];
+            break;
+        }
+        tried[best] = true;
     }
-    if (best < 0) return false;
+
     const SniperPerch &perch = cache.best[best];
     bot->m_sniperSpot = perch.pos;
     bot->m_sniperAimTarget = perch.aimTarget;
@@ -1082,19 +1280,20 @@ bool CBotRoster::AssignSniperPerch(CInsBot *bot, int team, int obj, float now)
     bot->m_sniperAssignedTime = now;
     bot->m_sniperKills = 0;
     bot->m_haveSniperSpot = true;
+    bot->m_sniperArrived = false;
+    bot->m_sniperTransitDeadline = sniper_ow::TransitDeadline(now, chosenCost);
+    bot->m_sniperYawCenter = perch.yawCenter;
+    bot->m_sniperYawHalfSpan = perch.yawHalfSpan;
+    bot->m_sniperHasSillCover = perch.hasSillCover;
     // A newly-created assignment always starts with a clean route. A hearing
     // search that began before assignment must not qualify as the one
     // permitted stationed-sniper detour.
     bot->m_hearUntil = 0.0f;
     bot->m_sniperHearingDetour = false;
     bot->m_sniperHearingReturnTime = 0.0f;
-    float minTime = insbot_sniper_perch_time_min.GetFloat();
-    float maxTime = insbot_sniper_perch_time_max.GetFloat();
-    if (minTime < 5.0f) minTime = 5.0f;
-    if (maxTime < minTime) maxTime = minTime;
-    bot->m_sniperHoldUntil = now + frand(minTime, maxTime);
-    BotDbg("[insbots] %s assigned sniper perch obj=%d score=%.1f stance=%s\n",
-           bot->m_name, obj, perch.score,
+    bot->m_sniperHoldUntil = 0.0f; // stamped on first 3D arrival
+    BotDbg("[insbots] %s assigned sniper perch obj=%d score=%.1f cost=%.0f stance=%s\n",
+           bot->m_name, obj, perch.score, chosenCost,
            perch.stance == SNIPER_STANCE_CROUCH ? "crouch" : "stand");
     return true;
 }

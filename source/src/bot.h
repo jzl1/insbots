@@ -40,17 +40,26 @@ struct SniperPerch
     unsigned char stance;
     unsigned char flags;
     unsigned char visibleRays;
+    bool hasSillCover;
+    float yawCenter;
+    float yawHalfSpan;
 };
 
 struct SniperObjectiveCache
 {
     bool requested;
+    bool built;
     bool ready;
     int pendingCount;
     int pendingCursor;
     int bestCount;
     int accepted;
     int rejected;
+    bool hasHomeSnapshot;
+    bool homeKnown[3];
+    Vector homeSnapshot[3];
+    bool friendlyOwned;
+    float readyFallbackAt;
     SniperPendingCandidate pending[INSBOT_SNIPER_PENDING];
     SniperPerch best[INSBOT_SNIPER_BEST];
 };
@@ -227,6 +236,9 @@ public:
     int             m_captureTeam;   // team that assigned the commitment; prevents team-switch carryover
     const char     *GetWeaponName() const { return m_wpName[0] ? m_wpName : (m_info ? m_info->GetWeaponName() : "unknown"); }
     bool            IsSniper() const;
+    bool            HasSniperLoadout() const;
+    bool            AtSniperPerch(const Vector &pos) const;
+    void            AbandonSniperPerch(float now, bool compromised);
     float           GetFireAccum() const { return m_fireAccum; }
     int             GetMagSize() const;
     int             GetClipRemaining() const;
@@ -445,6 +457,13 @@ private:
     float  m_sniperScore;
     float  m_sniperAssignedTime;
     Vector m_sniperAimTarget;  // best validated objective/approach ray
+    bool   m_sniperArrived;    // true only after the 3D aperture arrival gate
+    float  m_sniperTransitDeadline; // hard deadline while en route
+    float  m_sniperYawCenter;  // validated Overwatch arc centre
+    float  m_sniperYawHalfSpan;// validated Overwatch arc half-span
+    bool   m_sniperHasSillCover; // standing sightline over waist-high cover
+    Vector m_compromisedPerchPos;
+    float  m_compromisedPerchUntil;
     bool   m_sniperHearingDetour; // left a held perch for a bounded footstep search
     float  m_sniperHearingReturnTime; // hard deadline; audible footsteps cannot extend it
     float  m_sniperHoldUntil;  // isolated perch tenure timer (45-75s)

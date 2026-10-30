@@ -455,6 +455,28 @@ static bool WriteDisconnectedFixture(const char *path)
     return true;
 }
 
+// One large area: the existing center + four corners must be joined by
+// perimeter samples along the 400u north/south edges. A 120u depth is below
+// the long-edge threshold, so east/west edges must not add samples.
+static bool WriteSniperCandidateFixture(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    put32(f, 0xFEEDFACE); put32(f, 9); put32(f, 12345);
+    put16(f, 0);
+    put32(f, 1);
+
+    unsigned int conn[4][3];
+    int counts[4];
+    memset(conn, 0, sizeof(conn));
+    memset(counts, 0, sizeof(counts));
+    WriteAreaV9(f, 7001, 0, 0, 0, 400, 120, 0, conn, counts);
+
+    put32(f, 0);
+    fclose(f);
+    return true;
+}
+
 int main(){
   setvbuf(stdout, NULL, _IONBF, 0);
   // build a 3x3 grid of 100x100 areas, 4-connected
@@ -1123,6 +1145,37 @@ int main(){
   }
   printf("VERIFIED: path-cost cache invalidates after runtime penalty change (%.3f -> %.3f)\n", lowCost, highCost);
   remove(costCachePath);
+
+  // Sniper candidates on long edges: 1 center + 4 corners + 4 edge samples.
+  const char *sniperPath = "test_nav_sniper_candidates.tmp";
+  if (!WriteSniperCandidateFixture(sniperPath)) { printf("FAIL: write sniper fixture\n"); return 1; }
+  CNavMesh mSniper;
+  if (!mSniper.Load(sniperPath)) { printf("FAIL: sniper fixture load\n"); return 1; }
+  if (mSniper.GetTotalSniperSpotCount() != 9)
+  {
+      printf("FAIL: sniper candidate count %d expected 9\n",
+             mSniper.GetTotalSniperSpotCount());
+      return 1;
+  }
+  {
+      int edgeSamples = 0;
+      for (int i = 0; i < mSniper.GetTotalSniperSpotCount(); i++)
+      {
+          const HidingSpot *spot = mSniper.GetSniperSpot(i);
+          if (!spot) continue;
+          bool northSouth = fabsf(spot->pos.y - 24.0f) < 0.01f
+                         || fabsf(spot->pos.y - 96.0f) < 0.01f;
+          if (northSouth && spot->pos.x > 100.0f && spot->pos.x < 300.0f)
+              edgeSamples++;
+      }
+      if (edgeSamples != 4)
+      {
+          printf("FAIL: long-edge sniper samples %d expected 4\n", edgeSamples);
+          return 1;
+      }
+  }
+  printf("VERIFIED: long Nav mesh edges synthesize bounded Sniper perch candidates\n");
+  remove(sniperPath);
 
   printf("ALL OK\n");
   return 0;

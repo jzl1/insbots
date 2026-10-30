@@ -22,6 +22,7 @@
 #include "nav.h"
 #include "objective.h"
 #include "bot_internal.h"
+#include "sniper_overwatch.h"
 
 // ---- externs this TU needs (same pattern as bot.cpp / objective.cpp) -------
 extern IBotManager          *botmanager;
@@ -67,6 +68,46 @@ bool CInsBot::IsSniper() const
     }
     if (m_wpName[0] && strstr(m_wpName, "sniper")) return true;
     return false;
+}
+
+bool CInsBot::HasSniperLoadout() const
+{
+    const char *primary = m_primaryWeaponName[0] ? m_primaryWeaponName : m_wpName;
+    if (!primary || !primary[0]) return false;
+    const WeaponProfile *wp = WeaponFind(primary);
+    if (wp && (wp->flags & WF_SNIPER)) return true;
+    return strstr(primary, "sniper") != 0;
+}
+
+bool CInsBot::AtSniperPerch(const Vector &pos) const
+{
+    if (!m_haveSniperSpot) return false;
+    return sniper_ow::AtPerch(pos.x, pos.y, pos.z,
+                              m_sniperSpot.x, m_sniperSpot.y, m_sniperSpot.z);
+}
+
+void CInsBot::AbandonSniperPerch(float now, bool compromised)
+{
+    if (!m_haveSniperSpot) return;
+    if (compromised)
+    {
+        m_compromisedPerchPos = m_sniperSpot;
+        m_compromisedPerchUntil = now + sniper_ow::kCompromisedTime;
+        m_sniperRelocateTime = now + frand(4.0f, 7.0f);
+    }
+    else
+    {
+        m_sniperRelocateTime = now + 15.0f;
+    }
+    m_haveSniperSpot = false;
+    m_sniperArrived = false;
+    m_sniperTransitDeadline = 0.0f;
+    m_sniperYawCenter = 0.0f;
+    m_sniperYawHalfSpan = 0.0f;
+    m_sniperHasSillCover = false;
+    m_sniperKills = 0;
+    m_sniperStance = SNIPER_STANCE_NONE;
+    m_sniperHoldUntil = 0.0f;
 }
 
 float CInsBot::Now() const

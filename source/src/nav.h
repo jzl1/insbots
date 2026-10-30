@@ -28,7 +28,7 @@ struct HidingSpot
 {
     unsigned int   id;
     Vector         pos;
-    unsigned char  flags; // 0x01=in cover, 0x02=good sniper, 0x04=ideal sniper, 0x08=exposed
+    unsigned char  flags; // authored cover flags plus generated/edge markers
     int            areaIdx;
 };
 
@@ -39,7 +39,8 @@ enum
     SNIPER_SPOT_IDEAL     = 0x04,
     SNIPER_SPOT_EXPOSED   = 0x08,
     SNIPER_SPOT_GENERATED = 0x10,
-    SNIPER_SPOT_CORNER    = 0x20
+    SNIPER_SPOT_CORNER    = 0x20,
+    SNIPER_SPOT_EDGE      = 0x40
 };
 
 // Source v7+ mesh-level ladder record. Area indices are resolved after load;

@@ -148,7 +148,16 @@ void CObjectives::Reset()
     m_letterCount = 0;
     m_gametype = 0;
     m_ordered = false;
-    for (int i = 0; i < 3; i++) { m_home[i] = Vector(0, 0, 0); m_homeSamples[i] = 0; }
+    ResetHomes();
+}
+
+void CObjectives::ResetHomes()
+{
+    for (int i = 0; i < 3; i++)
+    {
+        m_home[i] = Vector(0, 0, 0);
+        m_homeSamples[i] = 0;
+    }
 }
 
 char CObjectives::LetterFor(const Vector &center) const

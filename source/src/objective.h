@@ -50,6 +50,9 @@ public:
 
     // record a fresh spawn position for a team (1 or 2) to learn its home
     void NoteSpawn(int team, const Vector &pos);
+    // Forget learned Home positions without touching objectives/order data.
+    // Called at round_reset so a new round (or a side swap) relearns its Home.
+    void ResetHomes();
 
     // stable attacker/defender role split: the aggression value sets what
     // FRACTION of the team attacks (1 = all attack, 0 = all defend), and each

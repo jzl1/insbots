@@ -1468,8 +1468,33 @@ bool CNavMesh::LoadInPlace(const char *path)
     // visibility, cover and route scoring is intentionally deferred and
     // staggered by CBotRoster so NAV loading performs no engine traces.
     int totalHiding = 0;
-    for (int i = 0; i < m_count; i++) totalHiding += m_areas[i].hidingSpotCount;
-    int tempSniperCap = totalHiding + m_count * 5;
+    int tempSniperCap = 0;
+    for (int i = 0; i < m_count; i++)
+    {
+        NavAreaData &a = m_areas[i];
+        totalHiding += a.hidingSpotCount;
+        tempSniperCap += 1;                       // area center
+        const float w = a.hi.x - a.lo.x;
+        const float d = a.hi.y - a.lo.y;
+        if (w >= 96.0f && d >= 96.0f) tempSniperCap += 4; // corners
+        if (w >= 224.0f)
+        {
+            const float usable = w - 48.0f;
+            int n = (int)(usable / 160.0f);
+            if (n < 1) n = 1;
+            if (n > 8) n = 8;
+            tempSniperCap += n * 2;               // north + south edges
+        }
+        if (d >= 224.0f)
+        {
+            const float usable = d - 48.0f;
+            int n = (int)(usable / 160.0f);
+            if (n < 1) n = 1;
+            if (n > 8) n = 8;
+            tempSniperCap += n * 2;               // east + west edges
+        }
+    }
+    tempSniperCap += totalHiding;
     HidingSpot *tempSnipers = (HidingSpot *)calloc(tempSniperCap, sizeof(HidingSpot));
     if (!tempSnipers)
     {
@@ -1507,6 +1532,50 @@ bool CNavMesh::LoadInPlace(const char *path)
                 sp.pos = Vector(xs[k], ys[k], GetZ(i, xs[k], ys[k]));
                 sp.flags = SNIPER_SPOT_GENERATED | SNIPER_SPOT_CORNER;
                 tempSnipers[foundSnipers++] = sp;
+            }
+        }
+
+        // Long-edge samples fill the gaps between corners on rooftops,
+        // balconies, and multi-window walls. Keep them strictly interior so
+        // they never duplicate the corner candidates above.
+        if (width >= 224.0f)
+        {
+            const float inset = 24.0f;
+            const float usable = width - inset * 2.0f;
+            int n = (int)(usable / 160.0f);
+            if (n < 1) n = 1;
+            if (n > 8) n = 8;
+            for (int k = 1; k <= n && foundSnipers < tempSniperCap; k++)
+            {
+                float x = a.lo.x + inset + usable * (float)k / (float)(n + 1);
+                for (int side = 0; side < 2 && foundSnipers < tempSniperCap; side++)
+                {
+                    float y = side == 0 ? a.lo.y + inset : a.hi.y - inset;
+                    sp.id = a.id * 41u + (unsigned int)(side * 8 + k);
+                    sp.pos = Vector(x, y, GetZ(i, x, y));
+                    sp.flags = SNIPER_SPOT_GENERATED | SNIPER_SPOT_EDGE;
+                    tempSnipers[foundSnipers++] = sp;
+                }
+            }
+        }
+        if (depth >= 224.0f)
+        {
+            const float inset = 24.0f;
+            const float usable = depth - inset * 2.0f;
+            int n = (int)(usable / 160.0f);
+            if (n < 1) n = 1;
+            if (n > 8) n = 8;
+            for (int k = 1; k <= n && foundSnipers < tempSniperCap; k++)
+            {
+                float y = a.lo.y + inset + usable * (float)k / (float)(n + 1);
+                for (int side = 0; side < 2 && foundSnipers < tempSniperCap; side++)
+                {
+                    float x = side == 0 ? a.lo.x + inset : a.hi.x - inset;
+                    sp.id = a.id * 41u + 20u + (unsigned int)(side * 8 + k);
+                    sp.pos = Vector(x, y, GetZ(i, x, y));
+                    sp.flags = SNIPER_SPOT_GENERATED | SNIPER_SPOT_EDGE;
+                    tempSnipers[foundSnipers++] = sp;
+                }
             }
         }
     }

@@ -107,10 +107,13 @@ void CInsBot::UpdatePathTo(const Vector &goal, bool force)
     g_navLadderPenalty   = insbot_avoid_ladder.GetFloat();
     g_navNarrowPenalty   = insbot_avoid_narrow.GetFloat();
     g_navLadderUpPenalty = insbot_ladder_up_penalty.GetFloat();
-    // Capture-committed bots route around active firefights (dynamic zones
-    // refreshed each frame by CBotRoster::UpdateDangerZones).
+    // Capture-committed bots and snipers still walking to a perch route
+    // around active firefights (dynamic zones refreshed each frame by
+    // CBotRoster::UpdateDangerZones). Stationed snipers keep their post.
     g_navDangerPenalty = insbot_danger_avoid.GetFloat();
-    g_navDangerEnabled = m_captureCommit && g_navDangerPenalty > 0.0f;
+    g_navDangerEnabled = (m_captureCommit
+                          || (m_haveSniperSpot && !m_sniperArrived))
+                         && g_navDangerPenalty > 0.0f;
 
     m_pathContinues = false;
     m_pathLen = g_NavMesh.BuildPath(start, end, m_path, INSBOT_MAX_PATH, m_pathSeed, &m_pathContinues);
