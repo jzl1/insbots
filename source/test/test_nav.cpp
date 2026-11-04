@@ -1144,6 +1144,23 @@ int main(){
       return 1;
   }
   printf("VERIFIED: path-cost cache invalidates after runtime penalty change (%.3f -> %.3f)\n", lowCost, highCost);
+
+  // A danger-aware transit search must not invalidate the non-danger cache.
+  g_navDangerEnabled = false;
+  float stableCost = mCost.GetPathCost(0, 3, 0);
+  unsigned int cacheStamp = mCost.m_costStamp;
+  g_navDangerEnabled = true;
+  float dangerAwareCost = mCost.GetPathCost(0, 3, 0);
+  g_navDangerEnabled = false;
+  float restoredCost = mCost.GetPathCost(0, 3, 0);
+  if (stableCost < 0.0f || dangerAwareCost < 0.0f || restoredCost < 0.0f
+      || mCost.m_costStamp != cacheStamp
+      || restoredCost != stableCost)
+  {
+      printf("FAIL: danger toggle invalidated the non-danger cost cache\n");
+      return 1;
+  }
+  printf("VERIFIED: danger-aware transit preserves the non-danger cost cache\n");
   remove(costCachePath);
 
   // Sniper candidates on long edges: 1 center + 4 corners + 4 edge samples.

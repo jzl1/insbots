@@ -70,17 +70,20 @@ void CNavMesh::RefreshCostParamsFromGlobals()
     next.dangerPenalty = g_navDangerPenalty;
     next.dangerEnabled = g_navDangerEnabled;
 
-    if (next.jumpPenalty != m_costParams.jumpPenalty
-        || next.crouchPenalty != m_costParams.crouchPenalty
-        || next.avoidPenalty != m_costParams.avoidPenalty
-        || next.ladderPenalty != m_costParams.ladderPenalty
-        || next.ladderUpPenalty != m_costParams.ladderUpPenalty
-        || next.narrowPenalty != m_costParams.narrowPenalty
-        || next.dangerPenalty != m_costParams.dangerPenalty
-        || next.dangerEnabled != m_costParams.dangerEnabled)
+    bool costParamsChanged = next.jumpPenalty != m_costParams.jumpPenalty
+                          || next.crouchPenalty != m_costParams.crouchPenalty
+                          || next.avoidPenalty != m_costParams.avoidPenalty
+                          || next.ladderPenalty != m_costParams.ladderPenalty
+                          || next.ladderUpPenalty != m_costParams.ladderUpPenalty
+                          || next.narrowPenalty != m_costParams.narrowPenalty;
+    bool dangerParamsChanged = next.dangerPenalty != m_costParams.dangerPenalty
+                            || next.dangerEnabled != m_costParams.dangerEnabled;
+    if (costParamsChanged || dangerParamsChanged)
     {
         m_costParams = next;
-        InvalidateCostCache();
+        // Danger-aware searches deliberately bypass this cache. Toggling the
+        // danger flag must not throw away the valid seed=0 non-danger costs.
+        if (costParamsChanged) InvalidateCostCache();
     }
 }
 

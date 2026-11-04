@@ -25,6 +25,33 @@ static bool Near(float a, float b, float eps = 0.001f)
     return fabsf(a - b) <= eps;
 }
 
+static void Test_CandidateSectors()
+{
+    int sectors[8];
+    for (int i = 0; i < 8; i++)
+    {
+        float deg = -157.5f + (float)i * 45.0f;
+        float rad = deg * 3.14159265f / 180.0f;
+        sectors[i] = sniper_ow::CandidateSector(cosf(rad), sinf(rad), 8);
+    }
+    bool seen[8] = { false, false, false, false, false, false, false, false };
+    bool allUnique = true;
+    for (int i = 0; i < 8; i++)
+    {
+        if (sectors[i] < 0 || sectors[i] >= 8 || seen[sectors[i]])
+            allUnique = false;
+        else
+            seen[sectors[i]] = true;
+    }
+    Check(allUnique, "candidate sectors cover all eight compass directions");
+    Check((sectors[0] + 4) % 8 == sectors[4],
+          "opposite candidate directions land in opposite sectors");
+    Check(sniper_ow::CandidateSector(0.0f, 0.0f, 8) == 4,
+          "candidate sector clamps the degenerate zero vector");
+    Check(sniper_ow::CandidateSector(-1.0f, 0.0f, 0) == 0,
+          "candidate sector tolerates a zero sector count");
+}
+
 // A scripted probe: each trace is matched against a small table of blockers.
 // This keeps the tests independent of the production trace implementation.
 struct TestProbe : public sniper_ow::ISniperProbe
@@ -102,10 +129,26 @@ static void Test_HomeReadiness()
           "cache is ready when both teams have Home");
     Check(sniper_ow::CacheReady(true, false, 10.0f, 10.0f),
           "cache falls back after the timeout");
+    Check(!sniper_ow::CacheReady(false, true, 10.0f, 10.0f),
+          "single-team fallback requires the requesting team");
+    Check(!sniper_ow::CacheReady(false, false, 10.0f, 10.0f),
+          "zero-team fallback never builds an arbitrary axis");
     Check(sniper_ow::HomeDrifted(0.0f, 0.0f, 501.0f, 0.0f),
           "Home drift over 500u invalidates");
     Check(!sniper_ow::HomeDrifted(0.0f, 0.0f, 499.0f, 0.0f),
           "Home drift under 500u stays valid");
+}
+
+static void Test_OwnershipFlip()
+{
+    Check(sniper_ow::OwnershipFlipRequiresRebuild(-1, true),
+          "friendly-to-hostile ownership flip invalidates");
+    Check(sniper_ow::OwnershipFlipRequiresRebuild(1, false),
+          "hostile-to-friendly ownership flip invalidates");
+    Check(!sniper_ow::OwnershipFlipRequiresRebuild(-1, false),
+          "hostile-to-hostile ownership does not invalidate");
+    Check(!sniper_ow::OwnershipFlipRequiresRebuild(-2, true),
+          "unknown ownership does not force a rebuild");
 }
 
 static void Test_ArrivalAndTimers()
@@ -171,6 +214,13 @@ static void Test_ArcAndCover()
     float clamped = sniper_ow::ClampArcToJambs(jamb, 0.0f, 0.0f, 0.0f,
                                                58.0f, 0.0f, 35.0f);
     Check(clamped < 35.0f, "jamb blocks the arc edge and clamps it inward");
+
+    TestProbe centerJamb;
+    centerJamb.Add(0.0f, 0.0f, 58.0f, 96.0f, 0.0f, 58.0f, true);
+    float centerClamped = sniper_ow::ClampArcToJambs(centerJamb, 0.0f, 0.0f,
+                                                     0.0f, 58.0f, 0.0f, 35.0f);
+    Check(Near(centerClamped, 0.0f),
+          "arc with a blocked center ray is rejected");
 }
 
 static void Test_RouteOverlap()
@@ -181,6 +231,35 @@ static void Test_RouteOverlap()
     Check(!sniper_ow::AabbOverlaps(100.0f, 100.0f, 200.0f, 200.0f,
                                    -50.0f, -50.0f, 50.0f, 50.0f),
           "disjoint objective box is not detected");
+
+    sniper_ow::Box2D pathBoxes[2] =
+    {
+        { 0.0f, 0.0f, 10.0f, 10.0f },
+        { 20.0f, 20.0f, 30.0f, 30.0f }
+    };
+    sniper_ow::Box2D objectiveBoxes[2] =
+    {
+        { 5.0f, 5.0f, 15.0f, 15.0f },
+        { 40.0f, 40.0f, 50.0f, 50.0f }
+    };
+    bool skipObjective[2] = { false, false };
+    Check(sniper_ow::PathOverlapsAnyBox(pathBoxes, 2, objectiveBoxes,
+                                        skipObjective, 2),
+          "path detects an unowned objective box");
+    skipObjective[0] = true;
+    Check(!sniper_ow::PathOverlapsAnyBox(pathBoxes, 2, objectiveBoxes,
+                                         skipObjective, 2),
+          "friendly objective box is skipped");
+}
+
+static void Test_HoldSupport()
+{
+    Check(sniper_ow::SniperHoldSupported(true, false),
+          "crouch-validated perch supports holding");
+    Check(sniper_ow::SniperHoldSupported(false, true),
+          "Sill cover supports holding");
+    Check(!sniper_ow::SniperHoldSupported(false, false),
+          "exposed standing perch does not support holding");
 }
 
 static void Test_AssignmentScore()
@@ -191,13 +270,16 @@ static void Test_AssignmentScore()
 
 int main()
 {
+    Test_CandidateSectors();
     Test_RangeScore();
     Test_Frontline();
     Test_HomeReadiness();
+    Test_OwnershipFlip();
     Test_ArrivalAndTimers();
     Test_CompromisedPerch();
     Test_ArcAndCover();
     Test_RouteOverlap();
+    Test_HoldSupport();
     Test_AssignmentScore();
 
     printf("sniper overwatch unit tests\n");

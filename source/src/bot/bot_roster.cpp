@@ -770,6 +770,8 @@ void CBotRoster::ResetSniperCaches()
             cache.ready = false;
             cache.pendingCount = cache.pendingCursor = 0;
             cache.bestCount = cache.accepted = cache.rejected = 0;
+            cache.rejectedHull = cache.rejectedVisibility = 0;
+            cache.rejectedCover = cache.rejectedInvalid = 0;
             cache.hasHomeSnapshot = false;
             cache.homeKnown[0] = cache.homeKnown[1] = cache.homeKnown[2] = false;
             cache.homeSnapshot[0] = cache.homeSnapshot[1] = cache.homeSnapshot[2] = Vector(0, 0, 0);
@@ -778,11 +780,6 @@ void CBotRoster::ResetSniperCaches()
         }
     m_sniperCacheTeamCursor = 1;
     m_sniperCacheObjCursor = 0;
-    // Home is relearned from each bot's next spawn sample. Clear the
-    // one-shot note flag too, or a bot that survives a round transition
-    // would never contribute to the new round's Home.
-    for (int i = 0; i < 64; i++)
-        if (m_bots[i].m_inUse) m_bots[i].m_notedSpawn = false;
 }
 
 void CBotRoster::RequestSniperCache(int team, int obj)
@@ -822,6 +819,8 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
     cache.ready = false;
     cache.pendingCount = cache.pendingCursor = 0;
     cache.bestCount = cache.accepted = cache.rejected = 0;
+    cache.rejectedHull = cache.rejectedVisibility = 0;
+    cache.rejectedCover = cache.rejectedInvalid = 0;
     cache.hasHomeSnapshot = false;
     const ObjPoint *op = g_Objectives.Get(obj);
     if (!op || !g_NavMesh.IsLoaded()) { cache.requested = false; cache.ready = false; return; }
@@ -846,6 +845,12 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
     Vector enemyHome = SniperEnemyHome(team, op);
     int objectiveArea = g_NavMesh.FindNearestArea(op->center);
     int objectiveComponent = g_NavMesh.ComponentForArea(objectiveArea);
+    const int kSectorCount = 8;
+    const int kPerSector = INSBOT_SNIPER_PENDING / kSectorCount;
+    int pendingSector[INSBOT_SNIPER_PENDING];
+    int sectorCount[kSectorCount] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    int sectorWorst[kSectorCount];
+    for (int s = 0; s < kSectorCount; s++) sectorWorst[s] = -1;
     for (int i = 0; i < g_NavMesh.GetTotalSniperSpotCount(); i++)
     {
         const HidingSpot *spot = g_NavMesh.GetSniperSpot(i);
@@ -853,21 +858,27 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
         if (objectiveComponent >= 0
             && g_NavMesh.ComponentForArea(spot->areaIdx) != objectiveComponent)
             continue;
-        float dx = spot->pos.x - op->center.x;
-        float dy = spot->pos.y - op->center.y;
+        // Area-center and authored samples can differ from the interpolated
+        // walkable surface on sloped nav geometry. Perches are player-origin
+        // positions, so evaluate every candidate against its owning area's Z.
+        Vector candidatePos(spot->pos.x, spot->pos.y,
+                            g_NavMesh.GetZ(spot->areaIdx,
+                                          spot->pos.x, spot->pos.y));
+        float dx = candidatePos.x - op->center.x;
+        float dy = candidatePos.y - op->center.y;
         float distance = sqrtf(dx * dx + dy * dy);
         float range = sniper_ow::RangeScore(distance);
         if (range < 0.0f) continue;
 
         sniper_ow::FrontlineRule frontline = sniper_ow::EvaluateFrontline(
-            spot->pos.x, spot->pos.y,
+            candidatePos.x, candidatePos.y,
             op->center.x, op->center.y,
             enemyHome.x, enemyHome.y,
             cache.friendlyOwned);
         if (!frontline.allowed) continue;
 
         const NavAreaData *area = g_NavMesh.Area(spot->areaIdx);
-        float elevation = spot->pos.z - op->minZ;
+        float elevation = candidatePos.z - op->minZ;
         float score = range * 60.0f + frontline.bonus;
         if (elevation > 0.0f)
         {
@@ -881,42 +892,82 @@ void CBotRoster::BuildSniperCacheCandidates(int team, int obj,
         if (spot->flags & SNIPER_SPOT_EDGE) score += 1.0f;
         if (area && area->connCount <= 3) score += 4.0f;
 
+        int sector = sniper_ow::CandidateSector(dx, dy, kSectorCount);
+
         bool duplicate = false;
         for (int p = 0; p < cache.pendingCount; p++)
         {
-            float qx = cache.pending[p].pos.x - spot->pos.x;
-            float qy = cache.pending[p].pos.y - spot->pos.y;
+            if (pendingSector[p] != sector) continue;
+            float qx = cache.pending[p].pos.x - candidatePos.x;
+            float qy = cache.pending[p].pos.y - candidatePos.y;
             if (qx * qx + qy * qy < 32.0f * 32.0f)
             {
                 duplicate = true;
                 if (score > cache.pending[p].cheapScore)
                 {
-                    cache.pending[p].pos = spot->pos;
+                    cache.pending[p].pos = candidatePos;
                     cache.pending[p].areaIdx = spot->areaIdx;
                     cache.pending[p].cheapScore = score;
                     cache.pending[p].flags = spot->flags;
+                    if (sectorWorst[sector] == p)
+                    {
+                        int worst = -1;
+                        for (int q = 0; q < cache.pendingCount; q++)
+                            if (pendingSector[q] == sector
+                                && (worst < 0
+                                    || cache.pending[q].cheapScore
+                                       < cache.pending[worst].cheapScore))
+                                worst = q;
+                        sectorWorst[sector] = worst;
+                    }
                 }
                 break;
             }
         }
         if (duplicate) continue;
 
-        int dst = cache.pendingCount;
-        if (dst >= INSBOT_SNIPER_PENDING)
+        int dst = -1;
+        if (sectorCount[sector] < kPerSector)
         {
-            dst = 0;
-            for (int p = 1; p < cache.pendingCount; p++)
-                if (cache.pending[p].cheapScore < cache.pending[dst].cheapScore) dst = p;
-            if (score <= cache.pending[dst].cheapScore) continue;
+            dst = cache.pendingCount++;
+            pendingSector[dst] = sector;
+            sectorCount[sector]++;
+            if (sectorWorst[sector] < 0
+                || score < cache.pending[sectorWorst[sector]].cheapScore)
+                sectorWorst[sector] = dst;
         }
-        else cache.pendingCount++;
-        cache.pending[dst].pos = spot->pos;
+        else
+        {
+            dst = sectorWorst[sector];
+            if (dst < 0 || score <= cache.pending[dst].cheapScore) continue;
+        }
+        cache.pending[dst].pos = candidatePos;
         cache.pending[dst].areaIdx = spot->areaIdx;
         cache.pending[dst].cheapScore = score;
         cache.pending[dst].flags = spot->flags;
+        if (sectorCount[sector] >= kPerSector)
+        {
+            int worst = -1;
+            for (int q = 0; q < cache.pendingCount; q++)
+                if (pendingSector[q] == sector
+                    && (worst < 0
+                        || cache.pending[q].cheapScore
+                           < cache.pending[worst].cheapScore))
+                    worst = q;
+            sectorWorst[sector] = worst;
+        }
     }
     cache.built = true;
     if (cache.pendingCount == 0) cache.ready = true;
+    int edgeCount = 0, cornerCount = 0, authoredCount = 0;
+    for (int i = 0; i < cache.pendingCount; i++)
+    {
+        if (cache.pending[i].flags & SNIPER_SPOT_EDGE) edgeCount++;
+        else if (cache.pending[i].flags & SNIPER_SPOT_CORNER) cornerCount++;
+        else if (!(cache.pending[i].flags & SNIPER_SPOT_GENERATED)) authoredCount++;
+    }
+    BotDbg("[insbots] sniper candidates team=%d obj=%d pending=%d edge=%d corner=%d authored=%d\n",
+           team, obj, cache.pendingCount, edgeCount, cornerCount, authoredCount);
 }
 
 static bool SniperHullClear(const Vector &pos, float height)
@@ -924,8 +975,14 @@ static bool SniperHullClear(const Vector &pos, float height)
     CTraceFilterWorldAndPropsOnly filter;
     Ray_t ray;
     trace_t tr;
-    ray.Init(pos + Vector(0, 0, 1), pos + Vector(0, 0, 1),
-             Vector(-16, -16, 0), Vector(16, 16, height));
+    // Nav Z can sit a unit or two above the collision floor. Start the hull
+    // at step height so the ground brush cannot report the whole player solid,
+    // while keeping the top of the tested volume at the requested height.
+    const float footClearance = 8.0f;
+    float testHeight = height > footClearance ? height - footClearance : 0.0f;
+    ray.Init(pos + Vector(0, 0, footClearance),
+             pos + Vector(0, 0, footClearance),
+             Vector(-16, -16, 0), Vector(16, 16, testHeight));
     enginetrace->TraceRay(ray, MASK_PLAYERSOLID, &filter, &tr);
     return !tr.startsolid && !tr.allsolid && tr.fraction >= 1.0f;
 }
@@ -958,8 +1015,9 @@ public:
 
 bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
                                          const SniperPendingCandidate &candidate,
-                                         SniperPerch &out)
+                                         SniperPerch &out, int &rejectStage)
 {
+    rejectStage = 4;
     const ObjPoint *op = g_Objectives.Get(obj);
     if (!op || !enginetrace) return false;
     EngineSniperProbe probe;
@@ -1005,11 +1063,13 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
     Vector bestTarget = targets[0];
     bool bestVisibleMask[8] = { false, false, false, false, false, false, false, false };
     float bestEyeHeight = heights[0];
+    bool anyHullClear = false;
     for (int stance = 0; stance < 2; stance++)
     {
         float hullHeight = stance == 0 ? 72.0f : 36.0f;
         if (!probe.HullClear(candidate.pos.x, candidate.pos.y,
                              candidate.pos.z, hullHeight)) continue;
+        anyHullClear = true;
         int visible = 0, useful = 0;
         Vector preferred = targets[0];
         bool preferredUseful = false;
@@ -1039,7 +1099,11 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
             for (int t = 0; t < 8; t++) bestVisibleMask[t] = visibleMask[t];
         }
     }
-    if (bestStance == SNIPER_STANCE_NONE) return false;
+    if (bestStance == SNIPER_STANCE_NONE)
+    {
+        rejectStage = anyHullClear ? 2 : 1;
+        return false;
+    }
 
     bool hasSillCover = (bestStance == SNIPER_STANCE_STAND)
                       && sniper_ow::HasSillCover(
@@ -1061,7 +1125,11 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
             coverBlocked[i] = true;
         }
     }
-    if (coverHits >= 7) return false;
+    if (coverHits >= 7)
+    {
+        rejectStage = 3;
+        return false;
+    }
 
     float objectiveBearing = atan2f(op->center.y - candidate.pos.y,
                                     op->center.x - candidate.pos.x)
@@ -1092,6 +1160,7 @@ bool CBotRoster::EvaluateSniperCandidate(int team, int obj,
     out.yawCenter = arc.centerDeg;
     out.yawHalfSpan = clampedHalfSpan;
     out.score = candidate.cheapScore + bestVisible * 9.0f + bestUseful * 2.0f + coverScore;
+    rejectStage = 0;
     return true;
 }
 
@@ -1130,7 +1199,7 @@ void CBotRoster::UpdateSniperCaches(float now)
                 }
             }
             int relation = g_Objectives.Relation(obj, team);
-            if (relation >= 0 && ((relation > 0) != cache.friendlyOwned))
+            if (sniper_ow::OwnershipFlipRequiresRebuild(relation, cache.friendlyOwned))
                 invalid = true;
             if (invalid)
             {
@@ -1139,19 +1208,31 @@ void CBotRoster::UpdateSniperCaches(float now)
                 cache.hasHomeSnapshot = false;
                 cache.pendingCount = cache.pendingCursor = 0;
                 cache.bestCount = cache.accepted = cache.rejected = 0;
+                cache.rejectedHull = cache.rejectedVisibility = 0;
+                cache.rejectedCover = cache.rejectedInvalid = 0;
             }
         }
 
         if (cache.ready) continue;
         if (!cache.built)
         {
+            int enemyTeam = 3 - team;
+            bool teamHomeKnown = (team >= 1 && team <= 2
+                                  && g_Objectives.m_homeSamples[team] > 0);
+            bool enemyHomeKnown = (enemyTeam >= 1 && enemyTeam <= 2
+                                   && g_Objectives.m_homeSamples[enemyTeam] > 0);
+            if (!sniper_ow::CacheReady(teamHomeKnown, enemyHomeKnown,
+                                       now, cache.readyFallbackAt))
+                continue;
             BuildSniperCacheCandidates(team, obj, cache);
             if (!cache.built) continue;
         }
         while (cache.pendingCursor < cache.pendingCount && budget-- > 0)
         {
             SniperPerch perch;
-            if (EvaluateSniperCandidate(team, obj, cache.pending[cache.pendingCursor], perch))
+            int rejectStage = 0;
+            if (EvaluateSniperCandidate(team, obj, cache.pending[cache.pendingCursor],
+                                        perch, rejectStage))
             {
                 cache.accepted++;
                 int insert = 0;
@@ -1164,14 +1245,24 @@ void CBotRoster::UpdateSniperCaches(float now)
                     if (cache.bestCount < INSBOT_SNIPER_BEST) cache.bestCount++;
                 }
             }
-            else cache.rejected++;
+            else
+            {
+                cache.rejected++;
+                if (rejectStage == 1) cache.rejectedHull++;
+                else if (rejectStage == 2) cache.rejectedVisibility++;
+                else if (rejectStage == 3) cache.rejectedCover++;
+                else cache.rejectedInvalid++;
+            }
             cache.pendingCursor++;
         }
         if (cache.pendingCursor >= cache.pendingCount)
         {
             cache.ready = true;
-            BotDbg("[insbots] sniper cache team=%d obj=%d candidates=%d accepted=%d best=%d\n",
-                   team, obj, cache.pendingCount, cache.accepted, cache.bestCount);
+            BotDbg("[insbots] sniper cache team=%d obj=%d candidates=%d accepted=%d best=%d"
+                   " reject[hull=%d vis=%d cover=%d invalid=%d]\n",
+                   team, obj, cache.pendingCount, cache.accepted, cache.bestCount,
+                   cache.rejectedHull, cache.rejectedVisibility,
+                   cache.rejectedCover, cache.rejectedInvalid);
         }
     }
 }
@@ -1193,19 +1284,44 @@ bool CBotRoster::IsSniperPerchReserved(const CInsBot *requester, int team,
     return false;
 }
 
-static bool SniperPathClearsObjective(const int *path, int pathLen,
-                                      const ObjPoint *op, bool friendlyOwned)
+static bool SniperPathClearsObjectives(const int *path, int pathLen, int team)
 {
-    if (!op || friendlyOwned) return true;
+    if (pathLen > INSBOT_MAX_PATH * 4) return false;
+
+    sniper_ow::Box2D pathBoxes[INSBOT_MAX_PATH * 4];
+    int pathCount = 0;
     for (int i = 0; i < pathLen; i++)
     {
         const NavAreaData *area = g_NavMesh.Area(path[i]);
         if (!area) continue;
-        if (sniper_ow::AabbOverlaps(area->lo.x, area->lo.y, area->hi.x, area->hi.y,
-                                    op->minX, op->minY, op->maxX, op->maxY))
-            return false;
+        pathBoxes[pathCount].loX = area->lo.x;
+        pathBoxes[pathCount].loY = area->lo.y;
+        pathBoxes[pathCount].hiX = area->hi.x;
+        pathBoxes[pathCount].hiY = area->hi.y;
+        pathCount++;
     }
-    return true;
+    if (pathCount == 0) return false;
+
+    sniper_ow::Box2D objectiveBoxes[INSBOT_SNIPER_OBJECTIVES];
+    bool skipObjective[INSBOT_SNIPER_OBJECTIVES];
+    int objectiveCount = g_Objectives.Count();
+    if (objectiveCount > INSBOT_SNIPER_OBJECTIVES)
+        objectiveCount = INSBOT_SNIPER_OBJECTIVES;
+    for (int o = 0; o < objectiveCount; o++)
+    {
+        const ObjPoint *op = g_Objectives.Get(o);
+        skipObjective[o] = !op || op->isSpawn
+                         || g_Objectives.Relation(o, team) > 0;
+        if (skipObjective[o]) continue;
+        objectiveBoxes[o].loX = op->minX;
+        objectiveBoxes[o].loY = op->minY;
+        objectiveBoxes[o].hiX = op->maxX;
+        objectiveBoxes[o].hiY = op->maxY;
+    }
+
+    return !sniper_ow::PathOverlapsAnyBox(pathBoxes, pathCount,
+                                         objectiveBoxes, skipObjective,
+                                         objectiveCount);
 }
 
 bool CBotRoster::AssignSniperPerch(CInsBot *bot, int team, int obj, float now)
@@ -1220,13 +1336,14 @@ bool CBotRoster::AssignSniperPerch(CInsBot *bot, int team, int obj, float now)
     if (botArea < 0) botArea = g_NavMesh.FindNearestArea(botPos);
     const ObjPoint *op = g_Objectives.Get(obj);
     if (!op) return false;
+    g_navDangerEnabled = false;
 
     bool tried[INSBOT_SNIPER_BEST];
     float costs[INSBOT_SNIPER_BEST];
     for (int i = 0; i < INSBOT_SNIPER_BEST; i++) tried[i] = false;
 
     int best = -1;
-    int path[INSBOT_MAX_PATH];
+    int path[INSBOT_MAX_PATH * 4];
     int pathLen = 0;
     float chosenCost = -1.0f;
     for (;;)
@@ -1256,12 +1373,17 @@ bool CBotRoster::AssignSniperPerch(CInsBot *bot, int team, int obj, float now)
         }
         if (best < 0) return false;
 
-        g_navDangerEnabled = false;
+        extern CfgVar insbot_danger_avoid;
+        g_navDangerPenalty = insbot_danger_avoid.GetFloat();
+        g_navDangerEnabled = g_navDangerPenalty > 0.0f;
         bool truncated = false;
         pathLen = g_NavMesh.BuildPath(botArea, cache.best[best].areaIdx,
-                                      path, INSBOT_MAX_PATH, 0, &truncated);
-        if (pathLen > 0
-            && SniperPathClearsObjective(path, pathLen, op, cache.friendlyOwned))
+                                      path, INSBOT_MAX_PATH * 4,
+                                      bot->m_pathSeed, &truncated);
+        g_navDangerEnabled = false;
+        bool clearsObjectives = pathLen > 0 && !truncated
+                             && SniperPathClearsObjectives(path, pathLen, team);
+        if (clearsObjectives)
         {
             chosenCost = costs[best];
             break;
@@ -1618,7 +1740,7 @@ void CBotRoster::UpdateCaptureCommitments(float now)
                 // Preserve overwatch specialists when any non-sniper can fill
                 // the capture body. The finite penalty still lets a sniper be
                 // selected when the team has no other reachable bot.
-                if (bot.IsSniper()) key += 100000.0f;
+                if (bot.HasSniperLoadout()) key += 100000.0f;
 
                 if (bestIdx < 0 || key < bestKey - 0.5f
                     || (fabsf(key - bestKey) <= 0.5f && bot.m_ordinal < bestOrdinal))

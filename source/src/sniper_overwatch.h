@@ -71,6 +71,17 @@ inline float RangeScore(float distance)
     return (3300.0f - distance) / 1100.0f;
 }
 
+inline int CandidateSector(float dx, float dy, int sectorCount)
+{
+    if (sectorCount <= 0) return 0;
+    float bearing = atan2f(dy, dx);
+    int sector = (int)((bearing + 3.14159265f) * (float)sectorCount
+                       / (2.0f * 3.14159265f));
+    if (sector < 0) sector = 0;
+    if (sector >= sectorCount) sector = sectorCount - 1;
+    return sector;
+}
+
 // The forward axis runs from the Objective toward enemy Home. d is the
 // candidate's signed projection on that axis: negative is the friendly side,
 // zero is abeam, positive is past the Objective toward enemy Home.
@@ -120,7 +131,16 @@ inline FrontlineRule EvaluateFrontline(float spotX, float spotY,
 inline bool CacheReady(bool teamHomeKnown, bool enemyHomeKnown,
                        float now, float fallbackAt)
 {
-    return (teamHomeKnown && enemyHomeKnown) || (now >= fallbackAt);
+    return (teamHomeKnown && enemyHomeKnown)
+        || (teamHomeKnown && now >= fallbackAt);
+}
+
+// A cache only distinguishes friendly-owned objectives from all others.  A
+// transition to hostile is therefore just as significant as a transition to
+// neutral, and must not be filtered out as an "unknown" relation.
+inline bool OwnershipFlipRequiresRebuild(int relation, bool wasFriendly)
+{
+    return relation != -2 && ((relation > 0) != wasFriendly);
 }
 
 inline bool HomeDrifted(float x1, float y1, float x2, float y2)
@@ -255,20 +275,33 @@ inline float CoverScore(const bool *blocked, int count, float objectiveBearingDe
     return score;
 }
 
+inline bool SniperHoldSupported(bool crouchValidated, bool hasSillCover)
+{
+    return crouchValidated || hasSillCover;
+}
+
 inline float ClampArcToJambs(ISniperProbe &probe, float x, float y, float z,
                              float eyeHeight, float centerDeg, float halfSpanDeg)
 {
     float half = halfSpanDeg;
+    if (half > kArcMaxHalfSpan) half = kArcMaxHalfSpan;
     while (half > 0.0f)
     {
-        float left = (centerDeg - half) * 3.14159265f / 180.0f;
-        float right = (centerDeg + half) * 3.14159265f / 180.0f;
-        float lx = x + cosf(left) * kSillProbeLength;
-        float ly = y + sinf(left) * kSillProbeLength;
-        float rx = x + cosf(right) * kSillProbeLength;
-        float ry = y + sinf(right) * kSillProbeLength;
-        if (probe.WorldLOS(x, y, z + eyeHeight, lx, ly, z + eyeHeight)
-            && probe.WorldLOS(x, y, z + eyeHeight, rx, ry, z + eyeHeight))
+        bool clear = true;
+        for (int sample = 0; sample <= 4; sample++)
+        {
+            float frac = (float)sample / 4.0f;
+            float angle = (centerDeg - half) + half * 2.0f * frac;
+            float rad = angle * 3.14159265f / 180.0f;
+            float px = x + cosf(rad) * kSillProbeLength;
+            float py = y + sinf(rad) * kSillProbeLength;
+            if (!probe.WorldLOS(x, y, z + eyeHeight, px, py, z + eyeHeight))
+            {
+                clear = false;
+                break;
+            }
+        }
+        if (clear)
             return half;
         half -= 2.0f;
     }
@@ -279,6 +312,32 @@ inline bool AabbOverlaps(float loX, float loY, float hiX, float hiY,
                          float objLoX, float objLoY, float objHiX, float objHiY)
 {
     return loX <= objHiX && hiX >= objLoX && loY <= objHiY && hiY >= objLoY;
+}
+
+struct Box2D
+{
+    float loX, loY, hiX, hiY;
+};
+
+inline bool PathOverlapsAnyBox(const Box2D *pathBoxes, int pathCount,
+                               const Box2D *boxes, const bool *skipBox,
+                               int boxCount)
+{
+    if (!pathBoxes || pathCount <= 0 || !boxes || boxCount <= 0)
+        return false;
+    for (int b = 0; b < boxCount; b++)
+    {
+        if (skipBox && skipBox[b]) continue;
+        for (int i = 0; i < pathCount; i++)
+        {
+            if (AabbOverlaps(pathBoxes[i].loX, pathBoxes[i].loY,
+                             pathBoxes[i].hiX, pathBoxes[i].hiY,
+                             boxes[b].loX, boxes[b].loY,
+                             boxes[b].hiX, boxes[b].hiY))
+                return true;
+        }
+    }
+    return false;
 }
 
 } // namespace sniper_ow

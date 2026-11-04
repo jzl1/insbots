@@ -86,6 +86,30 @@ bool CInsBot::AtSniperPerch(const Vector &pos) const
                               m_sniperSpot.x, m_sniperSpot.y, m_sniperSpot.z);
 }
 
+void CInsBot::ClearSniperPerchState()
+{
+    bool hadSniperHearingDetour = m_sniperHearingDetour;
+    m_haveSniperSpot = false;
+    m_sniperSpot = Vector(0, 0, 0);
+    m_sniperAimTarget = Vector(0, 0, 0);
+    m_sniperArea = -1;
+    m_sniperObj = -1;
+    m_sniperTeam = 0;
+    m_sniperScore = 0.0f;
+    m_sniperAssignedTime = 0.0f;
+    m_sniperArrived = false;
+    m_sniperTransitDeadline = 0.0f;
+    m_sniperYawCenter = 0.0f;
+    m_sniperYawHalfSpan = 0.0f;
+    m_sniperHasSillCover = false;
+    m_sniperKills = 0;
+    m_sniperStance = SNIPER_STANCE_NONE;
+    m_sniperHoldUntil = 0.0f;
+    m_sniperHearingDetour = false;
+    m_sniperHearingReturnTime = 0.0f;
+    if (hadSniperHearingDetour) m_hearUntil = 0.0f;
+}
+
 void CInsBot::AbandonSniperPerch(float now, bool compromised)
 {
     if (!m_haveSniperSpot) return;
@@ -99,15 +123,7 @@ void CInsBot::AbandonSniperPerch(float now, bool compromised)
     {
         m_sniperRelocateTime = now + 15.0f;
     }
-    m_haveSniperSpot = false;
-    m_sniperArrived = false;
-    m_sniperTransitDeadline = 0.0f;
-    m_sniperYawCenter = 0.0f;
-    m_sniperYawHalfSpan = 0.0f;
-    m_sniperHasSillCover = false;
-    m_sniperKills = 0;
-    m_sniperStance = SNIPER_STANCE_NONE;
-    m_sniperHoldUntil = 0.0f;
+    ClearSniperPerchState();
 }
 
 float CInsBot::Now() const

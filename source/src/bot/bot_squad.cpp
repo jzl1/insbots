@@ -57,7 +57,7 @@ void CInsBot::SetSquadAssignment(int leaderIndex, int slot, int order)
     m_lastSquadTime = 0.0f;
     m_lastLeaderPos = Vector(0, 0, 0);
     m_haveHoldSpot = false;
-    m_haveSniperSpot = false;
+    ClearSniperPerchState();
     m_patrolling = false;
 }
 

@@ -55,6 +55,10 @@ struct SniperObjectiveCache
     int bestCount;
     int accepted;
     int rejected;
+    int rejectedHull;
+    int rejectedVisibility;
+    int rejectedCover;
+    int rejectedInvalid;
     bool hasHomeSnapshot;
     bool homeKnown[3];
     Vector homeSnapshot[3];
@@ -252,6 +256,7 @@ public:
 
 private:
     friend class CBotRoster;
+    void ClearSniperPerchState();
     // join logic
     float  m_nextJoinCmdTime;
     int    m_joinCmdIndex;
@@ -969,7 +974,7 @@ private:
     void     BuildSniperCacheCandidates(int team, int obj, SniperObjectiveCache &cache);
     bool     EvaluateSniperCandidate(int team, int obj,
                                      const SniperPendingCandidate &candidate,
-                                     SniperPerch &out);
+                                     SniperPerch &out, int &rejectStage);
     bool     IsSniperPerchReserved(const CInsBot *requester, int team,
                                    const Vector &pos) const;
 };

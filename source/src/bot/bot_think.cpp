@@ -325,10 +325,8 @@ void CInsBot::ThinkDeadReset(float now)
     m_recoilRise = 0; m_burstShots = 0; m_wp = 0; m_wpToggledMode = false; m_wpName[0] = 0;
     m_primaryWeaponName[0] = 0;
     m_haveHoldSpot = false; m_patrolling = false;
-    m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
-    m_sniperArrived = false; m_sniperTransitDeadline = 0.0f;
-    m_sniperYawCenter = 0.0f; m_sniperYawHalfSpan = 0.0f;
-    m_sniperHasSillCover = false;
+    m_holdUntil = 0.0f;
+    ClearSniperPerchState();
     m_compromisedPerchPos = Vector(0, 0, 0); m_compromisedPerchUntil = 0.0f;
     m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
     m_avoidObj = -1; m_avoidUntil = 0.0f; m_nextTeleportOk = 0.0f;
@@ -366,20 +364,16 @@ void CInsBot::ThinkWeaponAndAmmo(float now)
             m_wp = found;
             m_wpToggledMode = false;
             m_fireAccum = 0.0f;
-            if (found->combatClass != WC_PISTOL && !(found->flags & WF_LAUNCHER))
+            bool isPrimaryWeapon = (found->combatClass != WC_PISTOL)
+                                && (!(found->flags & WF_LAUNCHER)
+                                    || found->combatClass == WC_RPG);
+            if (isPrimaryWeapon)
             {
                 _snprintf(m_primaryWeaponName, sizeof(m_primaryWeaponName), "%s", wn);
             }
             if (!HasSniperLoadout())
             {
-                m_haveSniperSpot = false;
-                m_sniperArrived = false;
-                m_sniperStance = SNIPER_STANCE_NONE;
-                m_sniperHoldUntil = 0.0f;
-                m_sniperTransitDeadline = 0.0f;
-                m_sniperYawCenter = 0.0f;
-                m_sniperYawHalfSpan = 0.0f;
-                m_sniperHasSillCover = false;
+                ClearSniperPerchState();
             }
             // No givecurrentammo here! The engine already gave us a full magazine on spawn.
         }
@@ -535,19 +529,13 @@ void CInsBot::ThinkAlive()
         m_moveArrivalLatched = false; m_haveLastNavMoveYaw = false;
         m_haveRescueLink = false; m_haveLastReportedLink = false;
         ResetLadderTraversal(true);
-        m_holdUntil = 0.0f; m_sniperHoldUntil = 0.0f;
+        m_holdUntil = 0.0f;
         m_dropHoldSince = 0.0f; m_dropHoldExpired = false;
         m_avoidObj = -1; m_avoidUntil = 0.0f;
         m_nextRpg = 0.0f; m_nextM203 = 0.0f;
-        m_haveSniperSpot = false; m_sniperRelocateTime = 0.0f; m_sniperKills = 0;
-        m_sniperArea = -1; m_sniperObj = -1; m_sniperTeam = 0;
-        m_sniperStance = SNIPER_STANCE_NONE; m_sniperScore = 0.0f;
-        m_sniperArrived = false; m_sniperTransitDeadline = 0.0f;
-        m_sniperYawCenter = 0.0f; m_sniperYawHalfSpan = 0.0f;
-        m_sniperHasSillCover = false;
+        ClearSniperPerchState();
+        m_sniperRelocateTime = 0.0f;
         m_compromisedPerchPos = Vector(0, 0, 0); m_compromisedPerchUntil = 0.0f;
-        m_sniperHearingDetour = false;
-        m_sniperHearingReturnTime = 0.0f;
         m_hearUntil = 0; m_nextHearTime = 0; m_hearTarget = Vector(0, 0, 0);
         m_doorYieldUntil = 0;   // leave the door queue
         m_doorYieldSlot = 0;
@@ -602,6 +590,13 @@ void CInsBot::ThinkAlive()
     }
 
     ThinkWeaponAndAmmo(now);
+
+    if (m_haveSniperSpot && !m_sniperArrived
+        && m_sniperTransitDeadline > 0.0f
+        && now >= m_sniperTransitDeadline)
+    {
+        AbandonSniperPerch(now, true);
+    }
 
     // ---------------- enemy scan (10 Hz) ----------------
     if (!insbot_detect.GetBool() && m_enemyIndex)
@@ -1498,7 +1493,11 @@ void CInsBot::ThinkAlive()
             }
         }
 
-        bool sniperHoldPosition = sniperAtPerch && !hurt;
+        bool sniperDuckCover = sniper_ow::SniperHoldSupported(
+            m_sniperStance == SNIPER_STANCE_CROUCH, m_sniperHasSillCover);
+        bool sniperHoldPosition = sniperAtPerch && !hurt
+                               && (!(suppressed || reloadActive)
+                                   || sniperDuckCover);
         bool  vulnerable = !sniperHoldPosition
                         && ((insbot_takecover.GetBool()
                              && (hurt || suppressed || (reloadActive && !suppressHold))
@@ -1528,8 +1527,7 @@ void CInsBot::ThinkAlive()
                         if (m_objGoal != PICK_ADVANCE) { m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f; }
                         m_objRepick = now + 5.0f;
                         m_haveHoldSpot = false;
-                        m_haveSniperSpot = false;
-                        m_sniperKills = 0;
+                        ClearSniperPerchState();
                     }
                 }
                 else if (m_objGoal < 0 || now >= m_objRepick)
@@ -1571,7 +1569,8 @@ void CInsBot::ThinkAlive()
 
             if (g_ForceGotoActive)
             {
-                m_haveCover = false; m_haveHoldSpot = false; m_haveSniperSpot = false;
+                m_haveCover = false; m_haveHoldSpot = false;
+                ClearSniperPerchState();
                 if (xyd(pos, g_ForceGotoPos) > 40.0f)
                     MoveToward(g_ForceGotoPos, fwd, side, buttons, view);
                 else
@@ -1724,7 +1723,8 @@ void CInsBot::ThinkAlive()
             {
                 if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
                 m_haveCover = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
-                m_haveHoldSpot = false; m_haveSniperSpot = false;
+                m_haveHoldSpot = false;
+                ClearSniperPerchState();
                 MoveToward(capOp->center, fwd, side, buttons, view);
             }
             else if (captureCornerTransit)
@@ -1738,7 +1738,9 @@ void CInsBot::ThinkAlive()
                 // Already on the point: hold and defend it. Never chase an
                 // enemy away from a capture zone we are committed to.
                 if (m_haveCover) g_Bots.ReleaseCoverOwnership((int)(this - g_Bots.m_bots));
-                m_haveCover = false; m_haveHoldSpot = false; m_haveSniperSpot = false; m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
+                m_haveCover = false; m_haveHoldSpot = false;
+                ClearSniperPerchState();
+                m_chosenCoverTier = 0; m_chosenCoverIsLow = false;
                 fwd = 0; side = 0;
             }
             else if (IsSquadFollower())
@@ -1885,7 +1887,8 @@ void CInsBot::ThinkAlive()
         bool investigating = false;
         if (g_ForceGotoActive)
         {
-            m_haveHoldSpot = false; m_haveSniperSpot = false;
+            m_haveHoldSpot = false;
+            ClearSniperPerchState();
             if (xyd(pos, g_ForceGotoPos) > 40.0f)
                 MoveToward(g_ForceGotoPos, fwd, side, buttons, view);
             else
@@ -1992,21 +1995,22 @@ void CInsBot::ThinkAlive()
                     if (m_objGoal != PICK_ADVANCE) { m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f; }
                     m_objRepick = now + 5.0f;
                     m_haveHoldSpot = false;
-                    m_haveSniperSpot = false; m_sniperKills = 0;
+                    ClearSniperPerchState();
                 }
             }
             else if (captureCommitted && m_objGoal < 0)
             {
                 m_objGoal = -1; m_objRepick = now;
                 m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
-                m_haveHoldSpot = false; m_haveSniperSpot = false;
+                m_haveHoldSpot = false;
+                ClearSniperPerchState();
             }
             if (m_objGoal >= 0 && (amAttacker || captureCommitted)
                 && g_Objectives.Relation(m_objGoal, myTeam) > 0)
             {
                 m_objGoal = -1; m_objRepick = now; m_haveHoldSpot = false;
                 m_haveAdvanceTarget = false; m_advanceTargetRefresh = 0.0f;
-                m_haveSniperSpot = false; m_sniperKills = 0; // Move up with the front line!
+                ClearSniperPerchState(); // Move up with the front line!
                 // Force the roster's cached target dirty as a defensive
                 // fallback; its pre-Think validity pass normally re-targets
                 // the capture detail in this same frame.
@@ -2026,7 +2030,7 @@ void CInsBot::ThinkAlive()
                 if (newGoal != m_objGoal)
                 {
                     m_haveHoldSpot = false;               // new point -> new spot
-                    m_haveSniperSpot = false; m_sniperKills = 0; // drop overwatch to follow squad
+                    ClearSniperPerchState(); // drop overwatch to follow squad
                     if (newGoal >= 0) Say(VOX_MOVEUP);    // "moving up" to a fresh objective
                 }
                 m_objGoal = newGoal;
